@@ -470,7 +470,7 @@ const BOM = [{"lv":0,"pn":"6910W021-001/B","pb":"6910W021-001","cat":"407383883"
 // ─── State ──────────────────────────────────────────────
 // procData pre-declared here; second <script> will populate it from localStorage
 var procData = {};
-const BUILD_VER = 'v20260610.1910';
+const BUILD_VER = 'v20260610.1920';
 let rows = [];
 let selIdx = -1;
 let curSort = {col:null,asc:true};
@@ -1256,14 +1256,16 @@ async function load3D(stpPath, container){
     await new Promise(r=>setTimeout(r,10)); // yield to UI
 
     const result=occInst.ReadStepFile(fc,null);
-    console.log('[3D] parse result: success='+result.success+' meshCount='+result.meshCount);
+    // occt-import-js API: result.meshes[] (array), not result.meshCount
+    const meshList=result.meshes||[];
+    console.log('[3D] parse success='+result.success+' meshes='+meshList.length);
     if(!result.success) throw new Error('STEP parse failed');
-    if(result.meshCount===0) throw new Error('STEP file contains no meshes (meshCount=0)');
+    if(meshList.length===0) throw new Error('STEP: no meshes returned');
 
     // Build three.js scene
     // Capture dimensions BEFORE clearing innerHTML (avoids 0x0 canvas after DOM update)
     const cw=container.clientWidth||600, ch=container.clientHeight||420;
-    console.log('[3D] container size at render time: '+cw+'x'+ch);
+    console.log('[3D] container: '+cw+'x'+ch);
     container.innerHTML='';
     const canvas=document.createElement('canvas');
     canvas.className='cad-canvas';
@@ -1283,13 +1285,13 @@ async function load3D(stpPath, container){
     const d1=new THREE.DirectionalLight(0xffffff,.8); d1.position.set(1,2,1.5); scene.add(d1);
     const d2=new THREE.DirectionalLight(0x8899ff,.3); d2.position.set(-1,-1,-1); scene.add(d2);
 
-    // Geometry
+    // Geometry from meshes array
     const group=new THREE.Group();
     const meshColors=[0x4488cc,0x44aacc,0x66bbdd,0x3377aa,0x5599bb];
     let totalTri=0;
-    for(let mi=0;mi<result.meshCount;mi++){
-      const mesh=result.GetMesh(mi);
-      console.log('[3D] mesh '+mi+' triangleCount='+mesh.triangleCount);
+    for(let mi=0;mi<meshList.length;mi++){
+      const mesh=meshList[mi];
+      console.log('[3D] mesh '+mi+' triangles='+mesh.triangleCount);
       if(!mesh.triangleCount) continue;
       totalTri+=mesh.triangleCount;
       const pos=[];
@@ -1306,7 +1308,8 @@ async function load3D(stpPath, container){
       const mat=new THREE.MeshPhongMaterial({color:col,shininess:40});
       group.add(new THREE.Mesh(geo,mat));
     }
-    if(totalTri===0) throw new Error('All meshes have 0 triangles — STEP geometry empty');
+    if(totalTri===0) throw new Error('All '+meshList.length+' meshes have 0 triangles');
+    console.log('[3D] total triangles: '+totalTri);
     scene.add(group);
 
     // Fit camera
