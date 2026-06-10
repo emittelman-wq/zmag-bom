@@ -352,7 +352,7 @@ tr.row-disabled .badge,tr.row-disabled .proc-btn{opacity:.5}
 <div class="topbar">
   <div>
     <div class="topbar-title">ZMAG BOM Viewer</div>
-    <div class="topbar-sub">6910W021-001 Rev B &nbsp;<span id="verBadge" style="font-size:9px;opacity:0.45;font-family:monospace">v20260610.1650</span></div>
+    <div class="topbar-sub">6910W021-001 Rev B &nbsp;<span id="verBadge" style="font-size:9px;opacity:0.45;font-family:monospace">v20260610.1710</span></div>
   </div>
   <div class="sep"></div>
 
@@ -470,7 +470,7 @@ const BOM = [{"lv":0,"pn":"6910W021-001/B","pb":"6910W021-001","cat":"407383883"
 // ─── State ──────────────────────────────────────────────
 // procData pre-declared here; second <script> will populate it from localStorage
 var procData = {};
-const BUILD_VER = 'v20260610.1650';
+const BUILD_VER = 'v20260610.1710';
 let rows = [];
 let selIdx = -1;
 let curSort = {col:null,asc:true};
@@ -1092,14 +1092,22 @@ function switchTab(tab){
       }
       const wrap=document.createElement('div'); wrap.className='pdf-frame'; wrap.style.flex='1';
       const frm=document.createElement('iframe'); frm.title='Drawing';
-      // Set src async: use Graph download URL when authenticated, else direct path
-      (async()=>{
-        if(_graphMode && _msalAcct){
-          try{ frm.src=(await _graphDownloadUrl(curItem.pdf.split('/').pop()))+'#zoom=page-fit&scrollbar=0'; return; }catch(e){}
-        }
-        frm.src=curItem.pdf+'#zoom=page-fit&scrollbar=0';
-      })();
       wrap.appendChild(frm); body.appendChild(wrap);
+      // Show loading state
+      wrap.innerHTML='<div style="padding:24px;text-align:center;color:var(--text3)">⏳ טוען שרטוט מ-SharePoint...</div>';
+      (async()=>{
+        try{
+          const url=await _graphDownloadUrl(curItem.pdf.split('/').pop());
+          wrap.innerHTML=''; wrap.appendChild(frm);
+          frm.src=url+'#zoom=page-fit&scrollbar=0';
+        }catch(e){
+          console.error('Graph drawing error:',e);
+          wrap.innerHTML=`<div style="padding:20px;text-align:center;color:var(--err,#f66);font-size:13px">
+            ⚠ שגיאה בטעינת שרטוט<br><small style="color:var(--text3)">${e.message}</small><br>
+            <small style="color:var(--text3);word-break:break-all">${curItem.pdf.split('/').pop()}</small>
+          </div>`;
+        }
+      })();
       body.style.display='flex'; body.style.flexDirection='column';
     } else {
       body.innerHTML='<div style="padding:24px;color:var(--text3);text-align:center">No drawing for this part.</div>';
@@ -3254,7 +3262,35 @@ async function _initMSAL() {
       setTimeout(function(){if(_dbgDiv.parentNode)_dbgDiv.remove();},20000);
     }
   }catch(e){}
-  if (_msalAcct) { await loadProcFromGraph(); }
+  if (_msalAcct) {
+    await loadProcFromGraph();
+    // Quick Graph API connectivity test — visible in console and status bar
+    setTimeout(async function(){
+      try{
+        var _tok=await _graphToken();
+        var _tr=await fetch('https://graph.microsoft.com/v1.0/sites/erezsei.sharepoint.com:/sites/SEI',
+          {headers:{Authorization:'Bearer '+_tok}});
+        var _td=await _tr.json();
+        if(_td.error){
+          setFileSyncStatus('⚠ Graph: '+_td.error.code+' — '+_td.error.message.slice(0,60),'err');
+          console.error('[Graph site test]',_td.error);
+        } else {
+          console.log('[Graph site test] OK:',_td.displayName||_td.name);
+          // Test folder access
+          var _fp=[...GRAPH_FOLDER_SEGS].map(encodeURIComponent).join('/');
+          var _fr=await fetch('https://graph.microsoft.com/v1.0/sites/erezsei.sharepoint.com:/sites/SEI:/drive/root:/'+_fp,
+            {headers:{Authorization:'Bearer '+_tok}});
+          var _fd=await _fr.json();
+          if(_fd.error){
+            setFileSyncStatus('⚠ Folder: '+_fd.error.code+' — '+_fd.error.message.slice(0,80),'err');
+            console.error('[Graph folder test]',_fd.error);
+          } else {
+            console.log('[Graph folder test] OK:',_fd.name);
+          }
+        }
+      }catch(e){console.error('[Graph test]',e);}
+    },1500);
+  }
 }
 
 async function _graphToken() {
