@@ -352,7 +352,7 @@ tr.row-disabled .badge,tr.row-disabled .proc-btn{opacity:.5}
 <div class="topbar">
   <div>
     <div class="topbar-title">ZMAG BOM Viewer</div>
-    <div class="topbar-sub">6910W021-001 Rev B &nbsp;<span id="verBadge" style="font-size:9px;opacity:0.45;font-family:monospace">v20260610.0933</span></div>
+    <div class="topbar-sub">6910W021-001 Rev B &nbsp;<span id="verBadge" style="font-size:9px;opacity:0.45;font-family:monospace">v20260610.1545</span></div>
   </div>
   <div class="sep"></div>
 
@@ -470,7 +470,7 @@ const BOM = [{"lv":0,"pn":"6910W021-001/B","pb":"6910W021-001","cat":"407383883"
 // ─── State ──────────────────────────────────────────────
 // procData pre-declared here; second <script> will populate it from localStorage
 var procData = {};
-const BUILD_VER = 'v20260610.0933';
+const BUILD_VER = 'v20260610.1545';
 let rows = [];
 let selIdx = -1;
 let curSort = {col:null,asc:true};
@@ -1067,6 +1067,15 @@ function switchTab(tab){
   if(!curItem) return;
 
   if(tab==='drawing'){
+    // Must be authenticated to load any drawing from SharePoint
+    if(!_graphMode || !_msalAcct){
+      body.innerHTML=`<div style="padding:32px;text-align:center;color:var(--text2)">
+        <div style="font-size:32px;margin-bottom:12px">🔑</div>
+        <div style="margin-bottom:16px">יש להתחבר עם Microsoft כדי לצפות בשרטוטים</div>
+        <button onclick="msalLogin()" style="background:var(--accent);color:#fff;border:none;border-radius:6px;padding:10px 24px;font-size:13px;cursor:pointer">התחבר עם Microsoft</button>
+      </div>`;
+      return;
+    }
     if(curItem.pdf){
       // PDF selector if multiple
       if(curItem.pdfs&&curItem.pdfs.length>1){
@@ -1092,18 +1101,22 @@ function switchTab(tab){
       })();
       wrap.appendChild(frm); body.appendChild(wrap);
       body.style.display='flex'; body.style.flexDirection='column';
-    } else if(!_graphMode || !_msalAcct) {
-      body.innerHTML=`<div style="padding:32px;text-align:center;color:var(--text2)">
-        <div style="font-size:32px;margin-bottom:12px">🔑</div>
-        <div style="margin-bottom:16px">יש להתחבר עם Microsoft כדי לצפות בשרטוטים</div>
-        <button onclick="msalLogin()" style="background:var(--accent);color:#fff;border:none;border-radius:6px;padding:10px 24px;font-size:13px;cursor:pointer">התחבר</button>
-      </div>`;
     } else {
       body.innerHTML='<div style="padding:24px;color:var(--text3);text-align:center">No drawing for this part.</div>';
     }
   }
 
   else if(tab==='cad'){
+    // Must be authenticated to load CAD files from SharePoint
+    if(!_graphMode || !_msalAcct){
+      body.innerHTML=`<div style="padding:32px;text-align:center;color:var(--text2)">
+        <div style="font-size:32px;margin-bottom:12px">🔑</div>
+        <div style="margin-bottom:16px">יש להתחבר עם Microsoft כדי לצפות בקבצי CAD</div>
+        <button onclick="msalLogin()" style="background:var(--accent);color:#fff;border:none;border-radius:6px;padding:10px 24px;font-size:13px;cursor:pointer">התחבר עם Microsoft</button>
+      </div>`;
+      return;
+    }
+    // (original cad tab continues below)
     const stpFiles=(curItem.cads||[]).filter(f=>/\.stp$|\.step$/i.test(f));
     const otherFiles=(curItem.cads||[]).filter(f=>!/\.stp$|\.step$/i.test(f));
     const allCads=curItem.cads||[];
@@ -3073,21 +3086,32 @@ var msal = (function(){
   function PCA(cfg){this._c=cfg;this._accts=_ss('_msal_a',[]);this._toks=_ss('_msal_t',{})}
 
   PCA.prototype.handleRedirectPromise=async function(){
+    // Step-by-step debug visible to user
+    var dbg=[];
+    var push=function(s){dbg.push(s);console.log('[MSAL]',s);};
     // Check both hash (fragment mode) and query string (query mode)
     var h=location.hash||'';
     var q=location.search||'';
+    push('hash='+(h||'(empty)')+' query='+(q||'(empty)'));
     var p=new URLSearchParams(h.slice(1));
     if(!p.get('code')&&!p.get('error')) p=new URLSearchParams(q.slice(1));
     var code=p.get('code'),err=p.get('error');
-    if(!code&&!err)return null;
+    if(!code&&!err){push('no code/error in URL → returning null'); sessionStorage.setItem('_msal_dbg',JSON.stringify(dbg)); return null;}
+    push('code found! length='+code.length);
     history.replaceState({},document.title,location.pathname);
-    if(err)throw new Error(p.get('error_description')||err);
+    if(err){push('error='+err); sessionStorage.setItem('_msal_dbg',JSON.stringify(dbg)); throw new Error(p.get('error_description')||err);}
     var cv=sessionStorage.getItem('_msal_cv')||localStorage.getItem('_msal_cv_bk');
-    if(!cv){ console.warn('MSAL: no code_verifier found'); return null; }
+    push('cv='+(cv?'✅ found (len='+cv.length+')':'❌ NOT FOUND'));
+    if(!cv){ push('FATAL: no code_verifier'); sessionStorage.setItem('_msal_dbg',JSON.stringify(dbg)); console.warn('MSAL: no code_verifier found'); return null; }
     var sc=_ss('_msal_sc',[]);
+    push('exchanging code for token...');
+    sessionStorage.setItem('_msal_dbg',JSON.stringify(dbg));
     var tok=await this._exchange(code,cv);
+    push('token received: access_token='+(tok.access_token?'✅':'❌')+' error='+(tok.error||'none'));
     sessionStorage.removeItem('_msal_cv');
     this._save(tok,sc);
+    push('saved. accounts='+this._accts.length);
+    sessionStorage.setItem('_msal_dbg',JSON.stringify(dbg));
     return{account:this._accts[0]};
   };
   PCA.prototype.getAllAccounts=function(){return this._accts};
@@ -3171,6 +3195,19 @@ async function _initMSAL() {
   _updateAuthUI();
   const _vb=document.getElementById('verBadge');
   if(_vb) _vb.textContent=BUILD_VER+' | '+(_msalAcct ? '✅ '+(_msalAcct.username||'ok') : '❌ not auth');
+  // Show auth debug panel (auto-hides after 20s, or click to dismiss)
+  try{
+    var _dbgLog=JSON.parse(sessionStorage.getItem('_msal_dbg')||'[]');
+    if(_dbgLog.length){
+      var _dbgDiv=document.createElement('div');
+      _dbgDiv.style.cssText='position:fixed;bottom:60px;right:12px;background:#1a1a2e;color:#cdd;padding:10px 14px;border-radius:8px;font-size:11px;font-family:monospace;max-width:380px;z-index:9999;border:1px solid #557;box-shadow:0 4px 16px #0006;cursor:pointer';
+      _dbgDiv.title='לחץ לסגירה';
+      _dbgDiv.innerHTML='<b style="color:#8ef">Auth Debug</b> <span style="float:right;opacity:.6">✕</span><br>'+_dbgLog.map(function(s){return '<div style="margin-top:2px">'+s+'</div>';}).join('');
+      _dbgDiv.onclick=function(){_dbgDiv.remove();};
+      document.body.appendChild(_dbgDiv);
+      setTimeout(function(){if(_dbgDiv.parentNode)_dbgDiv.remove();},20000);
+    }
+  }catch(e){}
   if (_msalAcct) { await loadProcFromGraph(); }
 }
 
