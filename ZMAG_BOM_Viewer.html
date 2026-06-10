@@ -470,7 +470,7 @@ const BOM = [{"lv":0,"pn":"6910W021-001/B","pb":"6910W021-001","cat":"407383883"
 // ─── State ──────────────────────────────────────────────
 // procData pre-declared here; second <script> will populate it from localStorage
 var procData = {};
-const BUILD_VER = 'v20260610.1820';
+const BUILD_VER = 'v20260610.1840';
 let rows = [];
 let selIdx = -1;
 let curSort = {col:null,asc:true};
@@ -1084,7 +1084,16 @@ function switchTab(tab){
           const b=document.createElement('button'); b.className='pdf-btn'+(i===0?' on':'');
           b.textContent=p.split('/').pop().replace('.pdf',''); b.title=b.textContent;
           b.onclick=async()=>{ sel.querySelectorAll('.pdf-btn').forEach(x=>x.classList.remove('on')); b.classList.add('on');
-            if(_graphMode && _msalAcct){ try{ frm.src=(await _graphDownloadUrl(p))+'#zoom=page-fit&scrollbar=0'; return; }catch(e){} }
+            if(_graphMode && _msalAcct){
+              try{
+                const dlUrl=await _graphDownloadUrl(p);
+                const resp=await fetch(dlUrl); const blob=await resp.blob();
+                const blobUrl=URL.createObjectURL(blob);
+                frm.src=blobUrl+'#zoom=page-fit&scrollbar=0';
+                frm.onload=()=>URL.revokeObjectURL(blobUrl);
+                return;
+              }catch(e){}
+            }
             frm.src=p+'#zoom=page-fit&scrollbar=0'; };
           sel.appendChild(b);
         });
@@ -1092,14 +1101,20 @@ function switchTab(tab){
       }
       const wrap=document.createElement('div'); wrap.className='pdf-frame'; wrap.style.flex='1';
       const frm=document.createElement('iframe'); frm.title='Drawing';
-      wrap.appendChild(frm); body.appendChild(wrap);
-      // Show loading state
+      body.appendChild(wrap);
       wrap.innerHTML='<div style="padding:24px;text-align:center;color:var(--text3)">⏳ טוען שרטוט מ-SharePoint...</div>';
       (async()=>{
         try{
-          const url=await _graphDownloadUrl(curItem.pdf);
+          const dlUrl=await _graphDownloadUrl(curItem.pdf);
+          // Fetch as Blob → create blob URL for inline iframe display
+          // (avoids Content-Disposition:attachment from SharePoint download URLs)
+          const resp=await fetch(dlUrl);
+          if(!resp.ok) throw new Error('Fetch HTTP '+resp.status);
+          const blob=await resp.blob();
+          const blobUrl=URL.createObjectURL(blob);
           wrap.innerHTML=''; wrap.appendChild(frm);
-          frm.src=url+'#zoom=page-fit&scrollbar=0';
+          frm.src=blobUrl+'#zoom=page-fit&scrollbar=0';
+          frm.onload=()=>URL.revokeObjectURL(blobUrl); // cleanup
         }catch(e){
           console.error('Graph drawing error:',e);
           wrap.innerHTML=`<div style="padding:20px;text-align:center;color:var(--err,#f66);font-size:13px">
