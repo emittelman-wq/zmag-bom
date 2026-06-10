@@ -352,7 +352,7 @@ tr.row-disabled .badge,tr.row-disabled .proc-btn{opacity:.5}
 <div class="topbar">
   <div>
     <div class="topbar-title">ZMAG BOM Viewer</div>
-    <div class="topbar-sub">6910W021-001 Rev B</div>
+    <div class="topbar-sub">6910W021-001 Rev B &nbsp;<span id="verBadge" style="font-size:9px;opacity:0.45;font-family:monospace">v20260610.0933</span></div>
   </div>
   <div class="sep"></div>
 
@@ -470,6 +470,7 @@ const BOM = [{"lv":0,"pn":"6910W021-001/B","pb":"6910W021-001","cat":"407383883"
 // ─── State ──────────────────────────────────────────────
 // procData pre-declared here; second <script> will populate it from localStorage
 var procData = {};
+const BUILD_VER = 'v20260610.0933';
 let rows = [];
 let selIdx = -1;
 let curSort = {col:null,asc:true};
@@ -3168,6 +3169,8 @@ async function _initMSAL() {
   // Set _graphMode BEFORE _updateAuthUI so UI reflects correct state
   if (_msalAcct) _graphMode = true;
   _updateAuthUI();
+  const _vb=document.getElementById('verBadge');
+  if(_vb) _vb.textContent=BUILD_VER+' | '+(_msalAcct ? '✅ '+(_msalAcct.username||'ok') : '❌ not auth');
   if (_msalAcct) { await loadProcFromGraph(); }
 }
 
