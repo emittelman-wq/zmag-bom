@@ -3181,4 +3181,15 @@ function _updateAuthUI() {
   } else {
     btn.textContent = '🔑 התחבר';
     btn.title = 'התחבר עם חשבון Microsoft';
-    btn.classList.add('signed
+    btn.classList.add('signed-out');
+    btn.onclick = msalLogin;
+    if (status) status.textContent = '';
+    const syncBtn = document.getElementById('syncBtn');
+    if (syncBtn) syncBtn.style.display = 'none';
+  }
+}
+
+window.addEventListener('load', function() { _initMSAL(); });
+</script>
+</body>
+</html>
