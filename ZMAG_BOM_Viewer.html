@@ -470,7 +470,7 @@ const BOM = [{"lv":0,"pn":"6910W021-001/B","pb":"6910W021-001","cat":"407383883"
 // ─── State ──────────────────────────────────────────────
 // procData pre-declared here; second <script> will populate it from localStorage
 var procData = {};
-const BUILD_VER = 'v20260610.1850';
+const BUILD_VER = 'v20260610.1900';
 let rows = [];
 let selIdx = -1;
 let curSort = {col:null,asc:true};
@@ -1259,6 +1259,8 @@ async function load3D(stpPath, container){
     if(!result.success) throw new Error('STEP parse failed');
 
     // Build three.js scene
+    // Capture dimensions BEFORE clearing innerHTML (avoids 0x0 canvas after DOM update)
+    const cw=container.clientWidth||600, ch=container.clientHeight||420;
     container.innerHTML='';
     const canvas=document.createElement('canvas');
     canvas.className='cad-canvas';
@@ -1266,12 +1268,12 @@ async function load3D(stpPath, container){
 
     const renderer=new THREE.WebGLRenderer({canvas,antialias:true});
     renderer.setPixelRatio(Math.min(window.devicePixelRatio,2));
-    renderer.setSize(container.clientWidth,container.clientHeight,false);
+    renderer.setSize(cw,ch,false);
     renderer.setClearColor(0x0d0f18);
     activeRenderer=renderer;
 
     const scene=new THREE.Scene();
-    const camera=new THREE.PerspectiveCamera(45,container.clientWidth/container.clientHeight,.001,1e7);
+    const camera=new THREE.PerspectiveCamera(45,cw/ch,.001,1e7);
 
     // Lights
     scene.add(new THREE.AmbientLight(0xffffff,.5));
@@ -1323,13 +1325,14 @@ async function load3D(stpPath, container){
     function animate(){ animId=requestAnimationFrame(animate); ctrl.update(); renderer.render(scene,camera); }
     animate();
 
-    // Resize observer
+    // Resize observer — also triggers once on mount to fix any initial 0-size
     const ro=new ResizeObserver(()=>{
-      renderer.setSize(container.clientWidth,container.clientHeight,false);
-      camera.aspect=container.clientWidth/container.clientHeight;
-      camera.updateProjectionMatrix();
+      const rw=container.clientWidth||cw, rh=container.clientHeight||ch;
+      if(rw>0&&rh>0){ renderer.setSize(rw,rh,false); camera.aspect=rw/rh; camera.updateProjectionMatrix(); }
     });
     ro.observe(container);
+    // Force initial resize after layout settles
+    requestAnimationFrame(()=>{ const rw=container.clientWidth||cw,rh=container.clientHeight||ch; if(rw>0&&rh>0){ renderer.setSize(rw,rh,false); camera.aspect=rw/rh; camera.updateProjectionMatrix(); } });
 
     // Toolbar
     const tb=document.createElement('div'); tb.className='viewer-toolbar';
