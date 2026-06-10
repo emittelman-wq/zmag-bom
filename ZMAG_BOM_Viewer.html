@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-  <script src="https://alcdn.msauth.net/browser/2.38.3/js/msal-browser.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@azure/msal-browser@3.28.1/dist/msal-browser.min.js"></script>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ZMAG BOM Viewer — 6910W021-001 Rev B</title>
 <style>
@@ -3015,7 +3015,7 @@ async function _initMSAL() {
     },
     cache: { cacheLocation: 'localStorage', storeAuthStateInCookie: false }
   });
-  await _msalApp.initialize();
+  if (typeof _msalApp.initialize === 'function') await _msalApp.initialize();
   try {
     const resp = await _msalApp.handleRedirectPromise();
     if (resp) _msalAcct = resp.account;
@@ -3041,7 +3041,10 @@ async function _graphToken() {
 }
 
 async function msalLogin() {
-  if (!_msalApp) { setFileSyncStatus('⚠ MSAL לא נטען', 'err'); return; }
+  if (typeof msal === 'undefined' || !_msalApp) {
+    alert('MSAL library failed to load. Check your internet connection and try refreshing.');
+    return;
+  }
   try {
     const r = await _msalApp.loginPopup({ scopes: GRAPH_SCOPES });
     _msalAcct = r.account;
