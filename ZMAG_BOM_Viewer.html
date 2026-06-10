@@ -352,7 +352,7 @@ tr.row-disabled .badge,tr.row-disabled .proc-btn{opacity:.5}
 <div class="topbar">
   <div>
     <div class="topbar-title">ZMAG BOM Viewer</div>
-    <div class="topbar-sub">6910W021-001 Rev B &nbsp;<span id="verBadge" style="font-size:9px;opacity:0.45;font-family:monospace">v20260610.1710</span></div>
+    <div class="topbar-sub">6910W021-001 Rev B &nbsp;<span id="verBadge" style="font-size:9px;opacity:0.45;font-family:monospace">v20260610.1730</span></div>
   </div>
   <div class="sep"></div>
 
@@ -470,7 +470,7 @@ const BOM = [{"lv":0,"pn":"6910W021-001/B","pb":"6910W021-001","cat":"407383883"
 // ─── State ──────────────────────────────────────────────
 // procData pre-declared here; second <script> will populate it from localStorage
 var procData = {};
-const BUILD_VER = 'v20260610.1710';
+const BUILD_VER = 'v20260610.1730';
 let rows = [];
 let selIdx = -1;
 let curSort = {col:null,asc:true};
@@ -3076,11 +3076,36 @@ function _graphItemUrl(filename) {
 // Get a pre-authenticated download URL (no auth header needed – works as iframe src)
 async function _graphDownloadUrl(filename) {
   const token = await _graphToken();
-  const r = await fetch(_graphItemUrl(filename), { headers: { Authorization: 'Bearer ' + token } });
-  if (!r.ok) throw new Error('File not found: ' + filename + ' (' + r.status + ')');
-  const d = await r.json();
-  if (!d['@microsoft.graph.downloadUrl']) throw new Error('No download URL for ' + filename);
-  return d['@microsoft.graph.downloadUrl'];
+  // Primary: site-path approach
+  const url1 = _graphItemUrl(filename);
+  const r1 = await fetch(url1, { headers: { Authorization: 'Bearer ' + token } });
+  if (r1.ok) {
+    const d = await r1.json();
+    if (d['@microsoft.graph.downloadUrl']) return d['@microsoft.graph.downloadUrl'];
+    throw new Error('No downloadUrl in response for ' + filename);
+  }
+  // Collect full error for diagnosis
+  let errBody1 = {};
+  try { errBody1 = await r1.json(); } catch(e) {}
+  const errMsg1 = (errBody1.error && (errBody1.error.code + ': ' + errBody1.error.message)) || r1.status;
+  console.warn('[Graph primary]', r1.status, errMsg1, url1);
+  // Fallback: try via me/drives to find the SharePoint drive automatically
+  try {
+    const driveR = await fetch('https://graph.microsoft.com/v1.0/me/drives', {headers:{Authorization:'Bearer '+token}});
+    const driveD = await driveR.json();
+    const drives = driveD.value || [];
+    console.log('[Graph drives]', drives.map(d=>d.name+'/'+d.driveType+'/'+d.id));
+    const folderPath = [...GRAPH_FOLDER_SEGS, filename].map(encodeURIComponent).join('/');
+    for (const drive of drives) {
+      const url2 = 'https://graph.microsoft.com/v1.0/drives/' + drive.id + '/root:/' + folderPath;
+      const r2 = await fetch(url2, {headers:{Authorization:'Bearer '+token}});
+      if (r2.ok) {
+        const d2 = await r2.json();
+        if (d2['@microsoft.graph.downloadUrl']) { console.log('[Graph] fallback drive worked:', drive.name); return d2['@microsoft.graph.downloadUrl']; }
+      }
+    }
+  } catch(fe) { console.warn('[Graph fallback]', fe); }
+  throw new Error('Graph ' + r1.status + ': ' + errMsg1 + ' | ' + filename);
 }
 
 // ── Inline MSAL-compatible OAuth2 PKCE (no CDN required) ─────────────────────
