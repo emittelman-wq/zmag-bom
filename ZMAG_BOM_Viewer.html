@@ -3005,28 +3005,79 @@ function _graphFileUrl() {
   return 'https://graph.microsoft.com/v1.0/sites/erezsei.sharepoint.com:/sites/SEI:/drive/root:/' + path + ':/content';
 }
 
-async function _loadMSAL() {
-  if (typeof msal !== 'undefined') return true;
-  const cdns = [
-    'https://cdn.jsdelivr.net/npm/@azure/msal-browser@3.28.1/dist/msal-browser.min.js',
-    'https://unpkg.com/@azure/msal-browser@3.28.1/dist/msal-browser.min.js'
-  ];
-  for (const src of cdns) {
-    try {
-      await new Promise((resolve, reject) => {
-        const s = document.createElement('script');
-        s.src = src; s.onload = resolve; s.onerror = reject;
-        document.head.appendChild(s);
-      });
-      if (typeof msal !== 'undefined') return true;
-    } catch(e) { console.warn('MSAL CDN failed:', src); }
-  }
-  return false;
-}
+// ── Inline MSAL-compatible OAuth2 PKCE (no CDN required) ─────────────────────
+// Implements only the methods used by this app via redirect flow.
+// Login redirects to Microsoft → returns to this page with #code= → auto-handled.
+var msal = (function(){
+  function _ss(k,d){try{return JSON.parse(sessionStorage.getItem(k))||d}catch(e){return d}}
+  function _sv(k,v){sessionStorage.setItem(k,JSON.stringify(v))}
+  function _cv(){var a=new Uint8Array(32);crypto.getRandomValues(a);return btoa(String.fromCharCode.apply(null,a)).replace(/\+/g,'-').replace(/\//g,'_').replace(/=/g,'')}
+  async function _ch(v){var d=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(v));return btoa(String.fromCharCode.apply(null,new Uint8Array(d))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=/g,'')}
+
+  function PCA(cfg){this._c=cfg;this._accts=_ss('_msal_a',[]);this._toks=_ss('_msal_t',{})}
+
+  PCA.prototype.handleRedirectPromise=async function(){
+    var h=location.hash;if(!h)return null;
+    var p=new URLSearchParams(h.slice(1));
+    var code=p.get('code'),err=p.get('error');
+    if(!code&&!err)return null;
+    history.replaceState({},document.title,location.pathname+location.search);
+    if(err)throw new Error(p.get('error_description')||err);
+    var cv=sessionStorage.getItem('_msal_cv');if(!cv)return null;
+    var sc=_ss('_msal_sc',[]);
+    var tok=await this._exchange(code,cv);
+    sessionStorage.removeItem('_msal_cv');
+    this._save(tok,sc);
+    return{account:this._accts[0]};
+  };
+  PCA.prototype.getAllAccounts=function(){return this._accts};
+  PCA.prototype.loginPopup=async function(req){await this._go(req.scopes||[]);return new Promise(function(){})};
+  PCA.prototype.acquireTokenSilent=async function(req){
+    var k=(req.scopes||[]).slice().sort().join(' ');
+    var t=this._toks[k]||this._toks['$'];
+    if(t&&t.e>Date.now())return{accessToken:t.v,account:this._accts[0]};
+    throw new Error('no_token');
+  };
+  PCA.prototype.acquireTokenPopup=async function(req){await this._go(req.scopes||[]);return new Promise(function(){})};
+  PCA.prototype.logoutPopup=async function(){this._accts=[];this._toks={};_sv('_msal_a',[]);_sv('_msal_t',{})};
+
+  PCA.prototype._go=async function(scopes){
+    var v=_cv(),ch=await _ch(v);
+    sessionStorage.setItem('_msal_cv',v);_sv('_msal_sc',scopes);
+    var tid=this._c.auth.authority.split('/').pop();
+    location.href='https://login.microsoftonline.com/'+tid+'/oauth2/v2.0/authorize?'+
+      new URLSearchParams({client_id:this._c.auth.clientId,response_type:'code',
+        redirect_uri:this._c.auth.redirectUri,scope:scopes.join(' '),
+        code_challenge:ch,code_challenge_method:'S256',response_mode:'fragment'});
+  };
+  PCA.prototype._exchange=async function(code,cv){
+    var tid=this._c.auth.authority.split('/').pop();
+    var r=await fetch('https://login.microsoftonline.com/'+tid+'/oauth2/v2.0/token',{
+      method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},
+      body:new URLSearchParams({client_id:this._c.auth.clientId,code:code,
+        grant_type:'authorization_code',redirect_uri:this._c.auth.redirectUri,code_verifier:cv})});
+    var d=await r.json();if(d.error)throw new Error(d.error_description||d.error);return d;
+  };
+  PCA.prototype._save=function(tok,scopes){
+    if(tok.id_token){try{
+      var b=tok.id_token.split('.')[1].replace(/-/g,'+').replace(/_/g,'/');
+      while(b.length%4)b+='=';
+      var pp=JSON.parse(atob(b));
+      this._accts=[{username:pp.preferred_username||pp.upn||pp.email||'user',name:pp.name||'',homeAccountId:pp.oid||''}];
+      _sv('_msal_a',this._accts);
+    }catch(e){}}
+    if(tok.access_token){
+      var k=(scopes||[]).slice().sort().join(' ')||'$';
+      var entry={v:tok.access_token,e:Date.now()+(tok.expires_in||3600)*1000};
+      this._toks[k]=entry;this._toks['$']=entry;
+      _sv('_msal_t',this._toks);
+    }
+  };
+  return{PublicClientApplication:PCA};
+})();
+// ── End inline MSAL ──────────────────────────────────────────────────────────
 
 async function _initMSAL() {
-  const ok = await _loadMSAL();
-  if (!ok) { console.warn('MSAL failed to load from all CDNs'); return; }
   _msalApp = new msal.PublicClientApplication({
     auth: {
       clientId: MSAL_CLIENT_ID,
@@ -3035,7 +3086,7 @@ async function _initMSAL() {
     },
     cache: { cacheLocation: 'localStorage', storeAuthStateInCookie: false }
   });
-  if (typeof _msalApp.initialize === 'function') await _msalApp.initialize();
+  // initialize() not needed for inline impl
   try {
     const resp = await _msalApp.handleRedirectPromise();
     if (resp) _msalAcct = resp.account;
@@ -3061,19 +3112,13 @@ async function _graphToken() {
 }
 
 async function msalLogin() {
-  if (!_msalApp) {
-    setFileSyncStatus('⏳ טוען ספריית אימות...', '');
-    const ok = await _loadMSAL();
-    if (!ok) { alert('MSAL library failed to load from all CDNs. Check your internet connection.'); return; }
-    await _initMSAL();
-    if (!_msalApp) { alert('MSAL initialization failed.'); return; }
-  }
+  if (!_msalApp) await _initMSAL();
+  if (!_msalApp) { alert('Auth initialization failed.'); return; }
+  // loginPopup() uses redirect flow — page navigates to Microsoft and returns.
+  // _initMSAL() handles the return via handleRedirectPromise() on page reload.
+  setFileSyncStatus('↗ מעביר לכניסת Microsoft...', '');
   try {
-    const r = await _msalApp.loginPopup({ scopes: GRAPH_SCOPES });
-    _msalAcct = r.account;
-    _graphMode = true;
-    _updateAuthUI();
-    await loadProcFromGraph();
+    await _msalApp.loginPopup({ scopes: GRAPH_SCOPES });
   } catch(e) { setFileSyncStatus('⚠ ' + (e.message || 'Login failed'), 'err'); }
 }
 
