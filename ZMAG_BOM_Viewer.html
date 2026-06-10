@@ -1091,6 +1091,12 @@ function switchTab(tab){
       })();
       wrap.appendChild(frm); body.appendChild(wrap);
       body.style.display='flex'; body.style.flexDirection='column';
+    } else if(!_graphMode || !_msalAcct) {
+      body.innerHTML=`<div style="padding:32px;text-align:center;color:var(--text2)">
+        <div style="font-size:32px;margin-bottom:12px">🔑</div>
+        <div style="margin-bottom:16px">יש להתחבר עם Microsoft כדי לצפות בשרטוטים</div>
+        <button onclick="msalLogin()" style="background:var(--accent);color:#fff;border:none;border-radius:6px;padding:10px 24px;font-size:13px;cursor:pointer">התחבר</button>
+      </div>`;
     } else {
       body.innerHTML='<div style="padding:24px;color:var(--text3);text-align:center">No drawing for this part.</div>';
     }
@@ -1147,13 +1153,30 @@ function switchTab(tab){
     const allC=curItem.cads||[];
     const all=[...allP.map(p=>({path:p,icon:'📄',type:'PDF'})),...allC.map(c=>({path:c,icon:'🔩',type:'CAD'}))];
     if(!all.length){ body.innerHTML='<div style="padding:24px;color:var(--text3);text-align:center">No files found.</div>'; return; }
+    if(!_graphMode || !_msalAcct){
+      body.innerHTML=`<div style="padding:32px;text-align:center;color:var(--text2)">
+        <div style="font-size:32px;margin-bottom:12px">🔑</div>
+        <div style="margin-bottom:16px">יש להתחבר עם Microsoft כדי לצפות בקבצים</div>
+        <button onclick="msalLogin()" style="background:var(--accent);color:#fff;border:none;border-radius:6px;padding:10px 24px;font-size:13px;cursor:pointer">התחבר עם Microsoft</button>
+      </div>`;
+      return;
+    }
     const wrap=document.createElement('div'); wrap.className='all-files';
     all.forEach(({path,icon,type})=>{
       const fname=path.split('/').pop();
       const ext=fname.split('.').pop().toUpperCase();
-      const a=document.createElement('a'); a.href=path; a.className='af-row';
-      if(type==='PDF') a.target='_blank'; else a.download=fname;
-      a.innerHTML=`<span style="font-size:16px">${icon}</span><span class="af-name" title="${fname}">${fname}</span><span class="af-ext">${ext}</span>`;
+      const a=document.createElement('a'); a.href='#'; a.className='af-row';
+      a.innerHTML=`<span style="font-size:16px">${icon}</span><span class="af-name" title="${fname}">${fname}</span><span class="af-ext">${ext}</span><span class="af-ext" style="color:var(--text3);margin-left:auto">⏳</span>`;
+      a.onclick=async(e)=>{
+        e.preventDefault();
+        const sp=a.querySelector('span:last-child'); sp.textContent='⏳';
+        try{
+          const url=await _graphDownloadUrl(fname);
+          if(type==='PDF'){ window.open(url,'_blank'); }
+          else { const dl=document.createElement('a'); dl.href=url; dl.download=fname; dl.click(); }
+          sp.textContent='✓';
+        }catch(err){ sp.textContent='⚠'; alert('שגיאה: '+err.message); }
+      };
       wrap.appendChild(a);
     });
     body.appendChild(wrap);
