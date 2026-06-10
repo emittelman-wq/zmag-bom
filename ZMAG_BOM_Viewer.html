@@ -470,7 +470,7 @@ const BOM = [{"lv":0,"pn":"6910W021-001/B","pb":"6910W021-001","cat":"407383883"
 // ─── State ──────────────────────────────────────────────
 // procData pre-declared here; second <script> will populate it from localStorage
 var procData = {};
-const BUILD_VER = 'v20260610.1900';
+const BUILD_VER = 'v20260610.1910';
 let rows = [];
 let selIdx = -1;
 let curSort = {col:null,asc:true};
@@ -1256,11 +1256,14 @@ async function load3D(stpPath, container){
     await new Promise(r=>setTimeout(r,10)); // yield to UI
 
     const result=occInst.ReadStepFile(fc,null);
+    console.log('[3D] parse result: success='+result.success+' meshCount='+result.meshCount);
     if(!result.success) throw new Error('STEP parse failed');
+    if(result.meshCount===0) throw new Error('STEP file contains no meshes (meshCount=0)');
 
     // Build three.js scene
     // Capture dimensions BEFORE clearing innerHTML (avoids 0x0 canvas after DOM update)
     const cw=container.clientWidth||600, ch=container.clientHeight||420;
+    console.log('[3D] container size at render time: '+cw+'x'+ch);
     container.innerHTML='';
     const canvas=document.createElement('canvas');
     canvas.className='cad-canvas';
@@ -1283,9 +1286,12 @@ async function load3D(stpPath, container){
     // Geometry
     const group=new THREE.Group();
     const meshColors=[0x4488cc,0x44aacc,0x66bbdd,0x3377aa,0x5599bb];
+    let totalTri=0;
     for(let mi=0;mi<result.meshCount;mi++){
       const mesh=result.GetMesh(mi);
+      console.log('[3D] mesh '+mi+' triangleCount='+mesh.triangleCount);
       if(!mesh.triangleCount) continue;
+      totalTri+=mesh.triangleCount;
       const pos=[];
       for(let ti=0;ti<mesh.triangleCount;ti++){
         const t=mesh.GetTriangle(ti);
@@ -1300,13 +1306,15 @@ async function load3D(stpPath, container){
       const mat=new THREE.MeshPhongMaterial({color:col,shininess:40});
       group.add(new THREE.Mesh(geo,mat));
     }
+    if(totalTri===0) throw new Error('All meshes have 0 triangles — STEP geometry empty');
     scene.add(group);
 
     // Fit camera
     const box=new THREE.Box3().setFromObject(group);
     const ctr=box.getCenter(new THREE.Vector3());
     const sz=box.getSize(new THREE.Vector3());
-    const md=Math.max(sz.x,sz.y,sz.z)||1;
+    const md=(isFinite(Math.max(sz.x,sz.y,sz.z))?Math.max(sz.x,sz.y,sz.z):0)||1;
+    console.log('[3D] bbox size='+JSON.stringify(sz)+' md='+md+' center='+JSON.stringify(ctr));
     camera.position.set(ctr.x+md*1.2,ctr.y+md*.8,ctr.z+md*1.2);
     camera.lookAt(ctr);
     camera.near=md*.001; camera.far=md*100; camera.updateProjectionMatrix();
