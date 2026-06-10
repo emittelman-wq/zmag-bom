@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-  <script src="https://cdn.jsdelivr.net/npm/@azure/msal-browser@3.28.1/dist/msal-browser.min.js"></script>
+  <!-- MSAL loaded dynamically in _loadMSAL() below -->
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ZMAG BOM Viewer — 6910W021-001 Rev B</title>
 <style>
@@ -3005,8 +3005,28 @@ function _graphFileUrl() {
   return 'https://graph.microsoft.com/v1.0/sites/erezsei.sharepoint.com:/sites/SEI:/drive/root:/' + path + ':/content';
 }
 
+async function _loadMSAL() {
+  if (typeof msal !== 'undefined') return true;
+  const cdns = [
+    'https://cdn.jsdelivr.net/npm/@azure/msal-browser@3.28.1/dist/msal-browser.min.js',
+    'https://unpkg.com/@azure/msal-browser@3.28.1/dist/msal-browser.min.js'
+  ];
+  for (const src of cdns) {
+    try {
+      await new Promise((resolve, reject) => {
+        const s = document.createElement('script');
+        s.src = src; s.onload = resolve; s.onerror = reject;
+        document.head.appendChild(s);
+      });
+      if (typeof msal !== 'undefined') return true;
+    } catch(e) { console.warn('MSAL CDN failed:', src); }
+  }
+  return false;
+}
+
 async function _initMSAL() {
-  if (typeof msal === 'undefined') return;
+  const ok = await _loadMSAL();
+  if (!ok) { console.warn('MSAL failed to load from all CDNs'); return; }
   _msalApp = new msal.PublicClientApplication({
     auth: {
       clientId: MSAL_CLIENT_ID,
@@ -3041,9 +3061,12 @@ async function _graphToken() {
 }
 
 async function msalLogin() {
-  if (typeof msal === 'undefined' || !_msalApp) {
-    alert('MSAL library failed to load. Check your internet connection and try refreshing.');
-    return;
+  if (!_msalApp) {
+    setFileSyncStatus('⏳ טוען ספריית אימות...', '');
+    const ok = await _loadMSAL();
+    if (!ok) { alert('MSAL library failed to load from all CDNs. Check your internet connection.'); return; }
+    await _initMSAL();
+    if (!_msalApp) { alert('MSAL initialization failed.'); return; }
   }
   try {
     const r = await _msalApp.loginPopup({ scopes: GRAPH_SCOPES });
