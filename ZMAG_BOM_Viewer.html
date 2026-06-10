@@ -470,7 +470,7 @@ const BOM = [{"lv":0,"pn":"6910W021-001/B","pb":"6910W021-001","cat":"407383883"
 // ─── State ──────────────────────────────────────────────
 // procData pre-declared here; second <script> will populate it from localStorage
 var procData = {};
-const BUILD_VER = 'v20260610.1940';
+const BUILD_VER = 'v20260610.1950';
 let rows = [];
 let selIdx = -1;
 let curSort = {col:null,asc:true};
@@ -1239,6 +1239,7 @@ async function ensure3D(){
 }
 
 let activeRenderer=null;
+const _geomCache=new Map(); // stpPath → {posArr,normArr,idxArr,color}[]
 async function load3D(stpPath, container){
   // Cancel previous renderer
   if(activeRenderer){ activeRenderer.dispose(); activeRenderer=null; }
@@ -1249,18 +1250,40 @@ async function load3D(stpPath, container){
       container.innerHTML='<div class="viewer-msg"><div class="vm-icon">🔑</div><div class="vm-txt">Login with Microsoft (🔑 התחבר) to view 3D preview from SharePoint.</div></div>';
       return;
     }
-    const buf=await getFileBuffer(stpPath);
-    const fc=new Uint8Array(buf);
 
-    container.innerHTML='<div class="viewer-msg"><div class="vm-icon">⚙️</div><div class="vm-txt">Parsing geometry…</div></div>';
-    await new Promise(r=>setTimeout(r,10)); // yield to UI
+    // ── Get geometry data (cached after first parse) ──────────────────────
+    let cachedMeshData=_geomCache.get(stpPath);
+    if(!cachedMeshData){
+      setMsg('⬇ מוריד קובץ STP…'); await yieldUI();
+      const buf=await getFileBuffer(stpPath);
+      setMsg('⚙️ מנתח גאומטריה…'); await yieldUI();
+      const fc=new Uint8Array(buf);
+      const result=occInst.ReadStepFile(fc,null);
+      const meshList=result.meshes||[];
+      console.log('[3D] parse success='+result.success+' meshes='+meshList.length);
+      if(!result.success) throw new Error('STEP parse failed');
+      if(meshList.length===0) throw new Error('STEP: no meshes returned');
+      // Extract typed arrays (cheap copy — avoids WASM GC issues)
+      function toF32(a){ return (a instanceof Float32Array)?a:new Float32Array(a); }
+      function toU32(a){ return (a instanceof Uint32Array)?a:new Uint32Array(a); }
+      cachedMeshData=[];
+      for(let mi=0;mi<meshList.length;mi++){
+        const m=meshList[mi];
+        const rawPos=m.attributes&&m.attributes.position&&m.attributes.position.array;
+        if(!rawPos||rawPos.length===0) continue;
+        const rawNorm=m.attributes&&m.attributes.normal&&m.attributes.normal.array;
+        const rawIdx=m.index&&m.index.array;
+        const c=m.color||null;
+        cachedMeshData.push({pos:toF32(rawPos),norm:(rawNorm&&rawNorm.length)?toF32(rawNorm):null,idx:(rawIdx&&rawIdx.length)?toU32(rawIdx):null,color:c});
+        if(mi%50===0){ setMsg('⚙️ מנתח… '+Math.round(mi/meshList.length*100)+'%'); await yieldUI(); }
+      }
+      _geomCache.set(stpPath, cachedMeshData);
+    } else {
+      setMsg('⚙️ בונה סצנה…'); await yieldUI();
+    }
 
-    const result=occInst.ReadStepFile(fc,null);
-    // occt-import-js API: result.meshes[] (array), not result.meshCount
-    const meshList=result.meshes||[];
-    console.log('[3D] parse success='+result.success+' meshes='+meshList.length);
-    if(!result.success) throw new Error('STEP parse failed');
-    if(meshList.length===0) throw new Error('STEP: no meshes returned');
+    function setMsg(t){ container.innerHTML='<div class="viewer-msg"><div class="vm-icon">'+t.split(' ')[0]+'</div><div class="vm-txt">'+t.substring(t.indexOf(' ')+1)+'</div></div>'; }
+    function yieldUI(){ return new Promise(r=>setTimeout(r,16)); }
 
     // Build three.js scene
     // Capture dimensions BEFORE clearing innerHTML (avoids 0x0 canvas after DOM update)
@@ -1285,30 +1308,24 @@ async function load3D(stpPath, container){
     const d1=new THREE.DirectionalLight(0xffffff,.8); d1.position.set(1,2,1.5); scene.add(d1);
     const d2=new THREE.DirectionalLight(0x8899ff,.3); d2.position.set(-1,-1,-1); scene.add(d2);
 
-    // Geometry from meshes array (occt-import-js typed arrays helper)
-    function toF32(a){ return (a instanceof Float32Array)?a:new Float32Array(a); }
-    function toU32(a){ return (a instanceof Uint32Array)?a:(a instanceof Uint16Array)?new Uint32Array(a):new Uint32Array(a); }
+    // Build Three.js group from cached mesh data
     const group=new THREE.Group();
     const meshColors=[0x4488cc,0x44aacc,0x66bbdd,0x3377aa,0x5599bb];
     let totalVerts=0;
-    for(let mi=0;mi<meshList.length;mi++){
-      const mesh=meshList[mi];
-      const rawPos=mesh.attributes&&mesh.attributes.position&&mesh.attributes.position.array;
-      if(!rawPos||rawPos.length===0) continue;
-      totalVerts+=rawPos.length/3;
+    for(let mi=0;mi<cachedMeshData.length;mi++){
+      const d=cachedMeshData[mi];
+      totalVerts+=d.pos.length/3;
       const geo=new THREE.BufferGeometry();
-      geo.setAttribute('position',new THREE.Float32BufferAttribute(toF32(rawPos),3));
-      const rawNorm=mesh.attributes&&mesh.attributes.normal&&mesh.attributes.normal.array;
-      if(rawNorm&&rawNorm.length) geo.setAttribute('normal',new THREE.Float32BufferAttribute(toF32(rawNorm),3));
+      geo.setAttribute('position',new THREE.Float32BufferAttribute(d.pos,3));
+      if(d.norm) geo.setAttribute('normal',new THREE.Float32BufferAttribute(d.norm,3));
       else geo.computeVertexNormals();
-      const rawIdx=mesh.index&&mesh.index.array;
-      if(rawIdx&&rawIdx.length) geo.setIndex(new THREE.BufferAttribute(toU32(rawIdx),1));
+      if(d.idx) geo.setIndex(new THREE.BufferAttribute(d.idx,1));
       let col=new THREE.Color(meshColors[mi%meshColors.length]);
-      try{ const c=mesh.color; if(c&&!(c.r===0&&c.g===0&&c.b===0)) col=new THREE.Color(c.r,c.g,c.b); }catch(e){}
+      try{ const c=d.color; if(c&&!(c.r===0&&c.g===0&&c.b===0)) col=new THREE.Color(c.r,c.g,c.b); }catch(e){}
       const mat=new THREE.MeshPhongMaterial({color:col,shininess:40,side:THREE.DoubleSide});
       group.add(new THREE.Mesh(geo,mat));
     }
-    if(totalVerts===0) throw new Error('All '+meshList.length+' meshes have no vertices');
+    if(totalVerts===0) throw new Error('No geometry vertices found');
     console.log('[3D] vertices='+totalVerts+' meshes='+group.children.length);
     scene.add(group);
 
@@ -3429,7 +3446,11 @@ function _updateAuthUI() {
   }
 }
 
-window.addEventListener('load', function() { _initMSAL(); });
+window.addEventListener('load', function() {
+  _initMSAL();
+  // Pre-load 3D libraries in background so first CAD click is faster
+  setTimeout(()=>ensure3D().catch(()=>{}), 3000);
+});
 </script>
 </body>
 </html>
