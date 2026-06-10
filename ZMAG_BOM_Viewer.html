@@ -507,6 +507,15 @@ async function grantAccess(){
 }
 
 async function getFileBuffer(relPath){
+  const filename = relPath.split('/').pop();
+  // Graph API: authenticated SharePoint access (no folder picker needed)
+  if (_graphMode && _msalAcct) {
+    const url = await _graphDownloadUrl(filename);
+    const r = await fetch(url);
+    if (!r.ok) throw new Error('SharePoint HTTP ' + r.status);
+    return await r.arrayBuffer();
+  }
+  // Local folder fallback
   if(rootDirHandle){
     const parts=relPath.split('/');
     let dir=rootDirHandle;
@@ -514,7 +523,6 @@ async function getFileBuffer(relPath){
     const fh=await dir.getFileHandle(parts[parts.length-1]);
     return await (await fh.getFile()).arrayBuffer();
   }
-  // Fallback: fetch (works on local servers or some browsers)
   const r=await fetch(relPath);
   if(!r.ok) throw new Error('HTTP '+r.status);
   return await r.arrayBuffer();
@@ -1065,13 +1073,22 @@ function switchTab(tab){
         curItem.pdfs.forEach((p,i)=>{
           const b=document.createElement('button'); b.className='pdf-btn'+(i===0?' on':'');
           b.textContent=p.split('/').pop().replace('.pdf',''); b.title=b.textContent;
-          b.onclick=()=>{ sel.querySelectorAll('.pdf-btn').forEach(x=>x.classList.remove('on')); b.classList.add('on'); frm.src=p; };
+          b.onclick=async()=>{ sel.querySelectorAll('.pdf-btn').forEach(x=>x.classList.remove('on')); b.classList.add('on');
+            if(_graphMode && _msalAcct){ try{ frm.src=(await _graphDownloadUrl(p.split('/').pop()))+'#zoom=page-fit&scrollbar=0'; return; }catch(e){} }
+            frm.src=p+'#zoom=page-fit&scrollbar=0'; };
           sel.appendChild(b);
         });
         body.appendChild(sel);
       }
       const wrap=document.createElement('div'); wrap.className='pdf-frame'; wrap.style.flex='1';
-      const frm=document.createElement('iframe'); frm.src=curItem.pdf+'#zoom=page-fit&scrollbar=0'; frm.title='Drawing';
+      const frm=document.createElement('iframe'); frm.title='Drawing';
+      // Set src async: use Graph download URL when authenticated, else direct path
+      (async()=>{
+        if(_graphMode && _msalAcct){
+          try{ frm.src=(await _graphDownloadUrl(curItem.pdf.split('/').pop()))+'#zoom=page-fit&scrollbar=0'; return; }catch(e){}
+        }
+        frm.src=curItem.pdf+'#zoom=page-fit&scrollbar=0';
+      })();
       wrap.appendChild(frm); body.appendChild(wrap);
       body.style.display='flex'; body.style.flexDirection='column';
     } else {
@@ -1169,8 +1186,8 @@ async function load3D(stpPath, container){
   container.innerHTML='<div class="viewer-msg"><div class="vm-icon">⏳</div><div class="vm-txt">Loading libraries & parsing STEP…</div></div>';
   try{
     await ensure3D();
-    if(!rootDirHandle){
-      container.innerHTML='<div class="viewer-msg"><div class="vm-icon">📁</div><div class="vm-txt">Click <strong>📁 Select Folder</strong> in the toolbar, then choose the <em>ZMAG PRODUCTE FILE FOR FTS 10.03.26</em> folder to enable 3D preview.</div></div>';
+    if(!rootDirHandle && !(_graphMode && _msalAcct)){
+      container.innerHTML='<div class="viewer-msg"><div class="vm-icon">🔑</div><div class="vm-txt">Login with Microsoft (🔑 התחבר) to view 3D preview from SharePoint.</div></div>';
       return;
     }
     const buf=await getFileBuffer(stpPath);
@@ -2986,14 +3003,15 @@ const MSAL_CLIENT_ID  = 'fe62b5b2-7236-4149-9d44-038ae6f98545';
 const MSAL_TENANT_ID  = 'fff493cd-fb80-4d62-b826-547a443f23de';
 const GRAPH_SCOPES    = ['Files.ReadWrite', 'User.Read'];
 
-// Path segments of the JSON file inside the SharePoint library root
-const GRAPH_PATH_SEGS = [
+// Project folder segments in SharePoint (used for all file access)
+const GRAPH_FOLDER_SEGS = [
   'PROJECTS','HAARGAZ','ZMAG','Zmag',
-  'Zmag \u05dc\u05d7\u05d1\u05e8\u05ea \u05d4\u05d0\u05e8\u05d2\u05d6',   // "לחברת הארגז"
+  'Zmag \u05dc\u05d7\u05d1\u05e8\u05ea \u05d4\u05d0\u05e8\u05d2\u05d6',
   'ZMAG PRODUCTE FILE 10.03.26',
-  'ZMAG PRODUCTE FILE FOR FTS 10.03.26',
-  PROC_JSON_FILENAME
+  'ZMAG PRODUCTE FILE FOR FTS 10.03.26'
 ];
+// Full path to the JSON proc file
+const GRAPH_PATH_SEGS = [...GRAPH_FOLDER_SEGS, PROC_JSON_FILENAME];
 
 var _msalApp    = null;
 var _msalAcct   = null;
@@ -3003,6 +3021,20 @@ var _graphTimer = null;
 function _graphFileUrl() {
   const path = GRAPH_PATH_SEGS.map(encodeURIComponent).join('/');
   return 'https://graph.microsoft.com/v1.0/sites/erezsei.sharepoint.com:/sites/SEI:/drive/root:/' + path + ':/content';
+}
+// Get Graph API item metadata URL for a file in the project folder
+function _graphItemUrl(filename) {
+  const path = [...GRAPH_FOLDER_SEGS, filename].map(encodeURIComponent).join('/');
+  return 'https://graph.microsoft.com/v1.0/sites/erezsei.sharepoint.com:/sites/SEI:/drive/root:/' + path;
+}
+// Get a pre-authenticated download URL (no auth header needed – works as iframe src)
+async function _graphDownloadUrl(filename) {
+  const token = await _graphToken();
+  const r = await fetch(_graphItemUrl(filename), { headers: { Authorization: 'Bearer ' + token } });
+  if (!r.ok) throw new Error('File not found: ' + filename + ' (' + r.status + ')');
+  const d = await r.json();
+  if (!d['@microsoft.graph.downloadUrl']) throw new Error('No download URL for ' + filename);
+  return d['@microsoft.graph.downloadUrl'];
 }
 
 // ── Inline MSAL-compatible OAuth2 PKCE (no CDN required) ─────────────────────
@@ -3130,6 +3162,9 @@ async function msalLogout() {
 }
 
 function _updateAuthUI() {
+  // Hide local folder picker when Graph mode is active — files come from SharePoint
+  const folderBtn = document.getElementById('folderBtn');
+  if (folderBtn) folderBtn.style.display = _graphMode ? 'none' : '';
   const btn = document.getElementById('loginBtn');
   const status = document.getElementById('authStatus');
   if (!btn) return;
@@ -3146,117 +3181,4 @@ function _updateAuthUI() {
   } else {
     btn.textContent = '🔑 התחבר';
     btn.title = 'התחבר עם חשבון Microsoft';
-    btn.classList.add('signed-out');
-    btn.onclick = msalLogin;
-    if (status) status.textContent = '';
-  }
-}
-
-async function loadProcFromGraph() {
-  if (!_graphMode) return;
-  setFileSyncStatus('⏳ טוען מ-SharePoint…', 'ok');
-  try {
-    const token = await _graphToken();
-    const r = await fetch(_graphFileUrl(), { headers: { 'Authorization': 'Bearer ' + token } });
-    if (r.status === 404) {
-      await _graphWriteFile();
-      setFileSyncStatus('✓ קובץ חדש נוצר ב-SharePoint', 'ok');
-      return;
-    }
-    if (!r.ok) throw new Error('HTTP ' + r.status);
-    const obj = JSON.parse(await r.text());
-    if (obj.customProcTypes && Array.isArray(obj.customProcTypes) && obj.customProcTypes.length) {
-      PROC_TYPES = obj.customProcTypes;
-      localStorage.setItem(TYPES_STORAGE_KEY, JSON.stringify(PROC_TYPES));
-    }
-    const loaded = obj.processes || obj;
-    if (typeof loaded === 'object' && loaded !== null) {
-      procData = loaded;
-      localStorage.setItem(PROC_STORAGE_KEY, JSON.stringify(procData));
-      localStorage.setItem(TYPES_STORAGE_KEY, JSON.stringify(PROC_TYPES));
-      buildTable();
-      if (typeof curItem !== 'undefined' && curItem && curItem.type === 'ELTDesign') renderMfgSide(curItem);
-      setFileSyncStatus('✓ נטען מ-SharePoint', 'ok');
-    }
-  } catch(e) {
-    console.error('loadProcFromGraph:', e);
-    setFileSyncStatus('⚠ ' + (e.message || 'Graph error'), 'err');
-  }
-}
-
-async function _graphWriteFile() {
-  const token = await _graphToken();
-  const payload = JSON.stringify({
-    version: 1, project: 'ZMAG-6910W021',
-    lastSaved: new Date().toISOString(),
-    customProcTypes: PROC_TYPES,
-    processes: procData
-  }, null, 2);
-  const r = await fetch(_graphFileUrl(), {
-    method: 'PUT',
-    headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
-    body: payload
-  });
-  if (!r.ok) throw new Error('Graph write failed: ' + r.status);
-}
-
-// ── Override saveProcToFile when in graphMode ─────────────
-const _origSaveProcToFile = saveProcToFile;
-saveProcToFile = async function() {
-  if (_graphMode) {
-    clearTimeout(_graphTimer);
-    _graphTimer = setTimeout(async function() {
-      try { await _graphWriteFile(); setFileSyncStatus('✓ נשמר ב-SharePoint', 'ok'); }
-      catch(e) { setFileSyncStatus('⚠ ' + (e.message || 'שגיאת שמירה'), 'err'); }
-    }, 600);
-    return;
-  }
-  return _origSaveProcToFile();
-};
-
-// ── Override syncProcFromFile when in graphMode ───────────
-const _origSyncProc = syncProcFromFile;
-syncProcFromFile = async function() {
-  if (_graphMode) { await loadProcFromGraph(); return; }
-  return _origSyncProc();
-};
-
-// ── Init on load ──────────────────────────────────────────
-window.addEventListener('load', function() { _initMSAL(); });
-
-</script>
-
-<!-- Types Manager Modal -->
-<div id="typesModal" class="hidden">
-  <div class="tm-wrap">
-    <div class="tm-header">
-      <div class="tm-title">⚙ ניהול סוגי תהליכים — Process Types</div>
-      <button class="tm-close" onclick="closeTypesManager()">✕</button>
-    </div>
-    <div class="tm-body">
-      <table class="tm-grid">
-        <thead>
-          <tr>
-            <th style="width:36px">#</th>
-            <th>תווית עברית</th>
-            <th>English Label</th>
-            <th style="width:110px">ID</th>
-            <th style="width:90px">עלות / Unit</th>
-            <th style="width:80px">יחידה</th>
-            <th style="width:40px"></th>
-          </tr>
-        </thead>
-        <tbody id="tmList"></tbody>
-      </table>
-      <button class="tm-add-row" onclick="tmAddRow()">＋ הוסף תהליך חדש</button>
-    </div>
-    <div class="tm-footer">
-      <span id="tmWarn" class="tm-warn"></span>
-      <button class="tm-btn" onclick="closeTypesManager()">ביטול</button>
-      <button class="tm-btn tm-btn-save" onclick="saveTypesManager()">💾 שמור</button>
-    </div>
-  </div>
-</div>
-
-</body>
-</html>
+    btn.classList.add('signed
