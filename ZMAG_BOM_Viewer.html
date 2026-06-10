@@ -470,7 +470,7 @@ const BOM = [{"lv":0,"pn":"6910W021-001/B","pb":"6910W021-001","cat":"407383883"
 // ─── State ──────────────────────────────────────────────
 // procData pre-declared here; second <script> will populate it from localStorage
 var procData = {};
-const BUILD_VER = 'v20260610.1930';
+const BUILD_VER = 'v20260610.1940';
 let rows = [];
 let selIdx = -1;
 let curSort = {col:null,asc:true};
@@ -1285,28 +1285,31 @@ async function load3D(stpPath, container){
     const d1=new THREE.DirectionalLight(0xffffff,.8); d1.position.set(1,2,1.5); scene.add(d1);
     const d2=new THREE.DirectionalLight(0x8899ff,.3); d2.position.set(-1,-1,-1); scene.add(d2);
 
-    // Geometry from meshes array (occt-import-js uses BufferGeometry-style typed arrays)
+    // Geometry from meshes array (occt-import-js typed arrays helper)
+    function toF32(a){ return (a instanceof Float32Array)?a:new Float32Array(a); }
+    function toU32(a){ return (a instanceof Uint32Array)?a:(a instanceof Uint16Array)?new Uint32Array(a):new Uint32Array(a); }
     const group=new THREE.Group();
     const meshColors=[0x4488cc,0x44aacc,0x66bbdd,0x3377aa,0x5599bb];
     let totalVerts=0;
     for(let mi=0;mi<meshList.length;mi++){
       const mesh=meshList[mi];
-      const posArr=mesh.attributes&&mesh.attributes.position&&mesh.attributes.position.array;
-      if(!posArr||posArr.length===0) continue;
-      totalVerts+=posArr.length/3;
+      const rawPos=mesh.attributes&&mesh.attributes.position&&mesh.attributes.position.array;
+      if(!rawPos||rawPos.length===0) continue;
+      totalVerts+=rawPos.length/3;
       const geo=new THREE.BufferGeometry();
-      geo.setAttribute('position',new THREE.Float32BufferAttribute(posArr,3));
-      if(mesh.attributes&&mesh.attributes.normal&&mesh.attributes.normal.array)
-        geo.setAttribute('normal',new THREE.Float32BufferAttribute(mesh.attributes.normal.array,3));
+      geo.setAttribute('position',new THREE.Float32BufferAttribute(toF32(rawPos),3));
+      const rawNorm=mesh.attributes&&mesh.attributes.normal&&mesh.attributes.normal.array;
+      if(rawNorm&&rawNorm.length) geo.setAttribute('normal',new THREE.Float32BufferAttribute(toF32(rawNorm),3));
       else geo.computeVertexNormals();
-      if(mesh.index&&mesh.index.array) geo.setIndex(new THREE.BufferAttribute(mesh.index.array,1));
+      const rawIdx=mesh.index&&mesh.index.array;
+      if(rawIdx&&rawIdx.length) geo.setIndex(new THREE.BufferAttribute(toU32(rawIdx),1));
       let col=new THREE.Color(meshColors[mi%meshColors.length]);
       try{ const c=mesh.color; if(c&&!(c.r===0&&c.g===0&&c.b===0)) col=new THREE.Color(c.r,c.g,c.b); }catch(e){}
       const mat=new THREE.MeshPhongMaterial({color:col,shininess:40,side:THREE.DoubleSide});
       group.add(new THREE.Mesh(geo,mat));
     }
     if(totalVerts===0) throw new Error('All '+meshList.length+' meshes have no vertices');
-    console.log('[3D] total vertices: '+totalVerts+' from '+group.children.length+' meshes');
+    console.log('[3D] vertices='+totalVerts+' meshes='+group.children.length);
     scene.add(group);
 
     // Fit camera
