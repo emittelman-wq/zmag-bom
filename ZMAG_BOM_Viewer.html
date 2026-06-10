@@ -352,7 +352,7 @@ tr.row-disabled .badge,tr.row-disabled .proc-btn{opacity:.5}
 <div class="topbar">
   <div>
     <div class="topbar-title">ZMAG BOM Viewer</div>
-    <div class="topbar-sub">6910W021-001 Rev B &nbsp;<span id="verBadge" style="font-size:9px;opacity:0.45;font-family:monospace">v20260610.1615</span></div>
+    <div class="topbar-sub">6910W021-001 Rev B &nbsp;<span id="verBadge" style="font-size:9px;opacity:0.45;font-family:monospace">v20260610.1630</span></div>
   </div>
   <div class="sep"></div>
 
@@ -470,7 +470,7 @@ const BOM = [{"lv":0,"pn":"6910W021-001/B","pb":"6910W021-001","cat":"407383883"
 // ─── State ──────────────────────────────────────────────
 // procData pre-declared here; second <script> will populate it from localStorage
 var procData = {};
-const BUILD_VER = 'v20260610.1615';
+const BUILD_VER = 'v20260610.1630';
 let rows = [];
 let selIdx = -1;
 let curSort = {col:null,asc:true};
@@ -3108,7 +3108,7 @@ var msal = (function(){
     push('exchanging code for token...');
     sessionStorage.setItem('_msal_dbg',JSON.stringify(dbg));
     var tok=await this._exchange(code,cv);
-    push('token received: access_token='+(tok.access_token?'✅':'❌')+' error='+(tok.error||'none'));
+    push('token received: access_token='+(tok.access_token?'✅':'❌')+' id_token='+(tok.id_token?'✅':'❌')+' error='+(tok.error||'none'));
     sessionStorage.removeItem('_msal_cv');
     this._save(tok,sc);
     push('saved. accounts='+this._accts.length);
@@ -3151,13 +3151,34 @@ var msal = (function(){
     var d=await r.json();if(d.error)throw new Error(d.error_description||d.error);return d;
   };
   PCA.prototype._save=function(tok,scopes){
-    if(tok.id_token){try{
-      var b=tok.id_token.split('.')[1].replace(/-/g,'+').replace(/_/g,'/');
-      while(b.length%4)b+='=';
-      var pp=JSON.parse(atob(b));
-      this._accts=[{username:pp.preferred_username||pp.upn||pp.email||'user',name:pp.name||'',homeAccountId:pp.oid||''}];
+    var acctSaved=false;
+    // Try id_token first
+    if(tok.id_token){
+      try{
+        var b=tok.id_token.split('.')[1].replace(/-/g,'+').replace(/_/g,'/');
+        while(b.length%4)b+='=';
+        var pp=JSON.parse(atob(b));
+        this._accts=[{username:pp.preferred_username||pp.upn||pp.unique_name||pp.email||'SEI User',name:pp.name||'',homeAccountId:pp.oid||''}];
+        _sv('_msal_a',this._accts);
+        acctSaved=true;
+      }catch(e){console.error('MSAL _save id_token parse:',e);}
+    }
+    // Fallback: parse access_token for user info
+    if(!acctSaved&&tok.access_token){
+      try{
+        var ab=tok.access_token.split('.')[1].replace(/-/g,'+').replace(/_/g,'/');
+        while(ab.length%4)ab+='=';
+        var ap=JSON.parse(atob(ab));
+        this._accts=[{username:ap.upn||ap.unique_name||ap.preferred_username||ap.email||'SEI User',name:ap.name||'',homeAccountId:ap.oid||ap.sub||''}];
+        _sv('_msal_a',this._accts);
+        acctSaved=true;
+      }catch(e){console.error('MSAL _save access_token parse:',e);}
+    }
+    // Last resort: we have a token — create placeholder account so auth succeeds
+    if(!acctSaved&&tok.access_token){
+      this._accts=[{username:'SEI User',name:'SEI User',homeAccountId:'sei'}];
       _sv('_msal_a',this._accts);
-    }catch(e){}}
+    }
     if(tok.access_token){
       var k=(scopes||[]).slice().sort().join(' ')||'$';
       var entry={v:tok.access_token,e:Date.now()+(tok.expires_in||3600)*1000};
