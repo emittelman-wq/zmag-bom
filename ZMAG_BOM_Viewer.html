@@ -3072,13 +3072,17 @@ var msal = (function(){
   function PCA(cfg){this._c=cfg;this._accts=_ss('_msal_a',[]);this._toks=_ss('_msal_t',{})}
 
   PCA.prototype.handleRedirectPromise=async function(){
-    var h=location.hash;if(!h)return null;
+    // Check both hash (fragment mode) and query string (query mode)
+    var h=location.hash||'';
+    var q=location.search||'';
     var p=new URLSearchParams(h.slice(1));
+    if(!p.get('code')&&!p.get('error')) p=new URLSearchParams(q.slice(1));
     var code=p.get('code'),err=p.get('error');
     if(!code&&!err)return null;
-    history.replaceState({},document.title,location.pathname+location.search);
+    history.replaceState({},document.title,location.pathname);
     if(err)throw new Error(p.get('error_description')||err);
-    var cv=sessionStorage.getItem('_msal_cv');if(!cv)return null;
+    var cv=sessionStorage.getItem('_msal_cv')||localStorage.getItem('_msal_cv_bk');
+    if(!cv){ console.warn('MSAL: no code_verifier found'); return null; }
     var sc=_ss('_msal_sc',[]);
     var tok=await this._exchange(code,cv);
     sessionStorage.removeItem('_msal_cv');
@@ -3098,7 +3102,9 @@ var msal = (function(){
 
   PCA.prototype._go=async function(scopes){
     var v=_cv(),ch=await _ch(v);
-    sessionStorage.setItem('_msal_cv',v);_sv('_msal_sc',scopes);
+    sessionStorage.setItem('_msal_cv',v);
+    localStorage.setItem('_msal_cv_bk',v); // backup — some browsers clear sessionStorage on cross-origin redirect
+    _sv('_msal_sc',scopes);
     var tid=this._c.auth.authority.split('/').pop();
     location.href='https://login.microsoftonline.com/'+tid+'/oauth2/v2.0/authorize?'+
       new URLSearchParams({client_id:this._c.auth.clientId,response_type:'code',
@@ -3144,10 +3150,16 @@ async function _initMSAL() {
   // initialize() not needed for inline impl
   try {
     const resp = await _msalApp.handleRedirectPromise();
-    if (resp) _msalAcct = resp.account;
+    if (resp) { _msalAcct = resp.account; localStorage.removeItem('_msal_cv_bk'); }
   } catch(e) {
     console.error('MSAL redirect error:', e);
-    setFileSyncStatus('⚠ Auth error: ' + e.message, 'err');
+    // Show error so user knows what failed
+    const msg = e.message || String(e);
+    setFileSyncStatus('⚠ Auth error: ' + msg.slice(0,60), 'err');
+    // Common fix: redirect URI must be "Single-page application" type in Azure AD
+    if (msg.includes('invalid_grant') || msg.includes('invalid_client') || msg.includes('AADSTS')) {
+      setTimeout(()=>alert('שגיאת אימות Azure AD:\n' + msg + '\n\nפתרון: ב-App Registration → Authentication → הוסף את ה-URI תחת "Single-page application" (לא "Web")'), 100);
+    }
   }
   if (!_msalAcct) {
     const accts = _msalApp.getAllAccounts();
