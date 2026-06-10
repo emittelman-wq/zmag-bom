@@ -352,7 +352,7 @@ tr.row-disabled .badge,tr.row-disabled .proc-btn{opacity:.5}
 <div class="topbar">
   <div>
     <div class="topbar-title">ZMAG BOM Viewer</div>
-    <div class="topbar-sub">6910W021-001 Rev B &nbsp;<span id="verBadge" style="font-size:9px;opacity:0.45;font-family:monospace">v20260610.1630</span></div>
+    <div class="topbar-sub">6910W021-001 Rev B &nbsp;<span id="verBadge" style="font-size:9px;opacity:0.45;font-family:monospace">v20260610.1650</span></div>
   </div>
   <div class="sep"></div>
 
@@ -470,7 +470,7 @@ const BOM = [{"lv":0,"pn":"6910W021-001/B","pb":"6910W021-001","cat":"407383883"
 // ─── State ──────────────────────────────────────────────
 // procData pre-declared here; second <script> will populate it from localStorage
 var procData = {};
-const BUILD_VER = 'v20260610.1630';
+const BUILD_VER = 'v20260610.1650';
 let rows = [];
 let selIdx = -1;
 let curSort = {col:null,asc:true};
@@ -3136,11 +3136,13 @@ var msal = (function(){
     localStorage.setItem('_msal_cv_bk',v); // backup — some browsers clear sessionStorage on cross-origin redirect
     _sv('_msal_sc',scopes);
     var tid=this._c.auth.authority.split('/').pop();
+    // response_mode:'query' puts code in ?code=... (different cache key) → forces fresh page load
+    // This ensures the redirect hits the LATEST deployed version, not a browser-cached old version
     location.href='https://login.microsoftonline.com/'+tid+'/oauth2/v2.0/authorize?'+
       new URLSearchParams({client_id:this._c.auth.clientId,response_type:'code',
         redirect_uri:this._c.auth.redirectUri,scope:scopes.join(' '),
-        code_challenge:ch,code_challenge_method:'S256',response_mode:'fragment',
-        prompt:'select_account'});  // always show account picker
+        code_challenge:ch,code_challenge_method:'S256',response_mode:'query',
+        prompt:'select_account'});
   };
   PCA.prototype._exchange=async function(code,cv){
     var tid=this._c.auth.authority.split('/').pop();
@@ -3216,6 +3218,23 @@ async function _initMSAL() {
   if (!_msalAcct) {
     const accts = _msalApp.getAllAccounts();
     if (accts.length) _msalAcct = accts[0];
+  }
+  // Token recovery: a stale cached page may have exchanged the code and stored a token
+  // but failed to save the account. Recover by parsing the stored access_token directly.
+  if (!_msalAcct) {
+    try {
+      var _rt=JSON.parse(sessionStorage.getItem('_msal_t')||localStorage.getItem('_msal_t')||'{}');
+      var _re=_rt['$'];
+      if(_re&&_re.v&&_re.e>Date.now()){
+        var _rb=_re.v.split('.')[1].replace(/-/g,'+').replace(/_/g,'/');
+        while(_rb.length%4)_rb+='=';
+        var _rp=JSON.parse(atob(_rb));
+        _msalAcct={username:_rp.upn||_rp.unique_name||_rp.preferred_username||_rp.email||'SEI User',name:_rp.name||'',homeAccountId:_rp.oid||_rp.sub||''};
+        _msalApp._accts=[_msalAcct]; _msalApp._toks=_rt;
+        sessionStorage.setItem('_msal_a',JSON.stringify([_msalAcct]));
+        console.log('[MSAL] Token recovery succeeded:', _msalAcct.username);
+      }
+    }catch(e){console.warn('token recovery error:',e);}
   }
   // Set _graphMode BEFORE _updateAuthUI so UI reflects correct state
   if (_msalAcct) _graphMode = true;
