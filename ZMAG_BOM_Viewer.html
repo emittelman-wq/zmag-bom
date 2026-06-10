@@ -3122,13 +3122,18 @@ async function _initMSAL() {
   try {
     const resp = await _msalApp.handleRedirectPromise();
     if (resp) _msalAcct = resp.account;
-  } catch(e) {}
+  } catch(e) {
+    console.error('MSAL redirect error:', e);
+    setFileSyncStatus('⚠ Auth error: ' + e.message, 'err');
+  }
   if (!_msalAcct) {
     const accts = _msalApp.getAllAccounts();
     if (accts.length) _msalAcct = accts[0];
   }
+  // Set _graphMode BEFORE _updateAuthUI so UI reflects correct state
+  if (_msalAcct) _graphMode = true;
   _updateAuthUI();
-  if (_msalAcct) { _graphMode = true; await loadProcFromGraph(); }
+  if (_msalAcct) { await loadProcFromGraph(); }
 }
 
 async function _graphToken() {
