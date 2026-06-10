@@ -352,7 +352,7 @@ tr.row-disabled .badge,tr.row-disabled .proc-btn{opacity:.5}
 <div class="topbar">
   <div>
     <div class="topbar-title">ZMAG BOM Viewer</div>
-    <div class="topbar-sub">6910W021-001 Rev B &nbsp;<span id="verBadge" style="font-size:9px;opacity:0.45;font-family:monospace">v20260610.1800</span></div>
+    <div class="topbar-sub">6910W021-001 Rev B &nbsp;<span id="verBadge" style="font-size:9px;opacity:0.45;font-family:monospace">v20260610.1820</span></div>
   </div>
   <div class="sep"></div>
 
@@ -470,7 +470,7 @@ const BOM = [{"lv":0,"pn":"6910W021-001/B","pb":"6910W021-001","cat":"407383883"
 // ─── State ──────────────────────────────────────────────
 // procData pre-declared here; second <script> will populate it from localStorage
 var procData = {};
-const BUILD_VER = 'v20260610.1800';
+const BUILD_VER = 'v20260610.1820';
 let rows = [];
 let selIdx = -1;
 let curSort = {col:null,asc:true};
@@ -1084,7 +1084,7 @@ function switchTab(tab){
           const b=document.createElement('button'); b.className='pdf-btn'+(i===0?' on':'');
           b.textContent=p.split('/').pop().replace('.pdf',''); b.title=b.textContent;
           b.onclick=async()=>{ sel.querySelectorAll('.pdf-btn').forEach(x=>x.classList.remove('on')); b.classList.add('on');
-            if(_graphMode && _msalAcct){ try{ frm.src=(await _graphDownloadUrl(p.split('/').pop()))+'#zoom=page-fit&scrollbar=0'; return; }catch(e){} }
+            if(_graphMode && _msalAcct){ try{ frm.src=(await _graphDownloadUrl(p))+'#zoom=page-fit&scrollbar=0'; return; }catch(e){} }
             frm.src=p+'#zoom=page-fit&scrollbar=0'; };
           sel.appendChild(b);
         });
@@ -1097,14 +1097,14 @@ function switchTab(tab){
       wrap.innerHTML='<div style="padding:24px;text-align:center;color:var(--text3)">⏳ טוען שרטוט מ-SharePoint...</div>';
       (async()=>{
         try{
-          const url=await _graphDownloadUrl(curItem.pdf.split('/').pop());
+          const url=await _graphDownloadUrl(curItem.pdf);
           wrap.innerHTML=''; wrap.appendChild(frm);
           frm.src=url+'#zoom=page-fit&scrollbar=0';
         }catch(e){
           console.error('Graph drawing error:',e);
           wrap.innerHTML=`<div style="padding:20px;text-align:center;color:var(--err,#f66);font-size:13px">
             ⚠ שגיאה בטעינת שרטוט<br><small style="color:var(--text3)">${e.message}</small><br>
-            <small style="color:var(--text3);word-break:break-all">${curItem.pdf.split('/').pop()}</small>
+            <small style="color:var(--text3);word-break:break-all">${curItem.pdf}</small>
           </div>`;
         }
       })();
@@ -1193,7 +1193,7 @@ function switchTab(tab){
         e.preventDefault();
         const sp=a.querySelector('span:last-child'); sp.textContent='⏳';
         try{
-          const url=await _graphDownloadUrl(fname);
+          const url=await _graphDownloadUrl(path); // use full relative path, not just filename
           if(type==='PDF'){ window.open(url,'_blank'); }
           else { const dl=document.createElement('a'); dl.href=url; dl.download=fname; dl.click(); }
           sp.textContent='✓';
@@ -3104,9 +3104,13 @@ async function _graphFileUrl() {
   return 'https://graph.microsoft.com/v1.0/sites/root/drive/root:/' + path + ':/content';
 }
 // Get Graph API item metadata URL for a file in the project folder
-async function _graphItemUrl(filename) {
+// relPath can be a full relative path like '6910W021-001REVB/6910M099-001/6910M099-001.pdf'
+async function _graphItemUrl(relPath) {
   const base = await _discoverSite();
-  const path = [...GRAPH_FOLDER_SEGS, filename].map(encodeURIComponent).join('/');
+  // relPath segments + GRAPH_FOLDER_SEGS as prefix, each segment encoded
+  const relSegs = relPath.split('/').map(encodeURIComponent);
+  const fullSegs = [...GRAPH_FOLDER_SEGS.map(encodeURIComponent), ...relSegs];
+  const path = fullSegs.join('/');
   if (base) return base + '/drive/root:/' + path;
   return 'https://graph.microsoft.com/v1.0/sites/root/drive/root:/' + path;
 }
