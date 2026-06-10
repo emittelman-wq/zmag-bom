@@ -352,7 +352,7 @@ tr.row-disabled .badge,tr.row-disabled .proc-btn{opacity:.5}
 <div class="topbar">
   <div>
     <div class="topbar-title">ZMAG BOM Viewer</div>
-    <div class="topbar-sub">6910W021-001 Rev B &nbsp;<span id="verBadge" style="font-size:9px;opacity:0.45;font-family:monospace">v20260610.1730</span></div>
+    <div class="topbar-sub">6910W021-001 Rev B &nbsp;<span id="verBadge" style="font-size:9px;opacity:0.45;font-family:monospace">v20260610.1800</span></div>
   </div>
   <div class="sep"></div>
 
@@ -470,7 +470,7 @@ const BOM = [{"lv":0,"pn":"6910W021-001/B","pb":"6910W021-001","cat":"407383883"
 // ─── State ──────────────────────────────────────────────
 // procData pre-declared here; second <script> will populate it from localStorage
 var procData = {};
-const BUILD_VER = 'v20260610.1730';
+const BUILD_VER = 'v20260610.1800';
 let rows = [];
 let selIdx = -1;
 let curSort = {col:null,asc:true};
@@ -3047,7 +3047,7 @@ function saveTypesManager() {
 const MSAL_CLIENT_ID  = 'fe62b5b2-7236-4149-9d44-038ae6f98545';
 const MSAL_TENANT_ID  = 'fff493cd-fb80-4d62-b826-547a443f23de'; // SEI Technologies tenant only
 const MSAL_AUTHORITY_TENANT = MSAL_TENANT_ID;
-const GRAPH_SCOPES    = ['Files.ReadWrite', 'User.Read'];
+const GRAPH_SCOPES    = ['Files.ReadWrite', 'Sites.Read.All', 'User.Read'];
 
 // Project folder segments in SharePoint (used for all file access)
 const GRAPH_FOLDER_SEGS = [
@@ -3063,48 +3063,67 @@ var _msalApp    = null;
 var _msalAcct   = null;
 var _graphMode  = false;
 var _graphTimer = null;
+var _graphSiteBase = null; // set by _discoverSite() — e.g. 'https://graph.microsoft.com/v1.0/sites/{id}'
 
-function _graphFileUrl() {
+// Discover the correct SharePoint site ID dynamically (avoids hardcoded hostname)
+async function _discoverSite() {
+  if (_graphSiteBase) return _graphSiteBase;
+  const token = await _graphToken();
+  // 1. Get tenant root SharePoint site to find the correct hostname
+  try {
+    const rootR = await fetch('https://graph.microsoft.com/v1.0/sites/root', {headers:{Authorization:'Bearer '+token}});
+    const rootD = await rootR.json();
+    const host = rootD.siteCollection && rootD.siteCollection.hostname;
+    console.log('[Graph] root SharePoint host:', host, '| webUrl:', rootD.webUrl);
+    if (host) {
+      // 2. Find the SEI site using discovered hostname
+      const seiR = await fetch('https://graph.microsoft.com/v1.0/sites/'+host+':/sites/SEI', {headers:{Authorization:'Bearer '+token}});
+      if (seiR.ok) {
+        const seiD = await seiR.json();
+        _graphSiteBase = 'https://graph.microsoft.com/v1.0/sites/' + seiD.id;
+        console.log('[Graph] SEI site found:', _graphSiteBase, '| webUrl:', seiD.webUrl);
+        setFileSyncStatus('✅ SharePoint: ' + (seiD.webUrl||seiD.id), '');
+        return _graphSiteBase;
+      }
+      // Site not at /sites/SEI — list available sites
+      const listR = await fetch('https://graph.microsoft.com/v1.0/sites?search=*', {headers:{Authorization:'Bearer '+token}});
+      const listD = await listR.json();
+      const sites = (listD.value||[]).map(s=>s.name+'|'+s.webUrl);
+      console.warn('[Graph] SEI site not found. Available sites:', sites);
+      setFileSyncStatus('⚠ Site not found. Sites: '+sites.join(', '),'err');
+    }
+  } catch(e) { console.error('[Graph _discoverSite]', e); }
+  return null;
+}
+
+async function _graphFileUrl() {
+  const base = await _discoverSite();
   const path = GRAPH_PATH_SEGS.map(encodeURIComponent).join('/');
-  return 'https://graph.microsoft.com/v1.0/sites/erezsei.sharepoint.com:/sites/SEI:/drive/root:/' + path + ':/content';
+  if (base) return base + '/drive/root:/' + path + ':/content';
+  // fallback (likely wrong but better than nothing)
+  return 'https://graph.microsoft.com/v1.0/sites/root/drive/root:/' + path + ':/content';
 }
 // Get Graph API item metadata URL for a file in the project folder
-function _graphItemUrl(filename) {
+async function _graphItemUrl(filename) {
+  const base = await _discoverSite();
   const path = [...GRAPH_FOLDER_SEGS, filename].map(encodeURIComponent).join('/');
-  return 'https://graph.microsoft.com/v1.0/sites/erezsei.sharepoint.com:/sites/SEI:/drive/root:/' + path;
+  if (base) return base + '/drive/root:/' + path;
+  return 'https://graph.microsoft.com/v1.0/sites/root/drive/root:/' + path;
 }
 // Get a pre-authenticated download URL (no auth header needed – works as iframe src)
 async function _graphDownloadUrl(filename) {
   const token = await _graphToken();
-  // Primary: site-path approach
-  const url1 = _graphItemUrl(filename);
+  const url1 = await _graphItemUrl(filename); // now async (discovers site)
   const r1 = await fetch(url1, { headers: { Authorization: 'Bearer ' + token } });
   if (r1.ok) {
     const d = await r1.json();
     if (d['@microsoft.graph.downloadUrl']) return d['@microsoft.graph.downloadUrl'];
     throw new Error('No downloadUrl in response for ' + filename);
   }
-  // Collect full error for diagnosis
   let errBody1 = {};
   try { errBody1 = await r1.json(); } catch(e) {}
   const errMsg1 = (errBody1.error && (errBody1.error.code + ': ' + errBody1.error.message)) || r1.status;
-  console.warn('[Graph primary]', r1.status, errMsg1, url1);
-  // Fallback: try via me/drives to find the SharePoint drive automatically
-  try {
-    const driveR = await fetch('https://graph.microsoft.com/v1.0/me/drives', {headers:{Authorization:'Bearer '+token}});
-    const driveD = await driveR.json();
-    const drives = driveD.value || [];
-    console.log('[Graph drives]', drives.map(d=>d.name+'/'+d.driveType+'/'+d.id));
-    const folderPath = [...GRAPH_FOLDER_SEGS, filename].map(encodeURIComponent).join('/');
-    for (const drive of drives) {
-      const url2 = 'https://graph.microsoft.com/v1.0/drives/' + drive.id + '/root:/' + folderPath;
-      const r2 = await fetch(url2, {headers:{Authorization:'Bearer '+token}});
-      if (r2.ok) {
-        const d2 = await r2.json();
-        if (d2['@microsoft.graph.downloadUrl']) { console.log('[Graph] fallback drive worked:', drive.name); return d2['@microsoft.graph.downloadUrl']; }
-      }
-    }
-  } catch(fe) { console.warn('[Graph fallback]', fe); }
+  console.warn('[Graph item]', r1.status, errMsg1, url1);
   throw new Error('Graph ' + r1.status + ': ' + errMsg1 + ' | ' + filename);
 }
 
@@ -3288,30 +3307,23 @@ async function _initMSAL() {
     }
   }catch(e){}
   if (_msalAcct) {
-    await loadProcFromGraph();
-    // Quick Graph API connectivity test — visible in console and status bar
+    // Discover site and test connectivity
     setTimeout(async function(){
       try{
+        // _discoverSite() finds and caches the correct SharePoint site ID
+        const siteBase = await _discoverSite();
+        if (!siteBase) return;
+        // Test folder access
         var _tok=await _graphToken();
-        var _tr=await fetch('https://graph.microsoft.com/v1.0/sites/erezsei.sharepoint.com:/sites/SEI',
-          {headers:{Authorization:'Bearer '+_tok}});
-        var _td=await _tr.json();
-        if(_td.error){
-          setFileSyncStatus('⚠ Graph: '+_td.error.code+' — '+_td.error.message.slice(0,60),'err');
-          console.error('[Graph site test]',_td.error);
+        var _fp=[...GRAPH_FOLDER_SEGS].map(encodeURIComponent).join('/');
+        var _fr=await fetch(siteBase+'/drive/root:/'+_fp, {headers:{Authorization:'Bearer '+_tok}});
+        var _fd=await _fr.json();
+        if(_fd.error){
+          setFileSyncStatus('⚠ Folder: '+_fd.error.code+' — '+_fd.error.message.slice(0,80),'err');
+          console.error('[Graph folder test]',_fd.error);
         } else {
-          console.log('[Graph site test] OK:',_td.displayName||_td.name);
-          // Test folder access
-          var _fp=[...GRAPH_FOLDER_SEGS].map(encodeURIComponent).join('/');
-          var _fr=await fetch('https://graph.microsoft.com/v1.0/sites/erezsei.sharepoint.com:/sites/SEI:/drive/root:/'+_fp,
-            {headers:{Authorization:'Bearer '+_tok}});
-          var _fd=await _fr.json();
-          if(_fd.error){
-            setFileSyncStatus('⚠ Folder: '+_fd.error.code+' — '+_fd.error.message.slice(0,80),'err');
-            console.error('[Graph folder test]',_fd.error);
-          } else {
-            console.log('[Graph folder test] OK:',_fd.name);
-          }
+          console.log('[Graph folder test] OK:',_fd.name);
+          setFileSyncStatus('✅ SharePoint מחובר: '+(_fd.name||''),'ok');
         }
       }catch(e){console.error('[Graph test]',e);}
     },1500);
