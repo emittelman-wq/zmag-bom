@@ -470,7 +470,7 @@ const BOM = [{"lv":0,"pn":"6910W021-001/B","pb":"6910W021-001","cat":"407383883"
 // ─── State ──────────────────────────────────────────────
 // procData pre-declared here; second <script> will populate it from localStorage
 var procData = {};
-const BUILD_VER = 'v20260610.1950';
+const BUILD_VER = 'v20260610.2000';
 let rows = [];
 let selIdx = -1;
 let curSort = {col:null,asc:true};
@@ -1220,22 +1220,57 @@ function switchTab(tab){
 }
 
 // ─── 3D STP Preview ──────────────────────────────────────
-let occInst=null, threeLoaded=false;
-
+let threeLoaded=false;
 function loadScript(src){ return new Promise((res,rej)=>{ const s=document.createElement('script'); s.src=src; s.onload=res; s.onerror=rej; document.head.appendChild(s); }); }
-
-async function ensure3D(){
+async function ensureThree(){
   if(!threeLoaded){
     await loadScript('https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js');
     await loadScript('https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js');
     threeLoaded=true;
   }
-  if(!occInst){
-    await loadScript('https://cdn.jsdelivr.net/npm/occt-import-js@0.0.22/dist/occt-import-js.js');
-    occInst=await window.occtimportjs({
-      locateFile:f=>`https://cdn.jsdelivr.net/npm/occt-import-js@0.0.22/dist/${f}`
-    });
-  }
+}
+
+// Web Worker for STEP parsing (keeps main thread responsive)
+const _OCCT_CDN='https://cdn.jsdelivr.net/npm/occt-import-js@0.0.22/dist/';
+const _workerSrc=`
+importScripts('${_OCCT_CDN}occt-import-js.js');
+let _occ=null;
+async function getOcc(){
+  if(!_occ) _occ=await occtimportjs({locateFile:f=>'${_OCCT_CDN}'+f});
+  return _occ;
+}
+self.onmessage=async function(e){
+  try{
+    const occ=await getOcc();
+    const result=occ.ReadStepFile(new Uint8Array(e.data.buf),null);
+    const ml=result.meshes||[];
+    const out=[]; const xfr=new Set();
+    for(let i=0;i<ml.length;i++){
+      const m=ml[i];
+      const rp=m.attributes&&m.attributes.position&&m.attributes.position.array;
+      if(!rp||!rp.length) continue;
+      const pos=rp instanceof Float32Array?rp:new Float32Array(rp);
+      const rn=m.attributes&&m.attributes.normal&&m.attributes.normal.array;
+      const norm=(rn&&rn.length)?(rn instanceof Float32Array?rn:new Float32Array(rn)):null;
+      const ri=m.index&&m.index.array;
+      const idx=(ri&&ri.length)?(ri instanceof Uint32Array?ri:new Uint32Array(ri)):null;
+      out.push({pos:pos.buffer,norm:norm?norm.buffer:null,idx:idx?idx.buffer:null,color:m.color||null});
+      xfr.add(pos.buffer); if(norm)xfr.add(norm.buffer); if(idx)xfr.add(idx.buffer);
+    }
+    self.postMessage({ok:true,meshes:out},[...xfr]);
+  }catch(err){ self.postMessage({ok:false,err:err.message}); }
+};
+`;
+let _workerUrl=null;
+function getWorkerUrl(){ if(!_workerUrl) _workerUrl=URL.createObjectURL(new Blob([_workerSrc],{type:'application/javascript'})); return _workerUrl; }
+
+function parseStepInWorker(buf){
+  return new Promise((resolve,reject)=>{
+    const w=new Worker(getWorkerUrl());
+    w.onmessage=e=>{ w.terminate(); if(e.data.ok) resolve(e.data.meshes.map(d=>({pos:new Float32Array(d.pos),norm:d.norm?new Float32Array(d.norm):null,idx:d.idx?new Uint32Array(d.idx):null,color:d.color}))); else reject(new Error(e.data.err)); };
+    w.onerror=e=>{ w.terminate(); reject(new Error(e.message)); };
+    w.postMessage({buf},[buf]);
+  });
 }
 
 let activeRenderer=null;
@@ -1243,47 +1278,30 @@ const _geomCache=new Map(); // stpPath → {posArr,normArr,idxArr,color}[]
 async function load3D(stpPath, container){
   // Cancel previous renderer
   if(activeRenderer){ activeRenderer.dispose(); activeRenderer=null; }
-  container.innerHTML='<div class="viewer-msg"><div class="vm-icon">⏳</div><div class="vm-txt">Loading libraries & parsing STEP…</div></div>';
+  function setMsg(t){ container.innerHTML='<div class="viewer-msg"><div class="vm-icon" style="font-size:28px">⚙️</div><div class="vm-txt">'+t+'</div></div>'; }
+  setMsg('מאתחל…');
   try{
-    await ensure3D();
     if(!rootDirHandle && !(_graphMode && _msalAcct)){
       container.innerHTML='<div class="viewer-msg"><div class="vm-icon">🔑</div><div class="vm-txt">Login with Microsoft (🔑 התחבר) to view 3D preview from SharePoint.</div></div>';
       return;
     }
 
-    // ── Get geometry data (cached after first parse) ──────────────────────
+    // ── Get geometry data (cached; parsing runs in Web Worker) ──────────
     let cachedMeshData=_geomCache.get(stpPath);
     if(!cachedMeshData){
-      setMsg('⬇ מוריד קובץ STP…'); await yieldUI();
+      setMsg('⬇ מוריד קובץ STP…');
       const buf=await getFileBuffer(stpPath);
-      setMsg('⚙️ מנתח גאומטריה…'); await yieldUI();
-      const fc=new Uint8Array(buf);
-      const result=occInst.ReadStepFile(fc,null);
-      const meshList=result.meshes||[];
-      console.log('[3D] parse success='+result.success+' meshes='+meshList.length);
-      if(!result.success) throw new Error('STEP parse failed');
-      if(meshList.length===0) throw new Error('STEP: no meshes returned');
-      // Extract typed arrays (cheap copy — avoids WASM GC issues)
-      function toF32(a){ return (a instanceof Float32Array)?a:new Float32Array(a); }
-      function toU32(a){ return (a instanceof Uint32Array)?a:new Uint32Array(a); }
-      cachedMeshData=[];
-      for(let mi=0;mi<meshList.length;mi++){
-        const m=meshList[mi];
-        const rawPos=m.attributes&&m.attributes.position&&m.attributes.position.array;
-        if(!rawPos||rawPos.length===0) continue;
-        const rawNorm=m.attributes&&m.attributes.normal&&m.attributes.normal.array;
-        const rawIdx=m.index&&m.index.array;
-        const c=m.color||null;
-        cachedMeshData.push({pos:toF32(rawPos),norm:(rawNorm&&rawNorm.length)?toF32(rawNorm):null,idx:(rawIdx&&rawIdx.length)?toU32(rawIdx):null,color:c});
-        if(mi%50===0){ setMsg('⚙️ מנתח… '+Math.round(mi/meshList.length*100)+'%'); await yieldUI(); }
-      }
+      setMsg('⚙️ מנתח גאומטריה… (Worker)');
+      cachedMeshData=await parseStepInWorker(buf); // non-blocking!
+      if(!cachedMeshData.length) throw new Error('STEP: no geometry found');
       _geomCache.set(stpPath, cachedMeshData);
+      console.log('[3D] parsed '+cachedMeshData.length+' meshes via Worker');
     } else {
-      setMsg('⚙️ בונה סצנה…'); await yieldUI();
+      setMsg('בונה סצנה…');
     }
 
-    function setMsg(t){ container.innerHTML='<div class="viewer-msg"><div class="vm-icon">'+t.split(' ')[0]+'</div><div class="vm-txt">'+t.substring(t.indexOf(' ')+1)+'</div></div>'; }
-    function yieldUI(){ return new Promise(r=>setTimeout(r,16)); }
+    // Three.js must be loaded on main thread
+    await ensureThree();
 
     // Build three.js scene
     // Capture dimensions BEFORE clearing innerHTML (avoids 0x0 canvas after DOM update)
@@ -3449,7 +3467,7 @@ function _updateAuthUI() {
 window.addEventListener('load', function() {
   _initMSAL();
   // Pre-load 3D libraries in background so first CAD click is faster
-  setTimeout(()=>ensure3D().catch(()=>{}), 3000);
+  setTimeout(()=>{ ensureThree().catch(()=>{}); getWorkerUrl(); }, 3000);
 });
 </script>
 </body>
