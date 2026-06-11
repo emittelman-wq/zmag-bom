@@ -470,7 +470,7 @@ const BOM = [{"lv":0,"pn":"6910W021-001/B","pb":"6910W021-001","cat":"407383883"
 // ─── State ──────────────────────────────────────────────
 // procData pre-declared here; second <script> will populate it from localStorage
 var procData = {};
-const BUILD_VER = 'v20260611.0900';
+const BUILD_VER = 'v20260611.1000';
 let rows = [];
 let selIdx = -1;
 let curSort = {col:null,asc:true};
@@ -3050,7 +3050,8 @@ function exportMfgCSV() {
 var _tmEditing = null; // working copy of PROC_TYPES being edited
 
 function openTypesManager() {
-  _tmEditing = PROC_TYPES.map(function(t){ return {id:t.id, label:t.label, en:t.en}; });
+  // Include cost & costUnit; fallback empty strings to avoid trim() crash on old data
+  _tmEditing = PROC_TYPES.map(function(t){ return {id:t.id, label:t.label||'', en:t.en||'', cost:t.cost||0, costUnit:t.costUnit||'h'}; });
   renderTypesList();
   document.getElementById('tmWarn').textContent = '';
   document.getElementById('typesModal').classList.remove('hidden');
@@ -3117,32 +3118,35 @@ function tmAddRow() {
 }
 
 function saveTypesManager() {
-  // Validate: all rows must have label and en filled
   var warn = document.getElementById('tmWarn');
-  var hasEmpty = _tmEditing.some(function(t){ return !t.label.trim() || !t.en.trim(); });
-  if (hasEmpty) {
-    warn.textContent = '⚠ יש שדות ריקים — מלא שם עברי ושם אנגלי לכל תהליך';
-    return;
+  try {
+    // Validate: all rows must have label and en filled
+    var hasEmpty = _tmEditing.some(function(t){ return !(t.label||'').trim() || !(t.en||'').trim(); });
+    if (hasEmpty) {
+      warn.textContent = '⚠ יש שדות ריקים — מלא שם עברי ושם אנגלי לכל תהליך';
+      return;
+    }
+    var ids = _tmEditing.map(function(t){ return t.id; });
+    var hasDup = ids.some(function(id, i){ return ids.indexOf(id) !== i; });
+    if (hasDup) {
+      warn.textContent = '⚠ ישנם מזהים כפולים';
+      return;
+    }
+    PROC_TYPES = _tmEditing.slice();
+    try { computeTreeCosts(); refreshCostCells(); } catch(e2){ console.warn('cost refresh error:',e2); }
+    saveProcData();
+    // Refresh any open dropdowns
+    if (typeof renderMfgSide === 'function' && typeof curItem !== 'undefined' && curItem && curItem.type === 'ELTDesign') {
+      renderMfgSide(curItem);
+    }
+    if (!document.getElementById('mfgModal').classList.contains('hidden')) {
+      try { buildMfgData(); renderMfgTable(getSortedMfgData()); filterMfgTable(); buildMfgProcTable(); } catch(e3){ console.warn('mfg refresh error:',e3); }
+    }
+    closeTypesManager();
+  } catch(err) {
+    warn.textContent = '⚠ שגיאה: ' + err.message;
+    console.error('saveTypesManager error:', err);
   }
-  // Check duplicate IDs (shouldn't happen for defaults, but for new rows)
-  var ids = _tmEditing.map(function(t){ return t.id; });
-  var hasDup = ids.some(function(id, i){ return ids.indexOf(id) !== i; });
-  if (hasDup) {
-    warn.textContent = '⚠ ישנם מזהים כפולים';
-    return;
-  }
-  PROC_TYPES = _tmEditing.slice();
-  computeTreeCosts(); refreshCostCells(); // recalculate after type cost changes
-  saveProcData(); // persist customProcTypes to file/SP
-  // Refresh any open dropdowns
-  if (typeof renderMfgSide === 'function' && typeof curItem !== 'undefined' && curItem && curItem.type === 'ELTDesign') {
-    renderMfgSide(curItem);
-  }
-  if (!document.getElementById('mfgModal').classList.contains('hidden')) {
-    buildMfgData(); renderMfgTable(getSortedMfgData()); filterMfgTable();
-    buildMfgProcTable();
-  }
-  closeTypesManager();
 }
 
 
@@ -3153,7 +3157,7 @@ function saveTypesManager() {
 const MSAL_CLIENT_ID  = 'fe62b5b2-7236-4149-9d44-038ae6f98545';
 const MSAL_TENANT_ID  = 'fff493cd-fb80-4d62-b826-547a443f23de'; // SEI Technologies tenant only
 const MSAL_AUTHORITY_TENANT = MSAL_TENANT_ID;
-const GRAPH_SCOPES    = ['Files.ReadWrite', 'Sites.Read.All', 'User.Read'];
+const GRAPH_SCOPES    = ['Files.ReadWrite', 'User.Read']; // Sites.Read.All removed — no admin consent needed
 
 // Project folder segments in SharePoint (used for all file access)
 const GRAPH_FOLDER_SEGS = [
@@ -3169,56 +3173,77 @@ var _msalApp    = null;
 var _msalAcct   = null;
 var _graphMode  = false;
 var _graphTimer = null;
-var _graphSiteBase = null; // set by _discoverSite() — e.g. 'https://graph.microsoft.com/v1.0/sites/{id}'
+// Drive-based access — no Sites.Read.All needed (Files.ReadWrite is sufficient)
+var _graphDriveBase = null; // e.g. 'https://graph.microsoft.com/v1.0/drives/{driveId}'
 
-// Discover the correct SharePoint site ID dynamically (avoids hardcoded hostname)
+// Discover the SharePoint document library drive via /me/drives (no admin consent needed)
+// Falls back to site-based discovery if Sites.Read.All happens to be consented
 async function _discoverSite() {
-  if (_graphSiteBase) return _graphSiteBase;
+  if (_graphDriveBase) return _graphDriveBase;
   const token = await _graphToken();
-  // 1. Get tenant root SharePoint site to find the correct hostname
+  const h = {Authorization:'Bearer '+token};
+
+  // Strategy 1: /me/drives — works with just Files.ReadWrite, no admin consent
   try {
-    const rootR = await fetch('https://graph.microsoft.com/v1.0/sites/root', {headers:{Authorization:'Bearer '+token}});
-    const rootD = await rootR.json();
-    const host = rootD.siteCollection && rootD.siteCollection.hostname;
-    console.log('[Graph] root SharePoint host:', host, '| webUrl:', rootD.webUrl);
-    if (host) {
-      // 2. Find the SEI site using discovered hostname
-      const seiR = await fetch('https://graph.microsoft.com/v1.0/sites/'+host+':/sites/SEI', {headers:{Authorization:'Bearer '+token}});
-      if (seiR.ok) {
-        const seiD = await seiR.json();
-        _graphSiteBase = 'https://graph.microsoft.com/v1.0/sites/' + seiD.id;
-        console.log('[Graph] SEI site found:', _graphSiteBase, '| webUrl:', seiD.webUrl);
-        setFileSyncStatus('✅ SharePoint: ' + (seiD.webUrl||seiD.id), '');
-        return _graphSiteBase;
+    const dr = await fetch('https://graph.microsoft.com/v1.0/me/drives', {headers:h});
+    if (dr.ok) {
+      const dd = await dr.json();
+      const drives = dd.value || [];
+      console.log('[Graph] /me/drives:', drives.map(d=>d.name+'|'+d.driveType+'|'+(d.webUrl||'')));
+      // Find SEI SharePoint document library
+      const sei = drives.find(d => d.webUrl && (
+        d.webUrl.toLowerCase().includes('/sites/sei') ||
+        d.webUrl.toLowerCase().includes('erezsei')
+      ));
+      if (sei) {
+        _graphDriveBase = 'https://graph.microsoft.com/v1.0/drives/' + sei.id;
+        console.log('[Graph] Drive found via /me/drives:', _graphDriveBase, '|', sei.webUrl);
+        setFileSyncStatus('✅ SharePoint מחובר: ' + sei.name, '');
+        return _graphDriveBase;
       }
-      // Site not at /sites/SEI — list available sites
-      const listR = await fetch('https://graph.microsoft.com/v1.0/sites?search=*', {headers:{Authorization:'Bearer '+token}});
-      const listD = await listR.json();
-      const sites = (listD.value||[]).map(s=>s.name+'|'+s.webUrl);
-      console.warn('[Graph] SEI site not found. Available sites:', sites);
-      setFileSyncStatus('⚠ Site not found. Sites: '+sites.join(', '),'err');
+      // Log all drives so we can debug if SEI isn't found
+      console.warn('[Graph] SEI drive not found in /me/drives. Available:', drives.map(d=>d.name+'|'+d.webUrl).join(', '));
     }
-  } catch(e) { console.error('[Graph _discoverSite]', e); }
+  } catch(e) { console.warn('[Graph _discoverSite /me/drives]', e.message); }
+
+  // Strategy 2: Sites.Read.All path (works if admin already granted consent)
+  try {
+    const rootR = await fetch('https://graph.microsoft.com/v1.0/sites/root', {headers:h});
+    if (rootR.ok) {
+      const rootD = await rootR.json();
+      const host = rootD.siteCollection && rootD.siteCollection.hostname;
+      if (host) {
+        const seiR = await fetch('https://graph.microsoft.com/v1.0/sites/'+host+':/sites/SEI:/drive', {headers:h});
+        if (seiR.ok) {
+          const seiDrive = await seiR.json();
+          _graphDriveBase = 'https://graph.microsoft.com/v1.0/drives/' + seiDrive.id;
+          console.log('[Graph] Drive found via sites/root:', _graphDriveBase);
+          setFileSyncStatus('✅ SharePoint מחובר (site)', '');
+          return _graphDriveBase;
+        }
+      }
+    }
+  } catch(e) { console.warn('[Graph _discoverSite sites/root]', e.message); }
+
+  setFileSyncStatus('⚠ לא נמצא Drive ב-SharePoint — פנה למנהל', 'err');
+  console.warn('[Graph] Could not discover SharePoint drive');
   return null;
 }
 
 async function _graphFileUrl() {
   const base = await _discoverSite();
   const path = GRAPH_PATH_SEGS.map(encodeURIComponent).join('/');
-  if (base) return base + '/drive/root:/' + path + ':/content';
-  // fallback (likely wrong but better than nothing)
-  return 'https://graph.microsoft.com/v1.0/sites/root/drive/root:/' + path + ':/content';
+  if (base) return base + '/root:/' + path + ':/content';
+  return 'https://graph.microsoft.com/v1.0/me/drive/root:/' + path + ':/content';
 }
 // Get Graph API item metadata URL for a file in the project folder
-// relPath can be a full relative path like '6910W021-001REVB/6910M099-001/6910M099-001.pdf'
 async function _graphItemUrl(relPath) {
   const base = await _discoverSite();
-  // relPath segments + GRAPH_FOLDER_SEGS as prefix, each segment encoded
   const relSegs = relPath.split('/').map(encodeURIComponent);
   const fullSegs = [...GRAPH_FOLDER_SEGS.map(encodeURIComponent), ...relSegs];
   const path = fullSegs.join('/');
-  if (base) return base + '/drive/root:/' + path;
-  return 'https://graph.microsoft.com/v1.0/sites/root/drive/root:/' + path;
+  if (base) return base + '/root:/' + path;
+  return 'https://graph.microsoft.com/v1.0/me/drive/root:/' + path;
 }
 // Get a pre-authenticated download URL (no auth header needed – works as iframe src)
 async function _graphDownloadUrl(filename) {
@@ -3420,13 +3445,12 @@ async function _initMSAL() {
     // Discover site and test connectivity
     setTimeout(async function(){
       try{
-        // _discoverSite() finds and caches the correct SharePoint site ID
+        // Discover drive and test folder access
         const siteBase = await _discoverSite();
         if (!siteBase) return;
-        // Test folder access
         var _tok=await _graphToken();
         var _fp=[...GRAPH_FOLDER_SEGS].map(encodeURIComponent).join('/');
-        var _fr=await fetch(siteBase+'/drive/root:/'+_fp, {headers:{Authorization:'Bearer '+_tok}});
+        var _fr=await fetch(siteBase+'/root:/'+_fp, {headers:{Authorization:'Bearer '+_tok}});
         var _fd=await _fr.json();
         if(_fd.error){
           setFileSyncStatus('⚠ Folder: '+_fd.error.code+' — '+_fd.error.message.slice(0,80),'err');
