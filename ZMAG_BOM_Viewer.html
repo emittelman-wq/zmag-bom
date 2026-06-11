@@ -470,7 +470,7 @@ const BOM = [{"lv":0,"pn":"6910W021-001/B","pb":"6910W021-001","cat":"407383883"
 // ─── State ──────────────────────────────────────────────
 // procData pre-declared here; second <script> will populate it from localStorage
 var procData = {};
-const BUILD_VER = 'v20260610.2000';
+const BUILD_VER = 'v20260611.0900';
 let rows = [];
 let selIdx = -1;
 let curSort = {col:null,asc:true};
@@ -1598,6 +1598,40 @@ updateStats();
         <tbody id="mfgBody"></tbody>
         <tfoot id="mfgFoot"></tfoot>
       </table>
+    </div>
+  </div>
+</div>
+
+<!-- Process Types Manager Modal -->
+<div id="typesModal" class="hidden">
+  <div class="tm-wrap">
+    <div class="tm-header">
+      <span style="font-size:18px">⚙</span>
+      <span style="font-size:15px;font-weight:600;color:var(--text1)">Process Types</span>
+      <span style="font-size:11px;color:var(--text3);margin-left:4px">הוסף / ערוך סוגי תהליכי ייצור</span>
+      <button onclick="closeTypesManager()" style="margin-left:auto;background:none;border:none;color:var(--text3);font-size:18px;cursor:pointer;padding:0 4px">✕</button>
+    </div>
+    <div style="overflow-y:auto;flex:1;min-height:0;padding:0">
+      <table style="width:100%;border-collapse:collapse;font-size:13px">
+        <thead>
+          <tr style="background:var(--header-bg)">
+            <th style="padding:7px 8px;color:var(--text3);font-weight:500;width:32px">#</th>
+            <th style="padding:7px 8px;color:var(--text2);font-weight:600;text-align:left">שם (עברית)</th>
+            <th style="padding:7px 8px;color:var(--text2);font-weight:600;text-align:left">Name (English)</th>
+            <th style="padding:7px 8px;color:var(--text3);font-weight:500;text-align:left">ID</th>
+            <th style="padding:7px 8px;color:var(--text2);font-weight:600;text-align:right">Cost/Unit</th>
+            <th style="padding:7px 8px;color:var(--text2);font-weight:600;text-align:center">Unit</th>
+            <th style="padding:7px 8px;width:32px"></th>
+          </tr>
+        </thead>
+        <tbody id="tmList"></tbody>
+      </table>
+    </div>
+    <div style="padding:10px 16px;border-top:1px solid var(--border);display:flex;align-items:center;gap:10px;flex-shrink:0">
+      <button onclick="tmAddRow()" style="background:var(--accent);color:#fff;border:none;border-radius:6px;padding:6px 14px;font-size:13px;cursor:pointer">＋ הוסף סוג</button>
+      <span id="tmWarn" style="color:var(--danger,#f66);font-size:12px;flex:1"></span>
+      <button onclick="saveTypesManager()" style="background:var(--accent2,#38c96e);color:#fff;border:none;border-radius:6px;padding:6px 18px;font-size:13px;cursor:pointer;font-weight:600">💾 שמור</button>
+      <button onclick="closeTypesManager()" style="background:var(--surface2);color:var(--text2);border:1px solid var(--border);border-radius:6px;padding:6px 14px;font-size:13px;cursor:pointer">ביטול</button>
     </div>
   </div>
 </div>
