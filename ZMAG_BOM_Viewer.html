@@ -470,7 +470,7 @@ const BOM = [{"lv":0,"pn":"6910W021-001/B","pb":"6910W021-001","cat":"407383883"
 // ─── State ──────────────────────────────────────────────
 // procData pre-declared here; second <script> will populate it from localStorage
 var procData = {};
-const BUILD_VER = 'v20260611.1000';
+const BUILD_VER = 'v20260611.1500';
 let rows = [];
 let selIdx = -1;
 let curSort = {col:null,asc:true};
@@ -3174,60 +3174,18 @@ var _msalAcct   = null;
 var _graphMode  = false;
 var _graphTimer = null;
 // Drive-based access — no Sites.Read.All needed (Files.ReadWrite is sufficient)
-var _graphDriveBase = null; // e.g. 'https://graph.microsoft.com/v1.0/drives/{driveId}'
+// Hardcoded SEI SharePoint document library drive ID — discovered 2026-06-11, no admin consent needed
+// Drive: "מסמכים" | https://erezsei.sharepoint.com/sites/SEI/Shared%20Documents
+const _SP_DRIVE_ID = 'b!Qe1iOstjY0KbJKrc_v_5zIHLrm4I4_pOlmnmzqhw083lJ5hviuDDQrvoUnxCy0Ge';
+var _graphDriveBase = null;
 
-// Discover the SharePoint document library drive via /me/drives (no admin consent needed)
-// Falls back to site-based discovery if Sites.Read.All happens to be consented
+// Returns the SharePoint drive base URL — uses hardcoded ID, no discovery API call needed
 async function _discoverSite() {
   if (_graphDriveBase) return _graphDriveBase;
-  const token = await _graphToken();
-  const h = {Authorization:'Bearer '+token};
-
-  // Strategy 1: /me/drives — works with just Files.ReadWrite, no admin consent
-  try {
-    const dr = await fetch('https://graph.microsoft.com/v1.0/me/drives', {headers:h});
-    if (dr.ok) {
-      const dd = await dr.json();
-      const drives = dd.value || [];
-      console.log('[Graph] /me/drives:', drives.map(d=>d.name+'|'+d.driveType+'|'+(d.webUrl||'')));
-      // Find SEI SharePoint document library
-      const sei = drives.find(d => d.webUrl && (
-        d.webUrl.toLowerCase().includes('/sites/sei') ||
-        d.webUrl.toLowerCase().includes('erezsei')
-      ));
-      if (sei) {
-        _graphDriveBase = 'https://graph.microsoft.com/v1.0/drives/' + sei.id;
-        console.log('[Graph] Drive found via /me/drives:', _graphDriveBase, '|', sei.webUrl);
-        setFileSyncStatus('✅ SharePoint מחובר: ' + sei.name, '');
-        return _graphDriveBase;
-      }
-      // Log all drives so we can debug if SEI isn't found
-      console.warn('[Graph] SEI drive not found in /me/drives. Available:', drives.map(d=>d.name+'|'+d.webUrl).join(', '));
-    }
-  } catch(e) { console.warn('[Graph _discoverSite /me/drives]', e.message); }
-
-  // Strategy 2: Sites.Read.All path (works if admin already granted consent)
-  try {
-    const rootR = await fetch('https://graph.microsoft.com/v1.0/sites/root', {headers:h});
-    if (rootR.ok) {
-      const rootD = await rootR.json();
-      const host = rootD.siteCollection && rootD.siteCollection.hostname;
-      if (host) {
-        const seiR = await fetch('https://graph.microsoft.com/v1.0/sites/'+host+':/sites/SEI:/drive', {headers:h});
-        if (seiR.ok) {
-          const seiDrive = await seiR.json();
-          _graphDriveBase = 'https://graph.microsoft.com/v1.0/drives/' + seiDrive.id;
-          console.log('[Graph] Drive found via sites/root:', _graphDriveBase);
-          setFileSyncStatus('✅ SharePoint מחובר (site)', '');
-          return _graphDriveBase;
-        }
-      }
-    }
-  } catch(e) { console.warn('[Graph _discoverSite sites/root]', e.message); }
-
-  setFileSyncStatus('⚠ לא נמצא Drive ב-SharePoint — פנה למנהל', 'err');
-  console.warn('[Graph] Could not discover SharePoint drive');
-  return null;
+  _graphDriveBase = 'https://graph.microsoft.com/v1.0/drives/' + _SP_DRIVE_ID;
+  console.log('[Graph] Using hardcoded SharePoint drive:', _graphDriveBase);
+  setFileSyncStatus('✅ SharePoint מחובר', '');
+  return _graphDriveBase;
 }
 
 async function _graphFileUrl() {
