@@ -401,6 +401,7 @@ tr.row-disabled .badge,tr.row-disabled .proc-btn{opacity:.5}
   <span id="fileSyncStatus" style="font-size:11px;color:var(--accent2);opacity:0;transition:opacity .5s;margin-right:4px"></span>
   <button class="btn" id="buyBtn" onclick="openBuyModal()" title="Show aggregated Buy items list">📦 Buy Summary</button>
   <button class="btn" id="mfgBtn" onclick="openMfgModal()" title="Manufacturing processes summary">⚙ Manufacturing</button>
+  <button class="btn" id="adminFolderBtn" onclick="adminGetFolderItemId()" title="Admin: Get SharePoint Folder Item ID for hardcoding" style="display:none;font-size:10px;opacity:.6">🔧 Get Folder ID</button>
   <div class="stats" id="statsBar">Loading…</div>
 </div>
 
@@ -470,7 +471,7 @@ const BOM = [{"lv":0,"pn":"6910W021-001/B","pb":"6910W021-001","cat":"407383883"
 // ─── State ──────────────────────────────────────────────
 // procData pre-declared here; second <script> will populate it from localStorage
 var procData = {};
-const BUILD_VER = 'v20260611.1500';
+const BUILD_VER = 'v20260614.1000';
 let rows = [];
 let selIdx = -1;
 let curSort = {col:null,asc:true};
@@ -3177,7 +3178,12 @@ var _graphTimer = null;
 // Hardcoded SEI SharePoint document library drive ID — discovered 2026-06-11, no admin consent needed
 // Drive: "מסמכים" | https://erezsei.sharepoint.com/sites/SEI/Shared%20Documents
 const _SP_DRIVE_ID = 'b!Qe1iOstjY0KbJKrc_v_5zIHLrm4I4_pOlmnmzqhw083lJ5hviuDDQrvoUnxCy0Ge';
+// Hardcoded Item ID of the project base folder (ZMAG PRODUCTE FILE FOR FTS 10.03.26)
+// Allows users with folder-only access (no root drive access) to load files
+// Leave empty to auto-discover on next admin login
+const _SP_FOLDER_ITEM_ID = '';
 var _graphDriveBase = null;
+var _graphFolderBase = null; // drives/{driveId}/items/{folderId}
 
 // Returns the SharePoint drive base URL — uses hardcoded ID, no discovery API call needed
 async function _discoverSite() {
@@ -3188,20 +3194,64 @@ async function _discoverSite() {
   return _graphDriveBase;
 }
 
+// Returns base URL for file access — uses folder item ID (bypasses root traversal)
+// Users with folder-only SharePoint access can still load files this way
+async function _getGraphFolderBase() {
+  if (_graphFolderBase) return _graphFolderBase;
+  if (_SP_FOLDER_ITEM_ID) {
+    _graphFolderBase = 'https://graph.microsoft.com/v1.0/drives/' + _SP_DRIVE_ID + '/items/' + _SP_FOLDER_ITEM_ID;
+    return _graphFolderBase;
+  }
+  // Auto-discover folder item ID (requires root access — admin only)
+  try {
+    const base = await _discoverSite();
+    const token = await _graphToken();
+    const fullPath = GRAPH_FOLDER_SEGS.map(encodeURIComponent).join('/');
+    const r = await fetch(base + '/root:/' + fullPath, {headers:{Authorization:'Bearer '+token}});
+    if (r.ok) {
+      const d = await r.json();
+      console.log('%c[ZMAG] SP_FOLDER_ITEM_ID (hardcode this!): ' + d.id, 'background:green;color:white;font-size:13px;padding:3px');
+      _graphFolderBase = 'https://graph.microsoft.com/v1.0/drives/' + _SP_DRIVE_ID + '/items/' + d.id;
+      return _graphFolderBase;
+    }
+  } catch(e) { console.warn('[Graph _getGraphFolderBase]', e.message); }
+  // Fallback: root-based path (requires root access)
+  return null;
+}
+
+// Admin helper: fetch and display the folder item ID for hardcoding
+async function adminGetFolderItemId() {
+  try {
+    await _getGraphFolderBase();
+    if (_graphFolderBase) {
+      const id = _graphFolderBase.split('/items/')[1];
+      prompt('העתק את ה-Folder Item ID הזה ושלח לתמיכה לצורך הגדרה:', id);
+    } else {
+      alert('לא ניתן לאחזר — ודא שאתה מחובר עם חשבון אדמין');
+    }
+  } catch(e) { alert('שגיאה: ' + e.message); }
+}
+
 async function _graphFileUrl() {
+  // Use folder-item-based URL to avoid needing root drive access
+  const folderBase = await _getGraphFolderBase();
+  const jsonName = encodeURIComponent(PROC_JSON_FILENAME);
+  if (folderBase) return folderBase + ':/' + jsonName + ':/content';
+  // Fallback: root-based path
   const base = await _discoverSite();
   const path = GRAPH_PATH_SEGS.map(encodeURIComponent).join('/');
-  if (base) return base + '/root:/' + path + ':/content';
-  return 'https://graph.microsoft.com/v1.0/me/drive/root:/' + path + ':/content';
+  return base + '/root:/' + path + ':/content';
 }
 // Get Graph API item metadata URL for a file in the project folder
 async function _graphItemUrl(relPath) {
+  // Use folder-item-based URL — works for users with folder-only SharePoint access
+  const folderBase = await _getGraphFolderBase();
+  const relSegs = relPath.split('/').map(encodeURIComponent).join('/');
+  if (folderBase) return folderBase + ':/' + relSegs;
+  // Fallback: root-based path (requires full drive access)
   const base = await _discoverSite();
-  const relSegs = relPath.split('/').map(encodeURIComponent);
-  const fullSegs = [...GRAPH_FOLDER_SEGS.map(encodeURIComponent), ...relSegs];
-  const path = fullSegs.join('/');
-  if (base) return base + '/root:/' + path;
-  return 'https://graph.microsoft.com/v1.0/me/drive/root:/' + path;
+  const fullSegs = [...GRAPH_FOLDER_SEGS.map(encodeURIComponent), ...relPath.split('/').map(encodeURIComponent)];
+  return base + '/root:/' + fullSegs.join('/');
 }
 // Get a pre-authenticated download URL (no auth header needed – works as iframe src)
 async function _graphDownloadUrl(filename) {
@@ -3469,6 +3519,9 @@ function _updateAuthUI() {
     // Show sync button
     const syncBtn = document.getElementById('syncBtn');
     if (syncBtn) syncBtn.style.display = '';
+    // Show admin folder ID button only when folder item ID not yet hardcoded
+    const adminBtn = document.getElementById('adminFolderBtn');
+    if (adminBtn) adminBtn.style.display = _SP_FOLDER_ITEM_ID ? 'none' : '';
   } else {
     btn.textContent = '🔑 התחבר';
     btn.title = 'התחבר עם חשבון Microsoft';
