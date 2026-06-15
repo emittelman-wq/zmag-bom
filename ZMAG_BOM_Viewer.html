@@ -471,7 +471,7 @@ const BOM = [{"lv":0,"pn":"6910W021-001/B","pb":"6910W021-001","cat":"407383883"
 // ─── State ──────────────────────────────────────────────
 // procData pre-declared here; second <script> will populate it from localStorage
 var procData = {};
-const BUILD_VER = 'v20260614.1100';
+const BUILD_VER = 'v20260614.1200';
 let rows = [];
 let selIdx = -1;
 let curSort = {col:null,asc:true};
@@ -3174,84 +3174,48 @@ var _msalApp    = null;
 var _msalAcct   = null;
 var _graphMode  = false;
 var _graphTimer = null;
-// Drive-based access — no Sites.Read.All needed (Files.ReadWrite is sufficient)
-// Hardcoded SEI SharePoint document library drive ID — discovered 2026-06-11, no admin consent needed
-// Drive: "מסמכים" | https://erezsei.sharepoint.com/sites/SEI/Shared%20Documents
-const _SP_DRIVE_ID = 'b!Qe1iOstjY0KbJKrc_v_5zIHLrm4I4_pOlmnmzqhw083lJ5hviuDDQrvoUnxCy0Ge';
-// Hardcoded Item ID of the project base folder (ZMAG PRODUCTE FILE FOR FTS 10.03.26)
-// Allows users with folder-only access (no root drive access) to load files
-// Leave empty to auto-discover on next admin login
+// SharePoint org-wide sharing link for ZMAG PRODUCTE FILE 10.03.26 folder
+// Allows ANY authenticated SEI employee to access project files — no site membership needed
+// Created by admin, valid for all "People in SEI Technologies"
+const _SP_SHARE_LINK = 'https://erezsei.sharepoint.com/:f:/s/SEI/IgCwhNIkUDDDQa4iKlTcLL5rAdLs163uKr9YvDn1Ckpdq2g?e=Zd5jHt';
+// Sub-folder within the sharing link root that contains project files
+const _SP_SHARE_SUB  = 'ZMAG PRODUCTE FILE FOR FTS 10.03.26';
+// Drive-based constants (used for write operations by admin users)
+const _SP_DRIVE_ID   = 'b!Qe1iOstjY0KbJKrc_v_5zIHLrm4I4_pOlmnmzqhw083lJ5hviuDDQrvoUnxCy0Ge';
 const _SP_FOLDER_ITEM_ID = '016E63ZBJ6UJWY3QBN6FEIMO7SI5IBYW4D';
-var _graphDriveBase = null;
-var _graphFolderBase = null; // drives/{driveId}/items/{folderId}
+var _graphDriveBase  = null;
 
-// Returns the SharePoint drive base URL — uses hardcoded ID, no discovery API call needed
+// Encode sharing link URL as Graph API shares ID
+function _getShareEncoded() {
+  const b64 = btoa(_SP_SHARE_LINK);
+  return 'u!' + b64.replace(/\+/g,'-').replace(/\//g,'_').replace(/=/g,'');
+}
+
+// Returns base URL for READ access via sharing link — works for all org users, no site membership
+function _shareItemUrl(relPath) {
+  const encoded = _getShareEncoded();
+  const fullRel = _SP_SHARE_SUB + '/' + relPath;
+  const encodedPath = fullRel.split('/').map(encodeURIComponent).join('/');
+  return 'https://graph.microsoft.com/v1.0/shares/' + encoded + '/driveItem:/' + encodedPath;
+}
+
+// Returns the SharePoint drive base URL (for write operations — admin only)
 async function _discoverSite() {
   if (_graphDriveBase) return _graphDriveBase;
   _graphDriveBase = 'https://graph.microsoft.com/v1.0/drives/' + _SP_DRIVE_ID;
-  console.log('[Graph] Using hardcoded SharePoint drive:', _graphDriveBase);
   setFileSyncStatus('✅ SharePoint מחובר', '');
   return _graphDriveBase;
 }
 
-// Returns base URL for file access — uses folder item ID (bypasses root traversal)
-// Users with folder-only SharePoint access can still load files this way
-async function _getGraphFolderBase() {
-  if (_graphFolderBase) return _graphFolderBase;
-  if (_SP_FOLDER_ITEM_ID) {
-    _graphFolderBase = 'https://graph.microsoft.com/v1.0/drives/' + _SP_DRIVE_ID + '/items/' + _SP_FOLDER_ITEM_ID;
-    return _graphFolderBase;
-  }
-  // Auto-discover folder item ID (requires root access — admin only)
-  try {
-    const base = await _discoverSite();
-    const token = await _graphToken();
-    const fullPath = GRAPH_FOLDER_SEGS.map(encodeURIComponent).join('/');
-    const r = await fetch(base + '/root:/' + fullPath, {headers:{Authorization:'Bearer '+token}});
-    if (r.ok) {
-      const d = await r.json();
-      console.log('%c[ZMAG] SP_FOLDER_ITEM_ID (hardcode this!): ' + d.id, 'background:green;color:white;font-size:13px;padding:3px');
-      _graphFolderBase = 'https://graph.microsoft.com/v1.0/drives/' + _SP_DRIVE_ID + '/items/' + d.id;
-      return _graphFolderBase;
-    }
-  } catch(e) { console.warn('[Graph _getGraphFolderBase]', e.message); }
-  // Fallback: root-based path (requires root access)
-  return null;
-}
-
-// Admin helper: fetch and display the folder item ID for hardcoding
-async function adminGetFolderItemId() {
-  try {
-    await _getGraphFolderBase();
-    if (_graphFolderBase) {
-      const id = _graphFolderBase.split('/items/')[1];
-      prompt('העתק את ה-Folder Item ID הזה ושלח לתמיכה לצורך הגדרה:', id);
-    } else {
-      alert('לא ניתן לאחזר — ודא שאתה מחובר עם חשבון אדמין');
-    }
-  } catch(e) { alert('שגיאה: ' + e.message); }
-}
-
 async function _graphFileUrl() {
-  // Use folder-item-based URL to avoid needing root drive access
-  const folderBase = await _getGraphFolderBase();
-  const jsonName = encodeURIComponent(PROC_JSON_FILENAME);
-  if (folderBase) return folderBase + ':/' + jsonName + ':/content';
-  // Fallback: root-based path
+  // Write URL (admin): use drive-based path
   const base = await _discoverSite();
   const path = GRAPH_PATH_SEGS.map(encodeURIComponent).join('/');
   return base + '/root:/' + path + ':/content';
 }
-// Get Graph API item metadata URL for a file in the project folder
+// Get Graph API item metadata URL — uses sharing link (works for all SEI users)
 async function _graphItemUrl(relPath) {
-  // Use folder-item-based URL — works for users with folder-only SharePoint access
-  const folderBase = await _getGraphFolderBase();
-  const relSegs = relPath.split('/').map(encodeURIComponent).join('/');
-  if (folderBase) return folderBase + ':/' + relSegs;
-  // Fallback: root-based path (requires full drive access)
-  const base = await _discoverSite();
-  const fullSegs = [...GRAPH_FOLDER_SEGS.map(encodeURIComponent), ...relPath.split('/').map(encodeURIComponent)];
-  return base + '/root:/' + fullSegs.join('/');
+  return _shareItemUrl(relPath);
 }
 // Get a pre-authenticated download URL (no auth header needed – works as iframe src)
 async function _graphDownloadUrl(filename) {
