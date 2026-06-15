@@ -471,7 +471,7 @@ const BOM = [{"lv":0,"pn":"6910W021-001/B","pb":"6910W021-001","cat":"407383883"
 // ─── State ──────────────────────────────────────────────
 // procData pre-declared here; second <script> will populate it from localStorage
 var procData = {};
-const BUILD_VER = 'v20260614.1200';
+const BUILD_VER = 'v20260614.1300';
 let rows = [];
 let selIdx = -1;
 let curSort = {col:null,asc:true};
@@ -3191,12 +3191,29 @@ function _getShareEncoded() {
   return 'u!' + b64.replace(/\+/g,'-').replace(/\//g,'_').replace(/=/g,'');
 }
 
-// Returns base URL for READ access via sharing link — works for all org users, no site membership
-function _shareItemUrl(relPath) {
+// Cache: resolved sharing link folder item {driveId, id}
+var _shareFolder = null;
+
+// Step 1: Redeem sharing link → returns {driveId, id} of the shared folder
+// After redemption, Graph allows drives-based navigation within the shared item
+async function _redeemShareLink() {
+  if (_shareFolder) return _shareFolder;
+  const token = await _graphToken();
   const encoded = _getShareEncoded();
-  const fullRel = _SP_SHARE_SUB + '/' + relPath;
-  const encodedPath = fullRel.split('/').map(encodeURIComponent).join('/');
-  return 'https://graph.microsoft.com/v1.0/shares/' + encoded + '/driveItem:/' + encodedPath;
+  const r = await fetch('https://graph.microsoft.com/v1.0/shares/' + encoded + '/driveItem', {
+    headers: {Authorization: 'Bearer ' + token}
+  });
+  if (r.ok) {
+    const d = await r.json();
+    _shareFolder = {
+      driveId: (d.parentReference && d.parentReference.driveId) || _SP_DRIVE_ID,
+      id: d.id
+    };
+    console.log('[Graph] Share link redeemed, folder id:', _shareFolder.id);
+    return _shareFolder;
+  }
+  console.warn('[Graph] Share link redemption failed:', r.status);
+  return null;
 }
 
 // Returns the SharePoint drive base URL (for write operations — admin only)
@@ -3213,9 +3230,16 @@ async function _graphFileUrl() {
   const path = GRAPH_PATH_SEGS.map(encodeURIComponent).join('/');
   return base + '/root:/' + path + ':/content';
 }
-// Get Graph API item metadata URL — uses sharing link (works for all SEI users)
+// Get Graph API item metadata URL — redeem sharing link then navigate via drives endpoint
 async function _graphItemUrl(relPath) {
-  return _shareItemUrl(relPath);
+  // Step 1: Redeem sharing link (grants access to folder contents for any org user)
+  const folder = await _redeemShareLink();
+  const driveId  = folder ? folder.driveId : _SP_DRIVE_ID;
+  const folderId = folder ? folder.id      : _SP_FOLDER_ITEM_ID;
+  // Step 2: Navigate within the resolved folder — sub-folder + relPath
+  const fullRel = _SP_SHARE_SUB + '/' + relPath;
+  const encodedPath = fullRel.split('/').map(encodeURIComponent).join('/');
+  return 'https://graph.microsoft.com/v1.0/drives/' + driveId + '/items/' + folderId + ':/' + encodedPath;
 }
 // Get a pre-authenticated download URL (no auth header needed – works as iframe src)
 async function _graphDownloadUrl(filename) {
