@@ -471,7 +471,7 @@ const BOM = [{"lv":0,"pn":"6910W021-001/B","pb":"6910W021-001","cat":"407383883"
 // ─── State ──────────────────────────────────────────────
 // procData pre-declared here; second <script> will populate it from localStorage
 var procData = {};
-const BUILD_VER = 'v20260614.1300';
+const BUILD_VER = 'v20260614.1400';
 let rows = [];
 let selIdx = -1;
 let curSort = {col:null,asc:true};
@@ -3158,7 +3158,7 @@ function saveTypesManager() {
 const MSAL_CLIENT_ID  = 'fe62b5b2-7236-4149-9d44-038ae6f98545';
 const MSAL_TENANT_ID  = 'fff493cd-fb80-4d62-b826-547a443f23de'; // SEI Technologies tenant only
 const MSAL_AUTHORITY_TENANT = MSAL_TENANT_ID;
-const GRAPH_SCOPES    = ['Files.ReadWrite', 'User.Read']; // Sites.Read.All removed — no admin consent needed
+const GRAPH_SCOPES    = ['Files.ReadWrite.All', 'User.Read']; // Admin pre-consented — grants access to all files user can access (incl. SharePoint folders)
 
 // Project folder segments in SharePoint (used for all file access)
 const GRAPH_FOLDER_SEGS = [
@@ -3174,49 +3174,14 @@ var _msalApp    = null;
 var _msalAcct   = null;
 var _graphMode  = false;
 var _graphTimer = null;
-// SharePoint org-wide sharing link for ZMAG PRODUCTE FILE 10.03.26 folder
-// Allows ANY authenticated SEI employee to access project files — no site membership needed
-// Created by admin, valid for all "People in SEI Technologies"
-const _SP_SHARE_LINK = 'https://erezsei.sharepoint.com/:f:/s/SEI/IgCwhNIkUDDDQa4iKlTcLL5rAdLs163uKr9YvDn1Ckpdq2g?e=Zd5jHt';
-// Sub-folder within the sharing link root that contains project files
-const _SP_SHARE_SUB  = 'ZMAG PRODUCTE FILE FOR FTS 10.03.26';
-// Drive-based constants (used for write operations by admin users)
-const _SP_DRIVE_ID   = 'b!Qe1iOstjY0KbJKrc_v_5zIHLrm4I4_pOlmnmzqhw083lJ5hviuDDQrvoUnxCy0Ge';
+// Hardcoded SEI SharePoint document library — discovered 2026-06-11
+// Drive: "מסמכים" | https://erezsei.sharepoint.com/sites/SEI/Shared%20Documents
+const _SP_DRIVE_ID       = 'b!Qe1iOstjY0KbJKrc_v_5zIHLrm4I4_pOlmnmzqhw083lJ5hviuDDQrvoUnxCy0Ge';
+// Item ID of ZMAG PRODUCTE FILE FOR FTS 10.03.26 folder — discovered 2026-06-14
 const _SP_FOLDER_ITEM_ID = '016E63ZBJ6UJWY3QBN6FEIMO7SI5IBYW4D';
-var _graphDriveBase  = null;
+var _graphDriveBase = null;
 
-// Encode sharing link URL as Graph API shares ID
-function _getShareEncoded() {
-  const b64 = btoa(_SP_SHARE_LINK);
-  return 'u!' + b64.replace(/\+/g,'-').replace(/\//g,'_').replace(/=/g,'');
-}
-
-// Cache: resolved sharing link folder item {driveId, id}
-var _shareFolder = null;
-
-// Step 1: Redeem sharing link → returns {driveId, id} of the shared folder
-// After redemption, Graph allows drives-based navigation within the shared item
-async function _redeemShareLink() {
-  if (_shareFolder) return _shareFolder;
-  const token = await _graphToken();
-  const encoded = _getShareEncoded();
-  const r = await fetch('https://graph.microsoft.com/v1.0/shares/' + encoded + '/driveItem', {
-    headers: {Authorization: 'Bearer ' + token}
-  });
-  if (r.ok) {
-    const d = await r.json();
-    _shareFolder = {
-      driveId: (d.parentReference && d.parentReference.driveId) || _SP_DRIVE_ID,
-      id: d.id
-    };
-    console.log('[Graph] Share link redeemed, folder id:', _shareFolder.id);
-    return _shareFolder;
-  }
-  console.warn('[Graph] Share link redemption failed:', r.status);
-  return null;
-}
-
-// Returns the SharePoint drive base URL (for write operations — admin only)
+// Returns the SharePoint drive base URL
 async function _discoverSite() {
   if (_graphDriveBase) return _graphDriveBase;
   _graphDriveBase = 'https://graph.microsoft.com/v1.0/drives/' + _SP_DRIVE_ID;
@@ -3225,21 +3190,14 @@ async function _discoverSite() {
 }
 
 async function _graphFileUrl() {
-  // Write URL (admin): use drive-based path
   const base = await _discoverSite();
   const path = GRAPH_PATH_SEGS.map(encodeURIComponent).join('/');
   return base + '/root:/' + path + ':/content';
 }
-// Get Graph API item metadata URL — redeem sharing link then navigate via drives endpoint
+// Get Graph API item metadata URL — uses folder item ID (Files.ReadWrite.All grants access)
 async function _graphItemUrl(relPath) {
-  // Step 1: Redeem sharing link (grants access to folder contents for any org user)
-  const folder = await _redeemShareLink();
-  const driveId  = folder ? folder.driveId : _SP_DRIVE_ID;
-  const folderId = folder ? folder.id      : _SP_FOLDER_ITEM_ID;
-  // Step 2: Navigate within the resolved folder — sub-folder + relPath
-  const fullRel = _SP_SHARE_SUB + '/' + relPath;
-  const encodedPath = fullRel.split('/').map(encodeURIComponent).join('/');
-  return 'https://graph.microsoft.com/v1.0/drives/' + driveId + '/items/' + folderId + ':/' + encodedPath;
+  const encodedPath = relPath.split('/').map(encodeURIComponent).join('/');
+  return 'https://graph.microsoft.com/v1.0/drives/' + _SP_DRIVE_ID + '/items/' + _SP_FOLDER_ITEM_ID + ':/' + encodedPath;
 }
 // Get a pre-authenticated download URL (no auth header needed – works as iframe src)
 async function _graphDownloadUrl(filename) {
