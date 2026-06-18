@@ -476,7 +476,7 @@ const BOM = [{"lv":0,"pn":"6910W021-001/B","pb":"6910W021-001","cat":"407383883"
 // ─── State ──────────────────────────────────────────────
 // procData pre-declared here; second <script> will populate it from localStorage
 var procData = {};
-const BUILD_VER = 'v20260618.1000';
+const BUILD_VER = 'v20260618.1200';
 let rows = [];
 let selIdx = -1;
 let curSort = {col:null,asc:true};
@@ -2522,6 +2522,16 @@ async function loadProcFromFile() {
 }
 
 async function saveProcToFile() {
+  // Priority 1: Graph API (MSAL logged in) — shared across all users
+  if (_graphMode && _msalAcct) {
+    clearTimeout(_fileSaveTimer);
+    _fileSaveTimer = setTimeout(async function() {
+      try { await _graphWriteProcFile(); setFileSyncStatus('✓ נשמר ב-SharePoint', 'ok'); }
+      catch(e) { console.error('[saveProcToFile Graph]', e); setFileSyncStatus('⚠ שגיאת שמירה: ' + e.message, 'err'); }
+    }, 800);
+    return;
+  }
+  // Priority 2: SharePoint REST API (page served from SP)
   if (_spMode) {
     clearTimeout(_fileSaveTimer);
     _fileSaveTimer = setTimeout(async function() {
@@ -2530,12 +2540,74 @@ async function saveProcToFile() {
     }, 600);
     return;
   }
+  // Priority 3: File System Access API (local file fallback)
   if (!_procFileHandle) return;
   clearTimeout(_fileSaveTimer);
   _fileSaveTimer = setTimeout(async function() {
     try { await _writeProcFile(); setFileSyncStatus('✓ נשמר', 'ok'); }
     catch(e) { setFileSyncStatus('⚠ שגיאת שמירה', 'err'); }
   }, 600);
+}
+
+// ── Graph API proc file read/write ──────────────────────────
+async function _graphWriteProcFile() {
+  const token = await _graphToken();
+  const url = await _graphFileUrl();
+  const payload = JSON.stringify({
+    version: 1, project: 'ZMAG-6910W021',
+    lastSaved: new Date().toISOString(),
+    savedBy: _msalAcct ? (_msalAcct.username || _msalAcct.name || '') : '',
+    customProcTypes: PROC_TYPES,
+    processes: procData
+  }, null, 2);
+  const r = await fetch(url, {
+    method: 'PUT',
+    headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
+    body: payload
+  });
+  if (!r.ok) {
+    let msg = r.status;
+    try { const d = await r.json(); msg = (d.error && d.error.message) || msg; } catch(e) {}
+    throw new Error('Graph PUT ' + msg);
+  }
+}
+
+async function loadProcFromGraph() {
+  if (!_graphMode || !_msalAcct) return;
+  try {
+    const token = await _graphToken();
+    const url = await _graphFileUrl();
+    const r = await fetch(url, { headers: { Authorization: 'Bearer ' + token } });
+    if (r.status === 404) {
+      // File doesn't exist yet — will be created on first save
+      setFileSyncStatus('✅ SharePoint מחובר (אין נתונים עדיין)', 'ok');
+      return;
+    }
+    if (!r.ok) {
+      let msg = r.status;
+      try { const d = await r.json(); msg = (d.error && d.error.message) || msg; } catch(e) {}
+      throw new Error('Graph GET ' + msg);
+    }
+    const text = await r.text();
+    if (!text || !text.trim()) return;
+    const obj = JSON.parse(text);
+    if (obj.customProcTypes && Array.isArray(obj.customProcTypes) && obj.customProcTypes.length) {
+      PROC_TYPES = obj.customProcTypes;
+    }
+    const loaded = obj.processes || obj;
+    if (typeof loaded === 'object' && loaded !== null && Object.keys(loaded).length > 0) {
+      procData = loaded;
+      localStorage.setItem(PROC_STORAGE_KEY, JSON.stringify(procData));
+      localStorage.setItem(TYPES_STORAGE_KEY, JSON.stringify(PROC_TYPES));
+      buildTable();
+      if (typeof curItem !== 'undefined' && curItem) renderMfgSide && renderMfgSide(curItem);
+      const savedBy = obj.savedBy ? ' (נשמר ע"י ' + obj.savedBy + ')' : '';
+      setFileSyncStatus('✅ נטען מ-SharePoint' + savedBy, 'ok');
+    }
+  } catch(e) {
+    console.error('[loadProcFromGraph]', e);
+    setFileSyncStatus('⚠ טעינה נכשלה: ' + e.message, 'err');
+  }
 }
 
 async function _writeProcFile() {
@@ -2551,6 +2623,12 @@ async function _writeProcFile() {
 }
 
 async function syncProcFromFile() {
+  // Graph API (MSAL) — shared cloud sync
+  if (_graphMode && _msalAcct) {
+    setFileSyncStatus('🔄 מסנכרן...', '');
+    await loadProcFromGraph();
+    return;
+  }
   if (_spMode) {
     try {
       const r = await fetch(_spFileUrl() + '?t=' + Date.now(), {credentials: 'include'});
@@ -3509,25 +3587,15 @@ async function _initMSAL() {
     }
   }catch(e){}
   if (_msalAcct) {
-    // Discover site and test connectivity
+    // Load shared proc data from SharePoint via Graph API
     setTimeout(async function(){
-      try{
-        // Discover drive and test folder access
-        const siteBase = await _discoverSite();
-        if (!siteBase) return;
-        var _tok=await _graphToken();
-        var _fp=[...GRAPH_FOLDER_SEGS].map(encodeURIComponent).join('/');
-        var _fr=await fetch(siteBase+'/root:/'+_fp, {headers:{Authorization:'Bearer '+_tok}});
-        var _fd=await _fr.json();
-        if(_fd.error){
-          setFileSyncStatus('⚠ Folder: '+_fd.error.code+' — '+_fd.error.message.slice(0,80),'err');
-          console.error('[Graph folder test]',_fd.error);
-        } else {
-          console.log('[Graph folder test] OK:',_fd.name);
-          setFileSyncStatus('✅ SharePoint מחובר: '+(_fd.name||''),'ok');
-        }
-      }catch(e){console.error('[Graph test]',e);}
-    },1500);
+      try {
+        await loadProcFromGraph();
+        // Show Sync button so user can manually refresh
+        const sb = document.getElementById('syncBtn');
+        if (sb) sb.style.display = '';
+      } catch(e) { console.error('[post-auth proc load]', e); }
+    }, 1500);
   }
 }
 
