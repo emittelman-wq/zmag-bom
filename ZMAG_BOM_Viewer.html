@@ -7,6 +7,7 @@
 <title>ZMAG BOM Viewer — 6910W021-001 Rev B</title>
 <style>
 :root{--bg:#0f1117;--surface:#1a1d27;--surface2:#222636;--border:#2e3348;--accent:#4f8ef7;--accent2:#38c96e;--warn:#f5a623;--danger:#e05252;--text:#e2e6f0;--text2:#8892aa;--text3:#5a6280;--row-hover:#1e2235;--row-selected:#1c2a4a;--row-sel-border:#4f8ef7;--header-bg:#141720;--preview-bg:#13151e}
+body.light-mode{--bg:#f5f7fa;--surface:#ffffff;--surface2:#f0f2f7;--border:#d0d5e0;--accent:#2563eb;--accent2:#16a34a;--warn:#d97706;--danger:#dc2626;--text:#1a1d27;--text2:#4b5563;--text3:#9ca3af;--row-hover:#f0f4ff;--row-selected:#dbeafe;--row-sel-border:#2563eb;--header-bg:#e8ecf5;--preview-bg:#f8fafc}
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(--text);height:100vh;display:flex;flex-direction:column;overflow:hidden;font-size:13px}
 
@@ -50,7 +51,7 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(
 /* BOM panel */
 .bom-panel{flex:1;display:flex;flex-direction:column;overflow:hidden;min-width:0}
 .table-wrap{flex:1;overflow:auto}
-table{width:100%;border-collapse:collapse;table-layout:fixed}
+table{width:100%;min-width:900px;border-collapse:collapse;table-layout:fixed}
 thead th{position:sticky;top:0;background:var(--header-bg);border-bottom:2px solid var(--border);padding:7px 8px;text-align:left;font-size:11px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:.5px;white-space:nowrap;cursor:pointer;user-select:none;z-index:10;overflow:hidden}
 thead th:hover{color:var(--accent)}
 thead th .si-sort{margin-left:3px;opacity:.35}
@@ -59,13 +60,16 @@ thead th.sorted .si-sort{opacity:1;color:var(--accent)}
 /* Resize handle */
 .rh{position:absolute;right:0;top:0;bottom:0;width:5px;cursor:col-resize;z-index:1}
 .rh:hover{background:var(--accent);opacity:.5}
-thead th{position:relative}
+
 
 tbody tr{border-bottom:1px solid var(--border);cursor:pointer;transition:background .1s}
 tbody tr:hover{background:var(--row-hover)}
 tbody tr.sel{background:var(--row-selected);border-left:3px solid var(--row-sel-border)}
 tbody tr.hid{display:none}
 tbody tr.cc{display:none}
+tbody tr.row-analyzed{background:rgba(56,201,110,0.08)}tbody tr.row-analyzed:hover{background:rgba(56,201,110,0.14)}tbody tr.row-analyzed.sel{background:rgba(56,201,110,0.18)}
+tbody tr.row-flagged{background:rgba(245,166,35,0.1)}tbody tr.row-flagged:hover{background:rgba(245,166,35,0.16)}
+.flag-btn{background:none;border:none;cursor:pointer;padding:2px 4px;font-size:13px;opacity:0.5;transition:opacity .15s;line-height:1}.flag-btn:hover,.flag-btn.active{opacity:1}
 td{padding:5px 8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;vertical-align:middle}
 
 .pn-cell{display:flex;align-items:center}
@@ -402,6 +406,7 @@ tr.row-disabled .badge,tr.row-disabled .proc-btn{opacity:.5}
   <button class="btn" id="buyBtn" onclick="openBuyModal()" title="Show aggregated Buy items list">📦 Buy Summary</button>
   <button class="btn" id="mfgBtn" onclick="openMfgModal()" title="Manufacturing processes summary">⚙ Manufacturing</button>
   <button class="btn" id="adminFolderBtn" onclick="adminGetFolderItemId()" title="Admin: Get SharePoint Folder Item ID for hardcoding" style="display:none;font-size:10px;opacity:.6">🔧 Get Folder ID</button>
+  <button class="btn" id="themeBtn" onclick="toggleTheme()" title="Toggle light/dark mode">☀️</button>
   <div class="stats" id="statsBar">Loading…</div>
 </div>
 
@@ -471,13 +476,16 @@ const BOM = [{"lv":0,"pn":"6910W021-001/B","pb":"6910W021-001","cat":"407383883"
 // ─── State ──────────────────────────────────────────────
 // procData pre-declared here; second <script> will populate it from localStorage
 var procData = {};
-const BUILD_VER = 'v20260614.1400';
+const BUILD_VER = 'v20260618.1000';
 let rows = [];
 let selIdx = -1;
 let curSort = {col:null,asc:true};
 let filesOnly = false;
 let collapsed = new Set();
 let disabledRows = new Set(); // BOM indices that are unchecked
+let flaggedRows = new Set();
+try{flaggedRows=new Set(JSON.parse(localStorage.getItem('zmag_flagged_6910W021')||'[]').map(Number));}catch(e){}
+if(localStorage.getItem('zmag_theme')==='light'){document.body.classList.add('light-mode');}
 let unitCosts = []; // cost per unit for each BOM index
 let treeCosts = []; // cumulative subtree cost for each BOM index
 let curTab = 'drawing';
@@ -548,10 +556,87 @@ const COLS = [
 let colWidths = COLS.map(c=>c.w);
 
 // ─── Build header ────────────────────────────────────────
+// ─── Theme toggle ────────────────────────────────────────
+function toggleTheme(){
+  document.body.classList.toggle('light-mode');
+  localStorage.setItem(THEME_KEY, document.body.classList.contains('light-mode')?'light':'dark');
+  const btn=document.getElementById('themeBtn');
+  if(btn) btn.textContent=document.body.classList.contains('light-mode')?'🌙':'☀️';
+}
+// Fix initial button icon if light mode was restored from storage
+(function(){const _btn=document.getElementById('themeBtn');if(_btn&&document.body.classList.contains('light-mode'))_btn.textContent='🌙';})();
+
+// ─── Filter state persistence ────────────────────────────
+function saveFilterState(){
+  try{
+    localStorage.setItem(FILTER_STATE_KEY,JSON.stringify({
+      disabledRows:[...disabledRows],
+      selTypes:[...selTypes],
+      filesOnly,
+      filterStatus,
+      searchTerm:document.getElementById('searchInput')?.value||''
+    }));
+  }catch(e){}
+}
+function loadFilterState(){
+  try{
+    const raw=localStorage.getItem(FILTER_STATE_KEY);
+    if(!raw)return;
+    const s=JSON.parse(raw);
+    if(s.disabledRows)disabledRows=new Set(s.disabledRows.map(Number));
+    if(s.selTypes)selTypes=new Set(s.selTypes);
+    if(typeof s.filesOnly==='boolean'){
+      filesOnly=s.filesOnly;
+      document.getElementById('filesOnlyBtn')?.classList.toggle('on',filesOnly);
+    }
+    if(s.filterStatus){
+      filterStatus=s.filterStatus;
+      const sf=document.getElementById('statusFilter');
+      if(sf)sf.value=filterStatus;
+    }
+    if(s.searchTerm){
+      const sb=document.getElementById('searchInput');
+      if(sb){sb.value=s.searchTerm;searchTerm=s.searchTerm.trim().toLowerCase();}
+    }
+    updateRowCheckVisuals();
+    updateTypeBtn();
+  }catch(e){}
+}
+
+// ─── Flag toggle ─────────────────────────────────────────
+function toggleFlag(idx,e){
+  e.stopPropagation();
+  if(flaggedRows.has(idx))flaggedRows.delete(idx);else flaggedRows.add(idx);
+  localStorage.setItem(FLAG_KEY,JSON.stringify([...flaggedRows]));
+  const tr=rows[idx];
+  if(tr){
+    tr.classList.toggle('row-flagged',flaggedRows.has(idx));
+    const btn=tr.querySelector('.flag-btn');
+    if(btn){btn.textContent=flaggedRows.has(idx)?'🚩':'⚑';btn.classList.toggle('active',flaggedRows.has(idx));}
+  }
+}
+
+// ─── Analyzed row highlighting ───────────────────────────
+function updateAnalyzedRows(){
+  rows.forEach((tr,idx)=>{
+    if(!tr)return;
+    const item=BOM[idx];
+    const pb=item.pb||item.pn;
+    const has=(procData[pb]||[]).filter(p=>p.type).length>0;
+    tr.classList.toggle('row-analyzed',has);
+  });
+}
+
 function buildHeader(){
   const cg = document.getElementById('colgroup');
   const hr = document.getElementById('headerRow');
   cg.innerHTML=''; hr.innerHTML='';
+  // Row number header
+  const numCol=document.createElement('col'); numCol.style.width='35px'; cg.appendChild(numCol);
+  const numTh=document.createElement('th'); numTh.textContent='#'; numTh.style.cssText='width:35px;min-width:35px;text-align:center'; hr.appendChild(numTh);
+  // Flag header
+  const flagCol=document.createElement('col'); flagCol.style.width='28px'; cg.appendChild(flagCol);
+  const flagTh=document.createElement('th'); flagTh.textContent='⚑'; flagTh.style.cssText='width:28px;min-width:28px;text-align:center;padding:0'; hr.appendChild(flagTh);
   COLS.forEach((col,i)=>{
     const cEl=document.createElement('col');
     cEl.style.width=colWidths[i]+'px';
@@ -657,6 +742,23 @@ function buildTable(){
     tr.dataset.kids=hasKids?'1':'0';
     const indent=item.lv*14;
 
+    // Row number cell
+    const numTd=document.createElement('td');
+    numTd.textContent=idx+1;
+    numTd.style.cssText='text-align:center;color:var(--text3);font-size:11px;user-select:none';
+    tr.appendChild(numTd);
+
+    // Flag cell
+    const flagTd=document.createElement('td');
+    flagTd.style.cssText='width:28px;min-width:28px;text-align:center;padding:0';
+    const flagBtn=document.createElement('button');
+    flagBtn.className='flag-btn'+(flaggedRows.has(idx)?' active':'');
+    flagBtn.textContent=flaggedRows.has(idx)?'🚩':'⚑';
+    flagBtn.onclick=(e)=>toggleFlag(idx,e);
+    flagTd.appendChild(flagBtn);
+    tr.appendChild(flagTd);
+    if(flaggedRows.has(idx)) tr.classList.add('row-flagged');
+
     // Level cell
     const tdLv=document.createElement('td');
     tdLv.style.whiteSpace='nowrap';
@@ -758,6 +860,7 @@ function buildTable(){
     if (item.type === 'ELTDesign') {
       const pb = item.pb || item.pn;
       const procs = (procData[pb] || []).filter(p => p.type);
+      if(procs.length > 0) tr.classList.add('row-analyzed');
       const btn = document.createElement('button');
       btn.className = 'proc-btn';
       btn.title = procs.length ? procs.length + ' process(es) defined — click to edit' : 'Add manufacturing processes';
@@ -859,6 +962,7 @@ function toggleType(type,cb){
   if(cb.checked) selTypes.add(type); else selTypes.delete(type);
   updateTypeBtn();
   applyFilters();
+  saveFilterState();
 }
 function updateTypeBtn(){
   const btn=document.getElementById('typeBtn');
@@ -890,6 +994,7 @@ function toggleFilesOnly(){
   filesOnly=!filesOnly;
   document.getElementById('filesOnlyBtn').classList.toggle('on',filesOnly);
   applyFilters();
+  saveFilterState();
 }
 
 function applyFilters(){
@@ -930,6 +1035,7 @@ function applyFilters(){
   if(searchTerm) hlSearch(searchTerm); else clearHL();
   document.getElementById('emptyState').style.display=vis===0?'block':'none';
   updateStats(vis);
+  saveFilterState();
 }
 
 function hlSearch(q){
@@ -988,6 +1094,7 @@ function toggleRowCheck(idx){
   }
   updateRowCheckVisuals();
   buyBuilt=false; // invalidate buy cache
+  saveFilterState();
 }
 function updateRowCheckVisuals(){
   rows.forEach(function(tr,i){
@@ -1430,6 +1537,8 @@ async function load3D(stpPath, container){
 // ─── Init ────────────────────────────────────────────────
 buildHeader();
 buildTable();
+loadFilterState();
+applyFilters();
 updateStats();
 </script>
 
@@ -2215,6 +2324,9 @@ const SETUP_UNITS = [
 
 const PROC_STORAGE_KEY = 'zmag_proc_6910W021';
 const TYPES_STORAGE_KEY = 'zmag_proc_types_6910W021';
+const THEME_KEY = 'zmag_theme';
+const FILTER_STATE_KEY = 'zmag_filter_6910W021';
+const FLAG_KEY = 'zmag_flagged_6910W021';
 const PROC_JSON_FILENAME = 'ZMAG_Manufacturing_Processes.json';
 
 // ╔══════════════════════════════════════════════════════════╗
@@ -2261,6 +2373,7 @@ function loadProcData() {
 function saveProcData() {
   localStorage.setItem(PROC_STORAGE_KEY, JSON.stringify(procData));
   localStorage.setItem(TYPES_STORAGE_KEY, JSON.stringify(PROC_TYPES));
+  updateAnalyzedRows();
   saveProcToFile(); // async — fire and forget
 }
 
