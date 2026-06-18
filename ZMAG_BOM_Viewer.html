@@ -476,7 +476,7 @@ const BOM = [{"lv":0,"pn":"6910W021-001/B","pb":"6910W021-001","cat":"407383883"
 // ─── State ──────────────────────────────────────────────
 // procData pre-declared here; second <script> will populate it from localStorage
 var procData = {};
-const BUILD_VER = 'v20260618.1200';
+const BUILD_VER = 'v20260618.1300';
 let rows = [];
 let selIdx = -1;
 let curSort = {col:null,asc:true};
@@ -2629,6 +2629,12 @@ async function syncProcFromFile() {
     await loadProcFromGraph();
     return;
   }
+  // Not logged in — prompt to sign in
+  if (!_spMode && !_procFileHandle) {
+    setFileSyncStatus('⚠ התחבר עם Microsoft כדי לסנכרן', 'err');
+    setTimeout(()=>msalLogin(), 800);
+    return;
+  }
   if (_spMode) {
     try {
       const r = await fetch(_spFileUrl() + '?t=' + Date.now(), {credentials: 'include'});
@@ -2649,7 +2655,7 @@ async function syncProcFromFile() {
     } catch(e) { setFileSyncStatus('⚠ ' + e.message, 'err'); }
     return;
   }
-  if (!_procFileHandle) { setFileSyncStatus('⚠ פתח תיקייה תחילה', 'err'); return; }
+  if (!_procFileHandle) { setFileSyncStatus('⚠ התחבר עם Microsoft כדי לסנכרן', 'err'); return; }
   try {
     const file = await _procFileHandle.getFile();
     const obj = JSON.parse(await file.text());
