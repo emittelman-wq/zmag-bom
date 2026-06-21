@@ -476,7 +476,7 @@ const BOM = [{"lv":0,"pn":"6910W021-001/B","pb":"6910W021-001","cat":"407383883"
 // ─── State ──────────────────────────────────────────────
 // procData pre-declared here; second <script> will populate it from localStorage
 var procData = {};
-const BUILD_VER = 'v20260618.1600';
+const BUILD_VER = 'v20260618.1700';
 let rows = [];
 let selIdx = -1;
 let curSort = {col:null,asc:true};
@@ -813,7 +813,7 @@ function buildTable(){
 
     // Desc
     const tdD=document.createElement('td');
-    tdD.textContent=item.desc; tdD.title=item.desc;
+    tdD.className='desc-cell'; tdD.textContent=item.desc; tdD.title=item.desc;
     tr.appendChild(tdD);
 
     // Catalog
@@ -1047,7 +1047,7 @@ function hlSearch(q){
   rows.forEach((tr,idx)=>{
     const item=BOM[idx];
     const pn=tr.querySelector('.pn-txt');
-    const dc=tr.cells[2];
+    const dc=tr.querySelector('.desc-cell');
     if(pn) pn.innerHTML=hlTxt(item.pn,q);
     if(dc) dc.innerHTML=hlTxt(item.desc,q);
   });
@@ -1056,7 +1056,7 @@ function clearHL(){
   rows.forEach((tr,idx)=>{
     const item=BOM[idx];
     const pn=tr.querySelector('.pn-txt');
-    const dc=tr.cells[2];
+    const dc=tr.querySelector('.desc-cell');
     if(pn) pn.textContent=item.pn;
     if(dc) dc.textContent=item.desc;
   });
