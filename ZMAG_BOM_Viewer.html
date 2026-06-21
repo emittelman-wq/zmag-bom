@@ -67,7 +67,7 @@ tbody tr:hover{background:var(--row-hover)}
 tbody tr.sel{background:var(--row-selected);border-left:3px solid var(--row-sel-border)}
 tbody tr.hid{display:none}
 tbody tr.cc{display:none}
-tbody tr.row-analyzed{background:rgba(56,201,110,0.08)}tbody tr.row-analyzed:hover{background:rgba(56,201,110,0.14)}tbody tr.row-analyzed.sel{background:rgba(56,201,110,0.18)}
+tbody tr.row-analyzed{background:rgba(56,201,110,0.18)}tbody tr.row-analyzed:hover{background:rgba(56,201,110,0.28)}tbody tr.row-analyzed.sel{background:rgba(56,201,110,0.32)}
 tbody tr.row-flagged{background:rgba(245,166,35,0.1)}tbody tr.row-flagged:hover{background:rgba(245,166,35,0.16)}
 .flag-btn{background:none;border:none;cursor:pointer;padding:2px 4px;font-size:13px;opacity:0.5;transition:opacity .15s;line-height:1}.flag-btn:hover,.flag-btn.active{opacity:1}
 td{padding:5px 8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;vertical-align:middle}
@@ -476,7 +476,7 @@ const BOM = [{"lv":0,"pn":"6910W021-001/B","pb":"6910W021-001","cat":"407383883"
 // ─── State ──────────────────────────────────────────────
 // procData pre-declared here; second <script> will populate it from localStorage
 var procData = {};
-const BUILD_VER = 'v20260618.1300';
+const BUILD_VER = 'v20260618.1600';
 let rows = [];
 let selIdx = -1;
 let curSort = {col:null,asc:true};
@@ -539,6 +539,7 @@ async function getFileBuffer(relPath){
 
 // ─── Column definitions ──────────────────────────────────
 const COLS = [
+  {id:'proc', label:'Proc',       w:55,  sort:false},
   {id:'lv',   label:'Level',      w:60,  sort:true},
   {id:'pn',   label:'Part Number',w:160, sort:true},
   {id:'desc', label:'Description',w:300, sort:true},
@@ -549,7 +550,6 @@ const COLS = [
   {id:'type', label:'Type',       w:90,  sort:true},
   {id:'st',   label:'Status',     w:80,  sort:true},
   {id:'files',label:'Files',      w:60,  sort:false},
-  {id:'proc', label:'Proc',       w:55,  sort:false},
   {id:'ucost',label:'💰 Cost',    w:80,  sort:false},
   {id:'tcost',label:'🌳 Total',   w:90,  sort:false}
 ];
@@ -589,18 +589,22 @@ function loadFilterState(){
       filesOnly=s.filesOnly;
       document.getElementById('filesOnlyBtn')?.classList.toggle('on',filesOnly);
     }
-    if(s.filterStatus){
-      filterStatus=s.filterStatus;
-      const sf=document.getElementById('statusFilter');
-      if(sf)sf.value=filterStatus;
-    }
+    // Always sync statusFilter (even if empty — to clear it)
+    filterStatus=s.filterStatus||'';
+    const sf=document.getElementById('statusFilter');
+    if(sf)sf.value=filterStatus;
     if(s.searchTerm){
       const sb=document.getElementById('searchInput');
       if(sb){sb.value=s.searchTerm;searchTerm=s.searchTerm.trim().toLowerCase();}
     }
+    // Sync TYPE checkboxes with restored selTypes
+    ['ELTDesign','Buy','Package'].forEach(type=>{
+      const cb=document.querySelector('#typeDD input[onchange*="\''+type+'\'"]');
+      if(cb) cb.checked=selTypes.has(type);
+    });
     updateRowCheckVisuals();
     updateTypeBtn();
-  }catch(e){}
+  }catch(e){console.error('[loadFilterState]',e);}
 }
 
 // ─── Flag toggle ─────────────────────────────────────────
@@ -677,7 +681,8 @@ function makeResizer(colIdx){
 
 function applyColWidths(){
   const cols=document.querySelectorAll('#colgroup col');
-  colWidths.forEach((w,i)=>{ if(cols[i]) cols[i].style.width=w+'px'; });
+  // cols[0]='#' col, cols[1]='⚑' col — data cols start at index 2
+  colWidths.forEach((w,i)=>{ if(cols[i+2]) cols[i+2].style.width=w+'px'; });
 }
 
 // ─── Build table ─────────────────────────────────────────
@@ -758,6 +763,23 @@ function buildTable(){
     flagTd.appendChild(flagBtn);
     tr.appendChild(flagTd);
     if(flaggedRows.has(idx)) tr.classList.add('row-flagged');
+
+    // Proc column — ELTDesign items only (moved here: between flag and level)
+    const tdP = document.createElement('td');
+    tdP.style.textAlign = 'center';
+    if (item.type === 'ELTDesign') {
+      const pb = item.pb || item.pn;
+      const procs = (procData[pb] || []).filter(p => p.type);
+      if(procs.length > 0) tr.classList.add('row-analyzed');
+      const btn = document.createElement('button');
+      btn.className = 'proc-btn';
+      btn.title = procs.length ? procs.length + ' process(es) defined — click to edit' : 'Add manufacturing processes';
+      btn.textContent = procs.length ? '⚙ ' + procs.length : '⚙';
+      if (procs.length) btn.classList.add('proc-has');
+      btn.addEventListener('click', ev => { ev.stopPropagation(); openProcEditor(pb, item.desc, item.tq || 1); });
+      tdP.appendChild(btn);
+    }
+    tr.appendChild(tdP);
 
     // Level cell
     const tdLv=document.createElement('td');
@@ -853,23 +875,6 @@ function buildTable(){
       c.style.color='#4090e0'; c.title=item.cads.length+' CAD file(s)'; fi.appendChild(c);
     }
     tdF.appendChild(fi); tr.appendChild(tdF);
-
-    // Proc column — ELTDesign items only
-    const tdP = document.createElement('td');
-    tdP.style.textAlign = 'center';
-    if (item.type === 'ELTDesign') {
-      const pb = item.pb || item.pn;
-      const procs = (procData[pb] || []).filter(p => p.type);
-      if(procs.length > 0) tr.classList.add('row-analyzed');
-      const btn = document.createElement('button');
-      btn.className = 'proc-btn';
-      btn.title = procs.length ? procs.length + ' process(es) defined — click to edit' : 'Add manufacturing processes';
-      btn.textContent = procs.length ? '⚙ ' + procs.length : '⚙';
-      if (procs.length) btn.classList.add('proc-has');
-      btn.addEventListener('click', ev => { ev.stopPropagation(); openProcEditor(pb, item.desc, item.tq || 1); });
-      tdP.appendChild(btn);
-    }
-    tr.appendChild(tdP);
 
     // Unit Cost cell
     const tdUC = document.createElement('td');
@@ -2600,6 +2605,7 @@ async function loadProcFromGraph() {
       localStorage.setItem(PROC_STORAGE_KEY, JSON.stringify(procData));
       localStorage.setItem(TYPES_STORAGE_KEY, JSON.stringify(PROC_TYPES));
       buildTable();
+      applyFilters(); // restore saved filter state after table rebuild
       if (typeof curItem !== 'undefined' && curItem) renderMfgSide && renderMfgSide(curItem);
       const savedBy = obj.savedBy ? ' (נשמר ע"י ' + obj.savedBy + ')' : '';
       setFileSyncStatus('✅ נטען מ-SharePoint' + savedBy, 'ok');
