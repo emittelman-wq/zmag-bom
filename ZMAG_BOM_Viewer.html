@@ -476,7 +476,7 @@ const BOM = [{"lv":0,"pn":"6910W021-001/B","pb":"6910W021-001","cat":"407383883"
 // ─── State ──────────────────────────────────────────────
 // procData pre-declared here; second <script> will populate it from localStorage
 var procData = {};
-const BUILD_VER = 'v20260618.1700';
+const BUILD_VER = 'v20260618.1900';
 let rows = [];
 let selIdx = -1;
 let curSort = {col:null,asc:true};
@@ -497,6 +497,11 @@ let selTypes = new Set(['ELTDesign','Buy','Package']);
 let curStpPath = null;
 let viewerActive = false;
 let rootDirHandle = null;
+
+// ── Storage keys — must be in first script block for loadFilterState() ──
+const FILTER_STATE_KEY = 'zmag_filter_6910W021';
+const FLAG_KEY         = 'zmag_flagged_6910W021';
+const THEME_KEY        = 'zmag_theme';
 
 async function grantAccess(){
   if(!('showDirectoryPicker' in window)){
@@ -1033,6 +1038,8 @@ function applyFilters(){
     let show;
     if(!filtering) show=!tr.classList.contains('cc');
     else show=showSet.has(idx);
+    // Hard guard: never show items of explicitly excluded types
+    if(show && selTypes.size<3 && !selTypes.has(BOM[idx].type)) show=false;
     tr.classList.toggle('hid',!show);
     if(show) vis++;
   });
@@ -2329,9 +2336,7 @@ const SETUP_UNITS = [
 
 const PROC_STORAGE_KEY = 'zmag_proc_6910W021';
 const TYPES_STORAGE_KEY = 'zmag_proc_types_6910W021';
-const THEME_KEY = 'zmag_theme';
-const FILTER_STATE_KEY = 'zmag_filter_6910W021';
-const FLAG_KEY = 'zmag_flagged_6910W021';
+// THEME_KEY, FILTER_STATE_KEY, FLAG_KEY declared in first script block
 const PROC_JSON_FILENAME = 'ZMAG_Manufacturing_Processes.json';
 
 // ╔══════════════════════════════════════════════════════════╗
