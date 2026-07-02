@@ -407,6 +407,7 @@ tr.row-disabled .badge,tr.row-disabled .proc-btn{opacity:.5}
   <button class="btn" id="buyBtn" onclick="openBuyModal()" title="Show aggregated Buy items list">📦 Buy Summary</button>
   <button class="btn" id="mfgBtn" onclick="openMfgModal()" title="Manufacturing processes summary">⚙ Manufacturing</button>
   <button class="btn" id="rfqBtn" onclick="openRFQModal()" title="Subcontractor RFQ list">🔧 RFQ</button>
+  <button class="btn" id="xlsxBtn" onclick="exportBomExcel()" title="ייצוא BOM לקובץ Excel עם היררכיה וקיבוץ">📊 Excel</button>
   <button class="btn" id="adminFolderBtn" onclick="adminGetFolderItemId()" title="Admin: Get SharePoint Folder Item ID for hardcoding" style="display:none;font-size:10px;opacity:.6">🔧 Get Folder ID</button>
   <button class="btn" id="themeBtn" onclick="toggleTheme()" title="Toggle light/dark mode">☀️</button>
   <div class="stats" id="statsBar">Loading…</div>
@@ -487,7 +488,7 @@ const BOM = [{"lv":0,"pn":"6910W021-001/B","pb":"6910W021-001","cat":"407383883"
 // ─── State ──────────────────────────────────────────────
 // procData pre-declared here; second <script> will populate it from localStorage
 var procData = {};
-const BUILD_VER = 'v20260702.1400';
+const BUILD_VER = 'v20260702.1500';
 let rows = [];
 let selIdx = -1;
 let curSort = {col:null,asc:true};
@@ -3592,6 +3593,190 @@ const GRAPH_FOLDER_SEGS = [
 ];
 // Full path to the JSON proc file
 const GRAPH_PATH_SEGS = [...GRAPH_FOLDER_SEGS, PROC_JSON_FILENAME];
+
+// ── RFQ Modal ─────────────────────────────────────────────
+function openRFQModal() {
+  let m = document.getElementById('rfqModal');
+  if (!m) {
+    m = document.createElement('div');
+    m.id = 'rfqModal';
+    m.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:1000;display:none;align-items:center;justify-content:center';
+    m.innerHTML =
+      '<div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;width:820px;max-height:82vh;display:flex;flex-direction:column;overflow:hidden">' +
+        '<div style="padding:10px 16px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">' +
+          '<span style="font-weight:600;font-size:14px">🔧 RFQ – קבלני משנה</span>' +
+          '<div style="display:flex;gap:8px">' +
+            '<button onclick="exportRFQCSV()" style="padding:4px 12px;background:var(--accent2);color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:12px">📥 Export CSV</button>' +
+            '<button onclick="document.getElementById(\'rfqModal\').style.display=\'none\'" style="padding:4px 10px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;cursor:pointer">✕</button>' +
+          '</div>' +
+        '</div>' +
+        '<div id="rfqTableContainer" style="overflow:auto;flex:1;padding:14px;direction:rtl"></div>' +
+      '</div>';
+    document.body.appendChild(m);
+  }
+  renderRFQTable();
+  m.style.display = 'flex';
+}
+function renderRFQTable() {
+  const c = document.getElementById('rfqTableContainer');
+  if (!c) return;
+  const byDomain = {};
+  BOM.forEach(item => {
+    const pb = item.pb || item.pn;
+    if (!subData[pb]) return;
+    const domain = (subData[pb].domain || '').trim() || 'כללי';
+    if (!byDomain[domain]) byDomain[domain] = [];
+    byDomain[domain].push({item, pb});
+  });
+  const domains = Object.keys(byDomain).sort();
+  if (!domains.length) {
+    c.innerHTML = '<p style="color:var(--text2);text-align:center;padding:32px;font-size:13px">אין פריטי קבלן משנה מסווגים.<br>פתח עורך תהליכים (⚙) וסמן פריטים כקבלן משנה.</p>';
+    return;
+  }
+  let html = '';
+  domains.forEach(domain => {
+    const items = byDomain[domain];
+    html += '<div style="margin-bottom:16px">' +
+      '<div style="font-weight:600;color:var(--accent);font-size:13px;margin-bottom:6px;padding-bottom:4px;border-bottom:1px solid var(--border)">' + domain + ' (' + items.length + ')</div>' +
+      '<table style="width:100%;border-collapse:collapse;font-size:12px">' +
+        '<thead><tr style="background:var(--surface2)">' +
+          '<th style="padding:5px 8px;text-align:right;border:1px solid var(--border)">מק"ט</th>' +
+          '<th style="padding:5px 8px;text-align:right;border:1px solid var(--border)">תיאור</th>' +
+          '<th style="padding:5px 8px;text-align:center;border:1px solid var(--border)">כמות</th>' +
+          '<th style="padding:5px 8px;text-align:center;border:1px solid var(--border)">כמות כוללת</th>' +
+          '<th style="padding:5px 8px;text-align:center;border:1px solid var(--border)">יחידה</th>' +
+        '</tr></thead><tbody>';
+    items.forEach(({item}) => {
+      html += '<tr>' +
+        '<td style="padding:4px 8px;border:1px solid var(--border);font-family:monospace;font-size:11px">' + (item.pn||'') + '</td>' +
+        '<td style="padding:4px 8px;border:1px solid var(--border)">' + (item.desc||'') + '</td>' +
+        '<td style="padding:4px 8px;text-align:center;border:1px solid var(--border)">' + (item.qty||'') + '</td>' +
+        '<td style="padding:4px 8px;text-align:center;border:1px solid var(--border)">' + (item.tq||'') + '</td>' +
+        '<td style="padding:4px 8px;text-align:center;border:1px solid var(--border)">' + (item.uom||'') + '</td>' +
+        '</tr>';
+    });
+    html += '</tbody></table></div>';
+  });
+  c.innerHTML = html;
+}
+function exportRFQCSV() {
+  let csv = '﻿' + 'מקט,תיאור,כמות,כמות כוללת,יחידה,תחום\n';
+  const byDomain = {};
+  BOM.forEach(item => {
+    const pb = item.pb || item.pn;
+    if (!subData[pb]) return;
+    const domain = (subData[pb].domain||'').trim()||'כללי';
+    if (!byDomain[domain]) byDomain[domain] = [];
+    byDomain[domain].push(item);
+  });
+  Object.keys(byDomain).sort().forEach(domain => {
+    byDomain[domain].forEach(item => {
+      csv += '"' + (item.pn||'').replace(/"/g,'""') + '","' + (item.desc||'').replace(/"/g,'""') + '","' +
+        (item.qty||'') + '","' + (item.tq||'') + '","' + (item.uom||'') + '","' + domain + '"\n';
+    });
+  });
+  const a = document.createElement('a');
+  a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv);
+  a.download = 'ZMAG_RFQ_Subcontractors.csv';
+  a.click();
+}
+
+// ── Excel BOM Export ──────────────────────────────────────
+function exportBomExcel() {
+  const btn = document.getElementById('xlsxBtn');
+  if (btn) { btn.textContent = '⏳'; btn.disabled = true; }
+  const restore = () => { if (btn) { btn.textContent = '📊 Excel'; btn.disabled = false; } };
+  const run = () => {
+    try {
+      const wb = new ExcelJS.Workbook();
+      wb.creator = 'ZMAG BOM Viewer';
+      const ws = wb.addWorksheet('BOM', {
+        views: [{ rightToLeft: true, state: 'frozen', ySplit: 1 }],
+        properties: { summaryBelow: false, summaryRight: false }
+      });
+      ws.columns = [
+        { header: '#',           key: 'num',  width: 5  },
+        { header: 'רמה',         key: 'lv',   width: 6  },
+        { header: 'מק"ט',        key: 'pn',   width: 26 },
+        { header: 'תיאור',       key: 'desc', width: 48 },
+        { header: 'קטלוג',       key: 'cat',  width: 15 },
+        { header: 'כמות',        key: 'qty',  width: 8  },
+        { header: 'כמות כוללת',  key: 'tq',   width: 13 },
+        { header: 'יחידה',       key: 'uom',  width: 8  },
+        { header: 'סוג',         key: 'type', width: 12 },
+        { header: 'סטטוס',       key: 'st',   width: 12 },
+      ];
+      // Header style
+      const hdrRow = ws.getRow(1);
+      hdrRow.height = 20;
+      hdrRow.eachCell(cell => {
+        cell.font      = { bold: true, color: { argb: 'FFFFFFFF' }, size: 10, name: 'Arial' };
+        cell.fill      = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1F3864' } };
+        cell.alignment = { horizontal: 'center', vertical: 'middle', readingOrder: 'rightToLeft' };
+        cell.border    = { bottom: { style: 'thin', color: { argb: 'FF8EA9C1' } } };
+      });
+      ws.autoFilter = { from: 'A1', to: 'J1' };
+      // Type fill colors
+      const typeFill = {
+        ELTDesign: 'FFD6E4BC',
+        Buy:       'FFBDD7EE',
+        Package:   'FFFFFFCC',
+      };
+      let rowNum = 0;
+      BOM.forEach((item, i) => {
+        const tr = rows[i];
+        if (!tr || tr.classList.contains('hid') || tr.classList.contains('vhid')) return;
+        rowNum++;
+        const indent = '  '.repeat(item.lv);
+        const exRow = ws.addRow({
+          num:  rowNum,
+          lv:   item.lv,
+          pn:   indent + (item.pn  || ''),
+          desc: item.desc || '',
+          cat:  item.cat  || '',
+          qty:  item.qty  != null ? item.qty  : '',
+          tq:   item.tq   != null ? item.tq   : '',
+          uom:  item.uom  || '',
+          type: item.type || '',
+          st:   item.st   || '',
+        });
+        exRow.outlineLevel = Math.min(item.lv, 7);
+        exRow.height = 15;
+        const bg = typeFill[item.type];
+        exRow.eachCell({ includeEmpty: true }, cell => {
+          cell.font      = { name: 'Arial', size: 9 };
+          cell.alignment = { vertical: 'middle', readingOrder: 'rightToLeft' };
+          if (bg) cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: bg } };
+          cell.border    = { bottom: { style: 'hair', color: { argb: 'FFD0D0D0' } } };
+        });
+        // Center numeric cells
+        ['num','lv','qty','tq'].forEach(k => {
+          const col = ws.getColumn(k);
+          const cell = exRow.getCell(col.number);
+          cell.alignment = { horizontal: 'center', vertical: 'middle' };
+        });
+      });
+      const date = new Date().toISOString().slice(0,10).replace(/-/g,'');
+      wb.xlsx.writeBuffer().then(buf => {
+        const blob = new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+        const url  = URL.createObjectURL(blob);
+        const a    = document.createElement('a');
+        a.href     = url;
+        a.download = 'ZMAG_BOM_' + date + '.xlsx';
+        document.body.appendChild(a);
+        a.click(); a.remove();
+        URL.revokeObjectURL(url);
+        restore();
+      }).catch(e => { alert('שגיאה בייצוא: ' + e.message); restore(); });
+    } catch(e) { alert('שגיאה: ' + e.message); restore(); }
+  };
+  if (window.ExcelJS) { run(); return; }
+  const s = document.createElement('script');
+  s.src = 'https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.3.0/exceljs.min.js';
+  s.onload = run;
+  s.onerror = () => { alert('לא ניתן לטעון ספריית Excel'); restore(); };
+  document.head.appendChild(s);
+}
 
 var _msalApp    = null;
 var _msalAcct   = null;
