@@ -478,7 +478,7 @@ const BOM = [{"lv":0,"pn":"6910W021-001/B","pb":"6910W021-001","cat":"407383883"
 // ─── State ──────────────────────────────────────────────
 // procData pre-declared here; second <script> will populate it from localStorage
 var procData = {};
-const BUILD_VER = 'v20260702.1100';
+const BUILD_VER = 'v20260702.1200';
 let rows = [];
 let selIdx = -1;
 let curSort = {col:null,asc:true};
@@ -1203,7 +1203,7 @@ function updateStats(vis){
   const dis=disabledRows.size;
   const disStr=dis>0?' · '+dis+' hidden':'';
   // Use innerHTML to preserve analysisProgress span child
-  const eligibleItems = BOM.filter(item => item.type === 'ELTDesign' && item.files && item.files.length > 0);
+  const eligibleItems = BOM.filter(item => item.type === 'ELTDesign' && item.pdf);
   const analyzedItems = eligibleItems.filter(item => {
     const pb = item.pb || item.pn;
     return procData[pb] && procData[pb].length > 0;
@@ -2721,14 +2721,16 @@ async function loadProcFromGraph() {
     if (Array.isArray(obj.flaggedRows)) {
       flaggedRows = new Set(obj.flaggedRows.map(Number));
       localStorage.setItem(FLAG_KEY, JSON.stringify([...flaggedRows]));
-      document.querySelectorAll('.flag-btn').forEach((btn) => {
-        const rowIdx = parseInt(btn.dataset.idx);
-        if (!isNaN(rowIdx)) {
-          btn.classList.toggle('active', flaggedRows.has(rowIdx));
-          btn.textContent = flaggedRows.has(rowIdx) ? '🚩' : '⚑';
+      // Update every row: TR class + button state
+      rows.forEach((tr, i) => {
+        if (!tr) return;
+        tr.classList.toggle('row-flagged', flaggedRows.has(i));
+        const btn = tr.querySelector('.flag-btn');
+        if (btn) {
+          btn.classList.toggle('active', flaggedRows.has(i));
+          btn.textContent = flaggedRows.has(i) ? '🚩' : '⚑';
         }
       });
-      if (typeof applyRowClasses === 'function') applyRowClasses();
     }
   } catch(e) {
     console.error('[loadProcFromGraph]', e);
