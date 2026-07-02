@@ -67,6 +67,7 @@ tbody tr:hover{background:var(--row-hover)}
 tbody tr.sel{background:var(--row-selected);border-left:3px solid var(--row-sel-border)}
 tbody tr.hid{display:none}
 tbody tr.cc{display:none}
+tbody tr.vhid{display:none !important}
 tbody tr.row-analyzed{background:rgba(56,201,110,0.18)}tbody tr.row-analyzed:hover{background:rgba(56,201,110,0.28)}tbody tr.row-analyzed.sel{background:rgba(56,201,110,0.32)}
 tbody tr.row-flagged{background:rgba(245,166,35,0.1)}tbody tr.row-flagged:hover{background:rgba(245,166,35,0.16)}
 .flag-btn{background:none;border:none;cursor:pointer;padding:2px 4px;font-size:13px;opacity:0.5;transition:opacity .15s;line-height:1}.flag-btn:hover,.flag-btn.active{opacity:1}
@@ -356,7 +357,7 @@ tr.row-disabled .badge,tr.row-disabled .proc-btn{opacity:.5}
 <div class="topbar">
   <div>
     <div class="topbar-title">ZMAG BOM Viewer</div>
-    <div class="topbar-sub">6910W021-001 Rev B &nbsp;<span id="verBadge" style="font-size:9px;opacity:0.45;font-family:monospace">v20260610.1820</span></div>
+    <div class="topbar-sub">6910W021-001 Rev B &nbsp;<span id="verBadge" style="font-size:9px;opacity:0.45;font-family:monospace">v20260702.1000</span></div>
   </div>
   <div class="sep"></div>
 
@@ -405,6 +406,7 @@ tr.row-disabled .badge,tr.row-disabled .proc-btn{opacity:.5}
   <span id="fileSyncStatus" style="font-size:11px;color:var(--accent2);opacity:0;transition:opacity .5s;margin-right:4px"></span>
   <button class="btn" id="buyBtn" onclick="openBuyModal()" title="Show aggregated Buy items list">📦 Buy Summary</button>
   <button class="btn" id="mfgBtn" onclick="openMfgModal()" title="Manufacturing processes summary">⚙ Manufacturing</button>
+  <button class="btn" id="rfqBtn" onclick="openRFQModal()" title="Subcontractor RFQ list">🔧 RFQ</button>
   <button class="btn" id="adminFolderBtn" onclick="adminGetFolderItemId()" title="Admin: Get SharePoint Folder Item ID for hardcoding" style="display:none;font-size:10px;opacity:.6">🔧 Get Folder ID</button>
   <button class="btn" id="themeBtn" onclick="toggleTheme()" title="Toggle light/dark mode">☀️</button>
   <div class="stats" id="statsBar">Loading…</div>
@@ -476,7 +478,7 @@ const BOM = [{"lv":0,"pn":"6910W021-001/B","pb":"6910W021-001","cat":"407383883"
 // ─── State ──────────────────────────────────────────────
 // procData pre-declared here; second <script> will populate it from localStorage
 var procData = {};
-const BUILD_VER = 'v20260618.1900';
+const BUILD_VER = 'v20260702.1000';
 let rows = [];
 let selIdx = -1;
 let curSort = {col:null,asc:true};
@@ -502,6 +504,7 @@ let rootDirHandle = null;
 const FILTER_STATE_KEY = 'zmag_filter_6910W021';
 const FLAG_KEY         = 'zmag_flagged_6910W021';
 const THEME_KEY        = 'zmag_theme';
+const COL_WIDTHS_KEY   = 'zmag_colwidths_6910W021';
 
 async function grantAccess(){
   if(!('showDirectoryPicker' in window)){
@@ -556,9 +559,12 @@ const COLS = [
   {id:'st',   label:'Status',     w:80,  sort:true},
   {id:'files',label:'Files',      w:60,  sort:false},
   {id:'ucost',label:'💰 Cost',    w:80,  sort:false},
-  {id:'tcost',label:'🌳 Total',   w:90,  sort:false}
+  {id:'tcost',label:'🌳 Total',   w:90,  sort:false},
+  {id:'wh',   label:'⏱ Hours',   w:70,  sort:false}
 ];
 let colWidths = COLS.map(c=>c.w);
+let cumHours = [];
+let subData = {};
 
 // ─── Build header ────────────────────────────────────────
 // ─── Theme toggle ────────────────────────────────────────
@@ -575,7 +581,6 @@ function toggleTheme(){
 function saveFilterState(){
   try{
     localStorage.setItem(FILTER_STATE_KEY,JSON.stringify({
-      disabledRows:[...disabledRows],
       selTypes:[...selTypes],
       filesOnly,
       filterStatus,
@@ -588,7 +593,6 @@ function loadFilterState(){
     const raw=localStorage.getItem(FILTER_STATE_KEY);
     if(!raw)return;
     const s=JSON.parse(raw);
-    if(s.disabledRows)disabledRows=new Set(s.disabledRows.map(Number));
     if(s.selTypes)selTypes=new Set(s.selTypes);
     if(typeof s.filesOnly==='boolean'){
       filesOnly=s.filesOnly;
@@ -640,9 +644,9 @@ function buildHeader(){
   const cg = document.getElementById('colgroup');
   const hr = document.getElementById('headerRow');
   cg.innerHTML=''; hr.innerHTML='';
-  // Row number header
-  const numCol=document.createElement('col'); numCol.style.width='35px'; cg.appendChild(numCol);
-  const numTh=document.createElement('th'); numTh.textContent='#'; numTh.style.cssText='width:35px;min-width:35px;text-align:center'; hr.appendChild(numTh);
+  // Row number header — auto width
+  const numCol=document.createElement('col'); numCol.style.width='auto'; cg.appendChild(numCol);
+  const numTh=document.createElement('th'); numTh.textContent='#'; numTh.style.cssText='text-align:center'; hr.appendChild(numTh);
   // Flag header
   const flagCol=document.createElement('col'); flagCol.style.width='28px'; cg.appendChild(flagCol);
   const flagTh=document.createElement('th'); flagTh.textContent='⚑'; flagTh.style.cssText='width:28px;min-width:28px;text-align:center;padding:0'; hr.appendChild(flagTh);
@@ -677,6 +681,7 @@ function makeResizer(colIdx){
       document.removeEventListener('mousemove',onMove);
       document.removeEventListener('mouseup',onUp);
       document.body.style.cursor='';
+      localStorage.setItem(COL_WIDTHS_KEY, JSON.stringify(colWidths));
     };
     document.addEventListener('mousemove',onMove);
     document.addEventListener('mouseup',onUp);
@@ -686,8 +691,9 @@ function makeResizer(colIdx){
 
 function applyColWidths(){
   const cols=document.querySelectorAll('#colgroup col');
-  // cols[0]='#' col, cols[1]='⚑' col — data cols start at index 2
+  // cols[0]='#' col (auto — skip), cols[1]='⚑' col — data cols start at index 2
   colWidths.forEach((w,i)=>{ if(cols[i+2]) cols[i+2].style.width=w+'px'; });
+  // Do NOT set width on cols[0] — keep it auto
 }
 
 // ─── Build table ─────────────────────────────────────────
@@ -739,6 +745,12 @@ function fmtC(n) {
   if (n < 10)   return '₪' + n.toFixed(2);
   return '₪' + Math.round(n).toLocaleString();
 }
+function fmtTimeAuto(minutes) {
+  if (typeof minutes !== 'number' || isNaN(minutes)) return '—';
+  if (minutes < 60) return Math.round(minutes * 10) / 10 + ' min';
+  const h = Math.round(minutes / 60 * 10) / 10;
+  return h + ' hr';
+}
 function buildTable(){
   const tbody=document.getElementById('bomBody');
   tbody.innerHTML='';
@@ -764,6 +776,7 @@ function buildTable(){
     const flagBtn=document.createElement('button');
     flagBtn.className='flag-btn'+(flaggedRows.has(idx)?' active':'');
     flagBtn.textContent=flaggedRows.has(idx)?'🚩':'⚑';
+    flagBtn.dataset.idx=idx;
     flagBtn.onclick=(e)=>toggleFlag(idx,e);
     flagTd.appendChild(flagBtn);
     tr.appendChild(flagTd);
@@ -783,6 +796,14 @@ function buildTable(){
       if (procs.length) btn.classList.add('proc-has');
       btn.addEventListener('click', ev => { ev.stopPropagation(); openProcEditor(pb, item.desc, item.tq || 1); });
       tdP.appendChild(btn);
+      // Subcontractor badge
+      if (subData[pb]) {
+        const scBadge = document.createElement('span');
+        scBadge.textContent = '🔧';
+        scBadge.title = 'Subcontractor: ' + (subData[pb].domain || '');
+        scBadge.style.cssText = 'font-size:10px;margin-left:2px;cursor:default';
+        tdP.appendChild(scBadge);
+      }
     }
     tr.appendChild(tdP);
 
@@ -903,6 +924,13 @@ function buildTable(){
     tdTC.className = 'cost-val cost-tree';
     tdTC.dataset.treeCostIdx = idx;
     tr.appendChild(tdTC);
+    // Work hours cell
+    const tdWH = document.createElement('td');
+    tdWH.className = 'wh-cell';
+    tdWH.style.textAlign = 'right';
+    tdWH.style.fontSize = '11px';
+    tdWH.style.color = 'var(--text2)';
+    tr.appendChild(tdWH);
     tr.addEventListener('click',()=>selectRow(idx));
     if(disabledRows.has(idx)) tr.classList.add('row-disabled');
     tbody.appendChild(tr);
@@ -910,6 +938,42 @@ function buildTable(){
   });
   computeTreeCosts();
   updateStats();
+}
+
+// ─── Cumulative work hours ────────────────────────────────
+function buildCumulativeHours() {
+  cumHours = new Array(BOM.length).fill(0);
+  BOM.forEach((item, idx) => {
+    if (item.type !== 'ELTDesign') return;
+    const pb = item.pb || item.pn;
+    const procs = procData[pb];
+    if (!procs || !procs.length) return;
+    let itemH = 0;
+    procs.forEach(p => {
+      // Only count time-based units (h, min) — skip m, m2, pcs
+      const isTimeUnit = (p.unit === 'h' || p.unit === 'hr' || p.unit === 'min');
+      if (!isTimeUnit) return;
+      const cycleQty = p.qty || 0;
+      const cycleMin = (p.unit === 'h' || p.unit === 'hr') ? cycleQty * 60 : cycleQty;
+      const setupMin = (p.setupUnit === 'h' || p.setupUnit === 'hr') ? (p.setup||0)*60 : (p.setup||0);
+      itemH += (cycleMin * (item.tq || item.qty || 1) + setupMin) / 60;
+    });
+    cumHours[idx] += itemH;
+    // add to all direct ancestors (walk up the tree)
+    let curLv = item.lv;
+    for (let a = idx - 1; a >= 0; a--) {
+      if (BOM[a].lv < curLv) {
+        cumHours[a] += itemH;
+        curLv = BOM[a].lv;
+      }
+    }
+  });
+}
+function updateWHCells() {
+  document.querySelectorAll('.wh-cell').forEach((td, i) => {
+    const h = cumHours[i];
+    td.textContent = (h && h > 0.01) ? fmtTimeAuto(h * 60) : '';
+  });
 }
 
 // ─── Tree collapse ───────────────────────────────────────
@@ -959,6 +1023,9 @@ function onLevel(v){
   maxLevel=parseInt(v);
   document.getElementById('levelDisp').textContent=v==='10'?'All':v;
   applyFilters();
+  if (selIdx >= 0 && rows[selIdx] && !rows[selIdx].classList.contains('hid')) {
+    setTimeout(() => rows[selIdx].scrollIntoView({block:'center', behavior:'smooth'}), 50);
+  }
 }
 
 // ─── Type dropdown ───────────────────────────────────────
@@ -1096,17 +1163,25 @@ function sortBy(col){
 }
 
 // ─── Stats ───────────────────────────────────────────────
-function toggleRowCheck(idx){
-  const lv=BOM[idx].lv;
-  const willDisable=!disabledRows.has(idx);
-  if(willDisable) disabledRows.add(idx); else disabledRows.delete(idx);
-  for(let i=idx+1;i<BOM.length;i++){
-    if(BOM[i].lv<=lv) break;
-    if(willDisable) disabledRows.add(i); else disabledRows.delete(i);
+function getDescendantIndices(idx) {
+  const parentLv = BOM[idx].lv;
+  const result = [];
+  for (let i = idx + 1; i < BOM.length; i++) {
+    if (BOM[i].lv <= parentLv) break;
+    result.push(i);
   }
+  return result;
+}
+function toggleRowCheck(idx){
+  const willDisable=!disabledRows.has(idx);
+  const affected = [idx, ...getDescendantIndices(idx)];
+  affected.forEach(function(i){
+    if(willDisable){ disabledRows.add(i); rows[i] && rows[i].classList.add('vhid'); }
+    else           { disabledRows.delete(i); rows[i] && rows[i].classList.remove('vhid'); }
+  });
   updateRowCheckVisuals();
   buyBuilt=false; // invalidate buy cache
-  saveFilterState();
+  // session-only — do NOT saveFilterState for disabledRows
 }
 function updateRowCheckVisuals(){
   rows.forEach(function(tr,i){
@@ -1124,7 +1199,15 @@ function updateStats(vis){
   const s=vis!==undefined?vis:t;
   const dis=disabledRows.size;
   const disStr=dis>0?' · '+dis+' hidden':'';
-  document.getElementById('statsBar').textContent=`${s.toLocaleString()}/${t.toLocaleString()} parts · ${p} drawings · ${c} CAD`+disStr;
+  // Use innerHTML to preserve analysisProgress span child
+  const eligibleItems = BOM.filter(item => item.type === 'ELTDesign' && item.files && item.files.length > 0);
+  const analyzedItems = eligibleItems.filter(item => {
+    const pb = item.pb || item.pn;
+    return procData[pb] && procData[pb].length > 0;
+  });
+  const pct = eligibleItems.length ? Math.round(analyzedItems.length / eligibleItems.length * 100) : 0;
+  const progressHtml = `<span id="analysisProgress"><span style="font-size:11px;color:var(--text2);margin-left:12px">ניתוח: ${analyzedItems.length}/${eligibleItems.length}</span><span style="display:inline-block;width:80px;height:5px;background:var(--surface2);border-radius:3px;margin-left:6px;vertical-align:middle"><span style="display:block;width:${pct}%;height:100%;background:var(--accent2);border-radius:3px"></span></span></span>`;
+  document.getElementById('statsBar').innerHTML=`${s.toLocaleString()}/${t.toLocaleString()} parts · ${p} drawings · ${c} CAD`+disStr+progressHtml;
   // Update cost columns
   refreshCostCells();
 }
@@ -1147,6 +1230,7 @@ function selectRow(idx){
   if(selIdx>=0&&rows[selIdx]) rows[selIdx].classList.remove('sel');
   selIdx=idx;
   rows[idx].classList.add('sel');
+  rows[idx].scrollIntoView({block:'nearest', behavior:'smooth'});
   showPreview(BOM[idx]);
   renderMfgSide(BOM[idx]);
 }
@@ -1547,8 +1631,14 @@ async function load3D(stpPath, container){
 })();
 
 // ─── Init ────────────────────────────────────────────────
+try {
+  const savedW = JSON.parse(localStorage.getItem(COL_WIDTHS_KEY));
+  if (Array.isArray(savedW) && savedW.length === COLS.length) colWidths = savedW;
+} catch(e) {}
 buildHeader();
 buildTable();
+buildCumulativeHours();
+updateWHCells();
 loadFilterState();
 applyFilters();
 updateStats();
@@ -1615,6 +1705,7 @@ updateStats();
       <div class="pm-sub" id="pmSub"></div>
     </div>
     <div class="pm-body">
+      <div id="subcontractorSection"></div>
       <table class="proc-table" id="procTable">
         <thead>
           <tr>
@@ -2220,6 +2311,8 @@ function msDelRow(btn) {
   }
   saveProcData();
   buildTable();
+  buildCumulativeHours();
+  updateWHCells();
   msBuildRows(procData[_msCurPb] || []);
   msFlashSaved();
 }
@@ -2249,6 +2342,8 @@ function msCollectAndSave() {
   }
   saveProcData();
   buildTable();
+  buildCumulativeHours();
+  updateWHCells();
   computeTreeCosts(); refreshCostCells();
   msFlashSaved();
 }
@@ -2568,7 +2663,9 @@ async function _graphWriteProcFile() {
     lastSaved: new Date().toISOString(),
     savedBy: _msalAcct ? (_msalAcct.username || _msalAcct.name || '') : '',
     customProcTypes: PROC_TYPES,
-    processes: procData
+    processes: procData,
+    flaggedRows: Array.from(flaggedRows),
+    subcontractors: subData
   }, null, 2);
   const r = await fetch(url, {
     method: 'PUT',
@@ -2610,10 +2707,25 @@ async function loadProcFromGraph() {
       localStorage.setItem(PROC_STORAGE_KEY, JSON.stringify(procData));
       localStorage.setItem(TYPES_STORAGE_KEY, JSON.stringify(PROC_TYPES));
       buildTable();
+      buildCumulativeHours();
+      updateWHCells();
       applyFilters(); // restore saved filter state after table rebuild
       if (typeof curItem !== 'undefined' && curItem) renderMfgSide && renderMfgSide(curItem);
       const savedBy = obj.savedBy ? ' (נשמר ע"י ' + obj.savedBy + ')' : '';
       setFileSyncStatus('✅ נטען מ-SharePoint' + savedBy, 'ok');
+    }
+    if (obj.subcontractors) subData = obj.subcontractors;
+    if (Array.isArray(obj.flaggedRows)) {
+      flaggedRows = new Set(obj.flaggedRows.map(Number));
+      localStorage.setItem(FLAG_KEY, JSON.stringify([...flaggedRows]));
+      document.querySelectorAll('.flag-btn').forEach((btn) => {
+        const rowIdx = parseInt(btn.dataset.idx);
+        if (!isNaN(rowIdx)) {
+          btn.classList.toggle('active', flaggedRows.has(rowIdx));
+          btn.textContent = flaggedRows.has(rowIdx) ? '🚩' : '⚑';
+        }
+      });
+      if (typeof applyRowClasses === 'function') applyRowClasses();
     }
   } catch(e) {
     console.error('[loadProcFromGraph]', e);
@@ -2722,12 +2834,42 @@ function openProcEditor(pb, desc, tq) {
   document.getElementById('pmTitle').textContent = '⚙ ' + pb;
   document.getElementById('pmSub').textContent = desc + '  ·  Total BOM qty: ' + tq;
   renderProcRows(procData[pb] || []);
+  // Render subcontractor section
+  const isSubcontractor = !!(subData[pb]);
+  const safePb = pb.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+  document.getElementById('subcontractorSection').innerHTML =
+    '<div style="padding:8px 12px;border-bottom:1px solid var(--border);margin-bottom:8px;background:var(--surface2);border-radius:6px">' +
+    '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px">' +
+    '<input type="checkbox" id="subCk" ' + (isSubcontractor ? 'checked' : '') + ' onchange="toggleSubcontractor(\'' + safePb + '\')">' +
+    '<span>🔧 קבלן משנה (Subcontractor)</span></label>' +
+    '<div id="subDomainRow" style="margin-top:6px;display:' + (isSubcontractor ? 'block' : 'none') + '">' +
+    '<input id="subDomainInput" type="text" placeholder="תחום: צנרת, כבילה, מכאני..." value="' + (isSubcontractor ? (subData[pb].domain || '') : '') + '" oninput="updateSubDomain(\'' + safePb + '\',this.value)" style="width:220px;padding:3px 8px;background:var(--surface);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px">' +
+    '</div></div>';
   document.getElementById('procModal').classList.remove('hidden');
 }
 
 function closeProcModal() {
   document.getElementById('procModal').classList.add('hidden');
   _procKey = null;
+}
+
+function toggleSubcontractor(pb) {
+  const chk = document.getElementById('subCk');
+  const row = document.getElementById('subDomainRow');
+  if (chk && chk.checked) {
+    if (!subData[pb]) subData[pb] = {domain:''};
+    if (row) row.style.display = 'block';
+  } else {
+    delete subData[pb];
+    if (row) row.style.display = 'none';
+  }
+  saveProcToFile();
+  buildTable(); applyFilters(); buildCumulativeHours(); updateWHCells();
+}
+
+function updateSubDomain(pb, val) {
+  if (subData[pb]) subData[pb].domain = val;
+  saveProcToFile();
 }
 
 function renderProcRows(rows) {
@@ -2804,6 +2946,8 @@ function saveProcModal() {
   saveProcData();
   closeProcModal();
   buildTable();
+  buildCumulativeHours();
+  updateWHCells();
   // If mfg summary is open, refresh it
   if (!document.getElementById('mfgModal').classList.contains('hidden')) {
     buildMfgData();
@@ -2856,7 +3000,7 @@ function buildMfgData() {
       let setupH = 0;
       if (proc.setup) {
         setupH = proc.setupUnit === 'min' ? proc.setup / 60 : proc.setup;
-        setupH = Math.round(setupH * bomTq * 1000) / 1000;
+        setupH = Math.round(setupH * 1000) / 1000;
       }
       mfgData.push({
         pb: pb, desc: desc,
@@ -2903,7 +3047,8 @@ function renderMfgTable(data) {
     const tr = document.createElement('tr');
     const tqFmt = Number.isInteger(item.totalQty) ? item.totalQty.toLocaleString() : item.totalQty.toFixed(3);
     const uqFmt = Number.isInteger(item.unitQty) ? item.unitQty : item.unitQty.toFixed(3);
-    const stFmt = item.setupTotal > 0 ? item.setupTotal.toFixed(2) + ' h' : '—';
+    // Convert setup hours→min for fmtTimeAuto (setupTotal stored in hours)
+    const stFmt = item.setupTotal > 0 ? fmtTimeAuto(item.setupTotal * 60) : '—';
 
     tr.title = 'Click to edit processes for ' + item.pb;
     tr.innerHTML =
@@ -2928,7 +3073,7 @@ function renderMfgTable(data) {
   Object.values(totals).sort(function(a,b){ return a.label.localeCompare(b.label); }).forEach(function(t) {
     const tr = document.createElement('tr');
     const qFmt = Number.isInteger(t.qty) ? t.qty : t.qty.toFixed(3);
-    const sFmt = t.setup > 0 ? t.setup.toFixed(2) + ' h' : '';
+    const sFmt = t.setup > 0 ? fmtTimeAuto(t.setup * 60) : '';
     tr.innerHTML =
       '<td colspan="3" style="text-align:right;color:var(--text2);font-size:11px;padding-right:8px">Total — <strong>' + t.label + '</strong></td>' +
       '<td style="color:var(--text3);text-align:center">' + t.unit + '</td>' +
@@ -3090,7 +3235,7 @@ function renderMfgByProcess(q) {
     return {unit: unit, qty: qty};
   }
 
-  // Group by (procType, normalizedUnit)
+  // Group by (procType, normalizedUnit) — consolidate all parts under one heading per process type
   const groups = {};
   mfgData.forEach(function(item) {
     const n = normalizeUnit(item.unit, item.totalQty);
@@ -3103,12 +3248,21 @@ function renderMfgByProcess(q) {
         totalQty: 0,
         setupTotal: 0,
         parts: [],
+        seenPartProc: new Set(), // deduplicate same part+proc combo
         origUnits: new Set(), // track original units for display hint
       };
     }
-    groups[key].totalQty   += n.qty;
-    groups[key].setupTotal += item.setupTotal;
-    groups[key].parts.push(item.pb);
+    groups[key].totalQty += n.qty;
+    // Only add setup once per unique part (setup is per-project, not per-unit)
+    const partProcKey = item.pb + '|' + item.procType;
+    if (!groups[key].seenPartProc.has(partProcKey)) {
+      groups[key].setupTotal += item.setupTotal;
+      groups[key].seenPartProc.add(partProcKey);
+    }
+    // Only list part once
+    if (!groups[key].parts.includes(item.pb)) {
+      groups[key].parts.push(item.pb);
+    }
     groups[key].origUnits.add(item.unit);
   });
 
@@ -3134,12 +3288,13 @@ function renderMfgByProcess(q) {
     const tr = document.createElement('tr');
     tr.style.borderBottom = '1px solid var(--border)';
 
-    // Format qty: hours shown with 2 decimal places if needed
+    // Format qty using fmtTimeAuto for time units, plain number for others
     const qty = g.totalQty;
-    const qFmt = (qty === Math.floor(qty)) ? qty.toLocaleString() : qty.toFixed(2);
-    const sFmt = g.setupTotal > 0 ? g.setupTotal.toFixed(2) : '—';
+    const isTimeUnit = (g.unit === 'h' || g.unit === 'min');
+    const qFmt = isTimeUnit ? fmtTimeAuto(g.unit === 'h' ? qty * 60 : qty) : ((qty === Math.floor(qty)) ? qty.toLocaleString() : qty.toFixed(2));
+    const sFmt = g.setupTotal > 0 ? fmtTimeAuto(g.setupTotal * 60) : '—';
 
-    const uniqueParts = Array.from(new Set(g.parts));
+    const uniqueParts = g.parts; // already deduplicated at insert time
     const partsStr = uniqueParts.slice(0, 6).join(', ') +
       (uniqueParts.length > 6 ? '  +' + (uniqueParts.length - 6) + ' more' : '');
 
@@ -3675,6 +3830,95 @@ function _updateAuthUI() {
     const syncBtn = document.getElementById('syncBtn');
     if (syncBtn) syncBtn.style.display = 'none';
   }
+}
+
+// ── Subcontractor RFQ Modal ───────────────────────────────
+function openRFQModal() {
+  let m = document.getElementById('rfqModal');
+  if (!m) {
+    m = document.createElement('div');
+    m.id = 'rfqModal';
+    m.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:1000;display:none;align-items:center;justify-content:center';
+    m.innerHTML =
+      '<div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;width:820px;max-height:82vh;display:flex;flex-direction:column;overflow:hidden">' +
+      '<div style="padding:10px 16px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">' +
+      '<span style="font-weight:600;font-size:14px">🔧 RFQ – קבלני משנה</span>' +
+      '<div style="display:flex;gap:8px">' +
+      '<button onclick="exportRFQCSV()" style="padding:4px 12px;background:var(--accent2);color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:12px">📥 Export CSV</button>' +
+      '<button onclick="document.getElementById(\'rfqModal\').style.display=\'none\'" style="padding:4px 10px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;cursor:pointer">✕</button>' +
+      '</div></div>' +
+      '<div id="rfqTableContainer" style="overflow:auto;flex:1;padding:14px"></div>' +
+      '</div>';
+    document.body.appendChild(m);
+    m.addEventListener('click', function(e) { if (e.target === m) m.style.display = 'none'; });
+  }
+  renderRFQTable();
+  m.style.display = 'flex';
+}
+
+function renderRFQTable() {
+  const container = document.getElementById('rfqTableContainer');
+  if (!container) return;
+  const byDomain = {};
+  BOM.forEach(item => {
+    const pb = item.pb || item.pn;
+    if (!subData[pb]) return;
+    const domain = (subData[pb].domain || '').trim() || 'כללי';
+    if (!byDomain[domain]) byDomain[domain] = [];
+    byDomain[domain].push({item, pb});
+  });
+  const domains = Object.keys(byDomain).sort();
+  if (!domains.length) {
+    container.innerHTML = '<p style="color:var(--text2);text-align:center;padding:32px;font-size:13px">אין פריטי קבלן משנה מסווגים.<br>פתח עורך תהליכים (⚙) וסמן פריטים כקבלן משנה.</p>';
+    return;
+  }
+  let html = '';
+  domains.forEach(domain => {
+    const items = byDomain[domain];
+    html += '<div style="margin-bottom:16px">' +
+      '<div style="font-weight:600;color:var(--accent);font-size:13px;margin-bottom:6px;padding-bottom:4px;border-bottom:1px solid var(--border)">' + domain + ' (' + items.length + ')</div>' +
+      '<table style="width:100%;border-collapse:collapse;font-size:12px">' +
+      '<thead><tr style="background:var(--surface2)">' +
+      '<th style="padding:5px 8px;text-align:left;border:1px solid var(--border)">Part #</th>' +
+      '<th style="padding:5px 8px;text-align:left;border:1px solid var(--border)">Description</th>' +
+      '<th style="padding:5px 8px;text-align:center;border:1px solid var(--border)">QTY</th>' +
+      '<th style="padding:5px 8px;text-align:center;border:1px solid var(--border)">Total QTY</th>' +
+      '<th style="padding:5px 8px;text-align:left;border:1px solid var(--border)">UOM</th>' +
+      '</tr></thead><tbody>';
+    items.forEach(function(entry) {
+      const item = entry.item;
+      html += '<tr>' +
+        '<td style="padding:4px 8px;border:1px solid var(--border)">' + (item.pn||'') + '</td>' +
+        '<td style="padding:4px 8px;border:1px solid var(--border)">' + (item.desc||'') + '</td>' +
+        '<td style="padding:4px 8px;text-align:center;border:1px solid var(--border)">' + (item.qty||'') + '</td>' +
+        '<td style="padding:4px 8px;text-align:center;border:1px solid var(--border)">' + (item.tq||'') + '</td>' +
+        '<td style="padding:4px 8px;border:1px solid var(--border)">' + (item.uom||'') + '</td>' +
+        '</tr>';
+    });
+    html += '</tbody></table></div>';
+  });
+  container.innerHTML = html;
+}
+
+function exportRFQCSV() {
+  let csv = 'Part Number,Description,QTY,Total QTY,UOM,Domain\n';
+  const byDomain = {};
+  BOM.forEach(item => {
+    const pb = item.pb || item.pn;
+    if (!subData[pb]) return;
+    const domain = (subData[pb].domain||'').trim()||'כללי';
+    if (!byDomain[domain]) byDomain[domain] = [];
+    byDomain[domain].push(item);
+  });
+  Object.keys(byDomain).sort().forEach(domain => {
+    byDomain[domain].forEach(item => {
+      csv += '"' + (item.pn||'').replace(/"/g,'""') + '","' + (item.desc||'').replace(/"/g,'""') + '","' + (item.qty||'') + '","' + (item.tq||'') + '","' + (item.uom||'') + '","' + domain + '"\n';
+    });
+  });
+  const a = document.createElement('a');
+  a.href = 'data:text/csv;charset=utf-8,﻿' + encodeURIComponent(csv);
+  a.download = 'ZMAG_RFQ_Subcontractors.csv';
+  a.click();
 }
 
 window.addEventListener('load', function() {
