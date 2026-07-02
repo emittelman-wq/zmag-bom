@@ -488,7 +488,7 @@ const BOM = [{"lv":0,"pn":"6910W021-001/B","pb":"6910W021-001","cat":"407383883"
 // ─── State ──────────────────────────────────────────────
 // procData pre-declared here; second <script> will populate it from localStorage
 var procData = {};
-const BUILD_VER = 'v20260702.1500';
+const BUILD_VER = 'v20260702.1600';
 let rows = [];
 let selIdx = -1;
 let curSort = {col:null,asc:true};
@@ -3695,16 +3695,19 @@ function exportBomExcel() {
         properties: { summaryBelow: false, summaryRight: false }
       });
       ws.columns = [
-        { header: '#',           key: 'num',  width: 5  },
-        { header: 'רמה',         key: 'lv',   width: 6  },
-        { header: 'מק"ט',        key: 'pn',   width: 26 },
-        { header: 'תיאור',       key: 'desc', width: 48 },
-        { header: 'קטלוג',       key: 'cat',  width: 15 },
-        { header: 'כמות',        key: 'qty',  width: 8  },
-        { header: 'כמות כוללת',  key: 'tq',   width: 13 },
-        { header: 'יחידה',       key: 'uom',  width: 8  },
-        { header: 'סוג',         key: 'type', width: 12 },
-        { header: 'סטטוס',       key: 'st',   width: 12 },
+        { header: '#',              key: 'num',   width: 5  },
+        { header: 'רמה',            key: 'lv',    width: 6  },
+        { header: 'מק"ט',           key: 'pn',    width: 26 },
+        { header: 'תיאור',          key: 'desc',  width: 48 },
+        { header: 'קטלוג',          key: 'cat',   width: 15 },
+        { header: 'כמות',           key: 'qty',   width: 8  },
+        { header: 'כמות כוללת',     key: 'tq',    width: 13 },
+        { header: 'יחידה',          key: 'uom',   width: 8  },
+        { header: 'סוג',            key: 'type',  width: 12 },
+        { header: 'סטטוס',          key: 'st',    width: 12 },
+        { header: '⏱ שעות עבודה',  key: 'wh',    width: 14 },
+        { header: '💰 עלות יחידה',  key: 'ucost', width: 14 },
+        { header: '🌳 עלות כוללת',  key: 'tcost', width: 14 },
       ];
       // Header style
       const hdrRow = ws.getRow(1);
@@ -3715,7 +3718,7 @@ function exportBomExcel() {
         cell.alignment = { horizontal: 'center', vertical: 'middle', readingOrder: 'rightToLeft' };
         cell.border    = { bottom: { style: 'thin', color: { argb: 'FF8EA9C1' } } };
       });
-      ws.autoFilter = { from: 'A1', to: 'J1' };
+      ws.autoFilter = { from: 'A1', to: 'M1' };
       // Type fill colors
       const typeFill = {
         ELTDesign: 'FFD6E4BC',
@@ -3728,17 +3731,23 @@ function exportBomExcel() {
         if (!tr || tr.classList.contains('hid') || tr.classList.contains('vhid')) return;
         rowNum++;
         const indent = '  '.repeat(item.lv);
+        const whVal   = cumHours[i] > 0.01 ? Math.round(cumHours[i] * 10) / 10 : null;
+        const ucVal   = unitCosts[i] > 0   ? Math.round(unitCosts[i] * 100) / 100 : null;
+        const tcVal   = treeCosts[i] > 0   ? Math.round(treeCosts[i] * 100) / 100 : null;
         const exRow = ws.addRow({
-          num:  rowNum,
-          lv:   item.lv,
-          pn:   indent + (item.pn  || ''),
-          desc: item.desc || '',
-          cat:  item.cat  || '',
-          qty:  item.qty  != null ? item.qty  : '',
-          tq:   item.tq   != null ? item.tq   : '',
-          uom:  item.uom  || '',
-          type: item.type || '',
-          st:   item.st   || '',
+          num:   rowNum,
+          lv:    item.lv,
+          pn:    indent + (item.pn  || ''),
+          desc:  item.desc || '',
+          cat:   item.cat  || '',
+          qty:   item.qty  != null ? item.qty  : '',
+          tq:    item.tq   != null ? item.tq   : '',
+          uom:   item.uom  || '',
+          type:  item.type || '',
+          st:    item.st   || '',
+          wh:    whVal,
+          ucost: ucVal,
+          tcost: tcVal,
         });
         exRow.outlineLevel = Math.min(item.lv, 7);
         exRow.height = 15;
@@ -3754,6 +3763,16 @@ function exportBomExcel() {
           const col = ws.getColumn(k);
           const cell = exRow.getCell(col.number);
           cell.alignment = { horizontal: 'center', vertical: 'middle' };
+        });
+        // Format work hours: show as decimal hours with 1 decimal
+        const whCell = exRow.getCell(ws.getColumn('wh').number);
+        whCell.numFmt = '#,##0.0" hr"';
+        whCell.alignment = { horizontal: 'right', vertical: 'middle' };
+        // Format costs as currency
+        ['ucost','tcost'].forEach(k => {
+          const cell = exRow.getCell(ws.getColumn(k).number);
+          cell.numFmt = '₪#,##0.00';
+          cell.alignment = { horizontal: 'right', vertical: 'middle' };
         });
       });
       const date = new Date().toISOString().slice(0,10).replace(/-/g,'');
