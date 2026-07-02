@@ -478,7 +478,7 @@ const BOM = [{"lv":0,"pn":"6910W021-001/B","pb":"6910W021-001","cat":"407383883"
 // ─── State ──────────────────────────────────────────────
 // procData pre-declared here; second <script> will populate it from localStorage
 var procData = {};
-const BUILD_VER = 'v20260702.1000';
+const BUILD_VER = 'v20260702.1100';
 let rows = [];
 let selIdx = -1;
 let curSort = {col:null,asc:true};
@@ -621,6 +621,7 @@ function toggleFlag(idx,e){
   e.stopPropagation();
   if(flaggedRows.has(idx))flaggedRows.delete(idx);else flaggedRows.add(idx);
   localStorage.setItem(FLAG_KEY,JSON.stringify([...flaggedRows]));
+  saveProcToFile(); // sync flags to SharePoint so other users see them
   const tr=rows[idx];
   if(tr){
     tr.classList.toggle('row-flagged',flaggedRows.has(idx));
@@ -644,9 +645,11 @@ function buildHeader(){
   const cg = document.getElementById('colgroup');
   const hr = document.getElementById('headerRow');
   cg.innerHTML=''; hr.innerHTML='';
-  // Row number header — auto width
-  const numCol=document.createElement('col'); numCol.style.width='auto'; cg.appendChild(numCol);
-  const numTh=document.createElement('th'); numTh.textContent='#'; numTh.style.cssText='text-align:center'; hr.appendChild(numTh);
+  // Row number header — width fits digit count
+  const numDigits = String(BOM.length).length;
+  const numColW = Math.max(28, numDigits * 9 + 10);
+  const numCol=document.createElement('col'); numCol.style.width=numColW+'px'; cg.appendChild(numCol);
+  const numTh=document.createElement('th'); numTh.textContent='#'; numTh.style.cssText='text-align:center;width:'+numColW+'px;min-width:'+numColW+'px'; hr.appendChild(numTh);
   // Flag header
   const flagCol=document.createElement('col'); flagCol.style.width='28px'; cg.appendChild(flagCol);
   const flagTh=document.createElement('th'); flagTh.textContent='⚑'; flagTh.style.cssText='width:28px;min-width:28px;text-align:center;padding:0'; hr.appendChild(flagTh);
