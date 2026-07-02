@@ -468,6 +468,15 @@ tr.row-disabled .badge,tr.row-disabled .proc-btn{opacity:.5}
     </div>
     <div class="ms-saved" id="msSaved">✓ Saved</div>
     <button class="ms-add-btn" id="msAddBtn" style="display:none" onclick="msAddRow()">＋ Add Process</button>
+    <div id="msSubSection" style="display:none;padding:8px 10px 10px;border-top:1px solid var(--border);margin-top:4px">
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;color:var(--text2)">
+        <input type="checkbox" id="msSubCheck" onchange="msSideSub()">
+        <span>🔧 קבלן משנה (Subcontractor)</span>
+      </label>
+      <div id="msSubDomainRow" style="margin-top:6px;display:none">
+        <input id="msSubDomain" type="text" placeholder="תחום: צנרת, כבילה, מכאני..." style="width:100%;box-sizing:border-box;padding:4px 8px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px" oninput="msSideSubDomain(this.value)">
+      </div>
+    </div>
   </div>
 </div>
 
@@ -478,7 +487,7 @@ const BOM = [{"lv":0,"pn":"6910W021-001/B","pb":"6910W021-001","cat":"407383883"
 // ─── State ──────────────────────────────────────────────
 // procData pre-declared here; second <script> will populate it from localStorage
 var procData = {};
-const BUILD_VER = 'v20260702.1300';
+const BUILD_VER = 'v20260702.1400';
 let rows = [];
 let selIdx = -1;
 let curSort = {col:null,asc:true};
@@ -2216,10 +2225,16 @@ function renderMfgSide(item) {
   const saved = document.getElementById('msSaved');
   saved.classList.remove('show');
 
+  const subSec = document.getElementById('msSubSection');
+  const subCheck = document.getElementById('msSubCheck');
+  const subDomainRow = document.getElementById('msSubDomainRow');
+  const subDomainInput = document.getElementById('msSubDomain');
+
   if (!item || item.type !== 'ELTDesign') {
     pnEl.textContent = item ? item.pn + ' — ' + (item.type || '') : 'Select an ELTDesign row';
     tqEl.textContent = '';
     addBtn.style.display = 'none';
+    if (subSec) subSec.style.display = 'none';
     body.innerHTML = '<div class="ms-empty"><span style="font-size:28px;opacity:.3">' +
       (item ? '📦' : '⚙') + '</span><span>' +
       (item ? (item.type === 'Buy' ? 'Purchased item —<br>no manufacturing processes' : 'Package — no processes') : 'Select an ELTDesign row<br>to add manufacturing processes') +
@@ -2232,6 +2247,15 @@ function renderMfgSide(item) {
   pnEl.textContent = pb + ' — ' + item.desc.substring(0, 38);
   tqEl.textContent = 'BOM total qty: × ' + _msCurTq;
   addBtn.style.display = '';
+
+  // Subcontractor section
+  if (subSec) {
+    subSec.style.display = '';
+    const isSub = !!(subData[pb]);
+    if (subCheck) subCheck.checked = isSub;
+    if (subDomainRow) subDomainRow.style.display = isSub ? '' : 'none';
+    if (subDomainInput && isSub) subDomainInput.value = subData[pb].domain || '';
+  }
 
   msBuildRows(procData[pb] || []);
 }
@@ -2721,11 +2745,17 @@ async function loadProcFromGraph() {
       setFileSyncStatus('✅ נטען מ-SharePoint' + savedBy, 'ok');
     }
     if (obj.subcontractors) subData = obj.subcontractors;
-    if (Array.isArray(obj.flaggedRows)) {
-      // MERGE server flags with local flags — preserve all users' flags
-      const serverFlags = new Set(obj.flaggedRows.map(Number));
-      flaggedRows = new Set([...flaggedRows, ...serverFlags]);
+    {
+      // MERGE flags: server + local → union (preserves all users' flags)
+      const preLocal = new Set([...flaggedRows]);
+      const serverFlags = Array.isArray(obj.flaggedRows)
+        ? new Set(obj.flaggedRows.map(Number))
+        : new Set();
+      flaggedRows = new Set([...preLocal, ...serverFlags]);
       localStorage.setItem(FLAG_KEY, JSON.stringify([...flaggedRows]));
+      // If we have local flags the server didn't know about, push them now
+      const hasLocalOnly = [...preLocal].some(f => !serverFlags.has(f));
+      if (hasLocalOnly) setTimeout(() => saveProcToFile(), 500);
       // Update every row: TR class + button state
       rows.forEach((tr, i) => {
         if (!tr) return;
@@ -2880,6 +2910,26 @@ function toggleSubcontractor(pb) {
 function updateSubDomain(pb, val) {
   if (subData[pb]) subData[pb].domain = val;
   saveProcToFile();
+}
+
+// Side-panel subcontractor handlers
+function msSideSub() {
+  const pb = _msCurPb;
+  if (!pb) return;
+  const chk = document.getElementById('msSubCheck');
+  const domRow = document.getElementById('msSubDomainRow');
+  if (chk && chk.checked) {
+    if (!subData[pb]) subData[pb] = {domain:''};
+    if (domRow) domRow.style.display = '';
+  } else {
+    delete subData[pb];
+    if (domRow) domRow.style.display = 'none';
+  }
+  saveProcToFile();
+  buildTable(); applyFilters(); buildCumulativeHours(); updateWHCells();
+}
+function msSideSubDomain(val) {
+  if (_msCurPb && subData[_msCurPb]) { subData[_msCurPb].domain = val; saveProcToFile(); }
 }
 
 function renderProcRows(rows) {
