@@ -497,7 +497,7 @@ const BOM = [{"lv":0,"pn":"6910W021-001/B","pb":"6910W021-001","cat":"407383883"
 // ─── State ──────────────────────────────────────────────
 // procData pre-declared here; second <script> will populate it from localStorage
 var procData = {};
-const BUILD_VER = 'v20260707.1000';
+const BUILD_VER = 'v20260707.1100';
 let rows = [];
 let selIdx = -1;
 let curSort = {col:null,asc:true};
@@ -2127,23 +2127,23 @@ function renderBuyTable(data) {
       const priceSpan = document.createElement('span');
       priceSpan.className = 'price-val' + (entry.custom ? ' price-custom' : '');
       priceSpan.textContent = fmtPrice(unitPrice);
-      priceSpan.title = (entry.note || '') + ' — click to edit';
+      priceSpan.title = (entry.note || '') + ' — לחץ לעריכה';
       priceSpan.style.cursor = 'pointer';
-      priceSpan.addEventListener('click', () => openPriceEdit(item.pb, unitPrice, entry.src));
+      priceSpan.addEventListener('click', () => openBuyNotesEditor(item.pb, item.desc));
       tdUp.appendChild(priceSpan);
     } else {
       const noBtn = document.createElement('span');
       noBtn.className = 'price-missing';
-      noBtn.title = 'Click to enter price';
+      noBtn.title = 'לחץ להזנת מחיר';
       noBtn.textContent = '—';
       noBtn.style.cursor = 'pointer';
-      noBtn.addEventListener('click', () => openPriceEdit(item.pb, null, ''));
+      noBtn.addEventListener('click', () => openBuyNotesEditor(item.pb, item.desc));
       tdUp.appendChild(noBtn);
       const editBtn = document.createElement('button');
       editBtn.className = 'price-edit-btn';
-      editBtn.title = 'Enter price';
+      editBtn.title = 'עריכת פרטי פריט';
       editBtn.textContent = '✏';
-      editBtn.addEventListener('click', () => openPriceEdit(item.pb, null, ''));
+      editBtn.addEventListener('click', () => openBuyNotesEditor(item.pb, item.desc));
       tdUp.appendChild(editBtn);
     }
     tr.appendChild(tdUp);
@@ -2249,8 +2249,13 @@ function sortBuy(col) {
 
 // ─── Buy Notes / Substitute Editor ──────────────────────────
 function openBuyNotesEditor(pb, desc) {
-  const existing = buyNotes[pb] || {notes:'', sub:{pn:'',desc:'',cat:'',src:'',approved:false}};
+  const existing = buyNotes[pb] || {};
   const hasSub = !!(existing.sub && existing.sub.pn);
+  // Pre-populate price: prefer buyNotes.price, fall back to existing localStorage px_ entry
+  const priceEntry = getPriceEntry(pb);
+  const currentPrice = existing.price != null ? existing.price : (priceEntry ? priceEntry.p : '');
+  const currentUrl   = existing.url   != null ? existing.url   : (priceEntry ? priceEntry.src : '');
+  const safePb = pb.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
 
   let m = document.getElementById('buyNotesModal');
   if (!m) {
@@ -2261,46 +2266,62 @@ function openBuyNotesEditor(pb, desc) {
   }
 
   m.innerHTML =
-    '<div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;width:540px;max-height:80vh;display:flex;flex-direction:column;overflow:hidden">' +
+    '<div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;width:560px;max-height:85vh;display:flex;flex-direction:column;overflow:hidden">' +
       '<div style="padding:10px 16px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">' +
         '<div>' +
-          '<div style="font-weight:600;font-size:13px">📝 הערות ו-חלופי</div>' +
+          '<div style="font-weight:600;font-size:13px">📝 פרטי פריט רכש</div>' +
           '<div style="font-size:11px;color:var(--text2);font-family:monospace">' + pb + '</div>' +
           '<div style="font-size:11px;color:var(--text2)">' + desc + '</div>' +
         '</div>' +
         '<button onclick="document.getElementById(\'buyNotesModal\').style.display=\'none\'" style="padding:4px 10px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;cursor:pointer">✕</button>' +
       '</div>' +
       '<div style="overflow:auto;flex:1;padding:14px;display:flex;flex-direction:column;gap:12px">' +
-        '<div>' +
-          '<label style="font-size:12px;font-weight:600;color:var(--text2);display:block;margin-bottom:4px">הערות</label>' +
-          '<textarea id="bnNotes" rows="4" style="width:100%;box-sizing:border-box;padding:6px 8px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px;resize:vertical">' + (existing.notes||'') + '</textarea>' +
+        // Price + URL row
+        '<div style="display:grid;grid-template-columns:1fr 2fr;gap:8px">' +
+          '<div>' +
+            '<label style="font-size:11px;font-weight:600;color:var(--text2);display:block;margin-bottom:4px">💰 מחיר (USD)</label>' +
+            '<input id="bnPrice" type="number" min="0" step="0.01" value="' + (currentPrice !== '' ? currentPrice : '') + '" placeholder="0.00" style="width:100%;box-sizing:border-box;padding:5px 8px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:13px">' +
+          '</div>' +
+          '<div>' +
+            '<label style="font-size:11px;font-weight:600;color:var(--text2);display:block;margin-bottom:4px">🔗 לינק לאתר המוצר</label>' +
+            '<input id="bnUrl" type="url" value="' + (currentUrl||'').replace(/"/g,'&quot;') + '" placeholder="https://..." style="width:100%;box-sizing:border-box;padding:5px 8px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px">' +
+          '</div>' +
         '</div>' +
+        // Notes
+        '<div>' +
+          '<label style="font-size:11px;font-weight:600;color:var(--text2);display:block;margin-bottom:4px">📋 הערות</label>' +
+          '<textarea id="bnNotes" rows="3" style="width:100%;box-sizing:border-box;padding:6px 8px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px;resize:vertical">' + (existing.notes||'') + '</textarea>' +
+        '</div>' +
+        // Substitute section
         '<div style="border:1px solid var(--border);border-radius:6px;padding:10px">' +
           '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;font-weight:600;margin-bottom:8px">' +
             '<input type="checkbox" id="bnHasSub" ' + (hasSub?'checked':'') + ' onchange="toggleBnSubFields()">' +
-            '<span>🔄 פריט חלופי</span>' +
+            '<span>🔄 פריט חלופי מאושר</span>' +
           '</label>' +
           '<div id="bnSubFields" style="display:' + (hasSub?'flex':'none') + ';flex-direction:column;gap:6px">' +
             '<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px">' +
-              '<div><label style="font-size:11px;color:var(--text2)">מק"ט חלופי</label><input id="bnSubPn" type="text" value="' + (existing.sub&&existing.sub.pn||'') + '" style="width:100%;box-sizing:border-box;padding:4px 6px;background:var(--surface);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px"></div>' +
-              '<div><label style="font-size:11px;color:var(--text2)">קטלוג</label><input id="bnSubCat" type="text" value="' + (existing.sub&&existing.sub.cat||'') + '" style="width:100%;box-sizing:border-box;padding:4px 6px;background:var(--surface);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px"></div>' +
+              '<div><label style="font-size:11px;color:var(--text2)">מק"ט חלופי</label>' +
+                '<input id="bnSubPn" type="text" value="' + (existing.sub&&existing.sub.pn||'') + '" style="width:100%;box-sizing:border-box;padding:4px 6px;background:var(--surface);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px"></div>' +
+              '<div><label style="font-size:11px;color:var(--text2)">ספק/מקור</label>' +
+                '<input id="bnSubSrc" type="text" value="' + (existing.sub&&existing.sub.src||'') + '" style="width:100%;box-sizing:border-box;padding:4px 6px;background:var(--surface);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px"></div>' +
             '</div>' +
-            '<div><label style="font-size:11px;color:var(--text2)">תיאור</label><input id="bnSubDesc" type="text" value="' + (existing.sub&&existing.sub.desc||'') + '" style="width:100%;box-sizing:border-box;padding:4px 6px;background:var(--surface);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px"></div>' +
-            '<div><label style="font-size:11px;color:var(--text2)">ספק/מקור</label><input id="bnSubSrc" type="text" value="' + (existing.sub&&existing.sub.src||'') + '" style="width:100%;box-sizing:border-box;padding:4px 6px;background:var(--surface);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px"></div>' +
+            '<div><label style="font-size:11px;color:var(--text2)">תיאור</label>' +
+              '<input id="bnSubDesc" type="text" value="' + (existing.sub&&existing.sub.desc||'') + '" style="width:100%;box-sizing:border-box;padding:4px 6px;background:var(--surface);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px"></div>' +
             '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px">' +
               '<input type="checkbox" id="bnSubApproved" ' + (existing.sub&&existing.sub.approved?'checked':'') + '>' +
-              '<span>✅ פריט חלופי מאושר</span>' +
+              '<span>✅ אושר רשמית</span>' +
             '</label>' +
           '</div>' +
         '</div>' +
       '</div>' +
       '<div style="padding:10px 14px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:8px">' +
-        '<button onclick="saveBuyNotes(\'' + pb.replace(/'/g,"\\'") + '\')" style="padding:5px 16px;background:var(--accent);color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:12px">💾 שמור</button>' +
+        '<button onclick="saveBuyNotes(\'' + safePb + '\')" style="padding:5px 16px;background:var(--accent);color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:12px">💾 שמור</button>' +
         '<button onclick="document.getElementById(\'buyNotesModal\').style.display=\'none\'" style="padding:5px 12px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;cursor:pointer;font-size:12px">ביטול</button>' +
       '</div>' +
     '</div>';
 
   m.style.display = 'flex';
+  setTimeout(() => document.getElementById('bnPrice')?.focus(), 50);
 }
 
 function toggleBnSubFields() {
@@ -2310,24 +2331,32 @@ function toggleBnSubFields() {
 }
 
 function saveBuyNotes(pb) {
-  const notes = (document.getElementById('bnNotes')?.value || '').trim();
-  const hasSub = document.getElementById('bnHasSub')?.checked;
+  const notes    = (document.getElementById('bnNotes')?.value || '').trim();
+  const rawPrice = document.getElementById('bnPrice')?.value;
+  const price    = (rawPrice !== '' && rawPrice != null) ? parseFloat(rawPrice) : null;
+  const url      = (document.getElementById('bnUrl')?.value || '').trim();
+  const hasSub   = document.getElementById('bnHasSub')?.checked;
   const sub = hasSub ? {
     pn:       (document.getElementById('bnSubPn')?.value   || '').trim(),
     desc:     (document.getElementById('bnSubDesc')?.value  || '').trim(),
-    cat:      (document.getElementById('bnSubCat')?.value   || '').trim(),
     src:      (document.getElementById('bnSubSrc')?.value   || '').trim(),
     approved: !!(document.getElementById('bnSubApproved')?.checked),
   } : null;
 
-  if (notes || (sub && sub.pn)) {
-    buyNotes[pb] = { notes, sub: sub || {pn:'',desc:'',cat:'',src:'',approved:false} };
+  if (notes || price != null || url || (sub && sub.pn)) {
+    buyNotes[pb] = { notes, price, url, sub: sub || {pn:'',desc:'',src:'',approved:false} };
   } else {
     delete buyNotes[pb];
   }
 
+  // Keep the existing price-lookup system (getPriceEntry / computeTreeCosts) in sync
+  if (price != null && price > 0) {
+    localStorage.setItem('px_' + pb, JSON.stringify({ p: price, src: url || '' }));
+  }
+
   document.getElementById('buyNotesModal').style.display = 'none';
   saveProcToFile();
+  buildCumulativeHours(); computeTreeCosts();
   buildTable(); applyFilters();
 }
 
@@ -2895,7 +2924,15 @@ async function loadProcFromGraph() {
       setFileSyncStatus('✅ נטען מ-SharePoint' + savedBy, 'ok');
     }
     if (obj.subcontractors) subData = obj.subcontractors;
-    if (obj.buyNotes) buyNotes = obj.buyNotes;
+    if (obj.buyNotes) {
+      buyNotes = obj.buyNotes;
+      // Sync prices stored in buyNotes to localStorage so getPriceEntry() works for all users
+      Object.entries(buyNotes).forEach(([k, v]) => {
+        if (v && v.price != null && v.price > 0) {
+          localStorage.setItem('px_' + k, JSON.stringify({ p: v.price, src: v.url || '' }));
+        }
+      });
+    }
     {
       // MERGE flags: server + local → union (preserves all users' flags)
       const preLocal = new Set([...flaggedRows]);
