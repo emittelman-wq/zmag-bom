@@ -497,7 +497,7 @@ const BOM = [{"lv":0,"pn":"6910W021-001/B","pb":"6910W021-001","cat":"407383883"
 // ─── State ──────────────────────────────────────────────
 // procData pre-declared here; second <script> will populate it from localStorage
 var procData = {};
-const BUILD_VER = 'v20260707.1100';
+const BUILD_VER = 'v20260707.1200';
 let rows = [];
 let selIdx = -1;
 let curSort = {col:null,asc:true};
@@ -1732,13 +1732,11 @@ updateStats();
           <col style="width:115px">
           <col style="width:70px">
           <col style="width:40px">
-          <col style="width:90px">
-          <col style="width:70px">
           <col style="width:80px">
           <col style="width:90px">
           <col style="width:90px">
           <col style="width:40px">
-          <col style="width:36px">
+          <col style="width:54px">
         </colgroup>
         <thead>
           <tr>
@@ -1747,13 +1745,11 @@ updateStats();
             <th onclick="sortBuy('cat')">Catalog # <span class="sico">↕</span></th>
             <th onclick="sortBuy('mf')">Manuf <span class="sico">↕</span></th>
             <th onclick="sortBuy('uom')">UOM <span class="sico">↕</span></th>
-            <th onclick="sortBuy('unitQty')" class="bsorted">Unit QTY <span class="sico">↕</span></th>
-            <th onclick="sortBuy('occ')">Occurrences <span class="sico">↕</span></th>
-            <th onclick="sortBuy('totalQty')" style="text-align:right">Total QTY <span class="sico">↑</span></th>
+            <th onclick="sortBuy('totalQty')" style="text-align:right" class="bsorted">Total QTY <span class="sico">↑</span></th>
             <th onclick="sortBuy('unitPrice')" style="text-align:right">Unit Price <span class="sico">↕</span></th>
             <th onclick="sortBuy('totalCost')" style="text-align:right">Total Cost <span class="sico">↕</span></th>
             <th style="text-align:center;cursor:default">Src</th>
-            <th style="text-align:center;cursor:default">📝</th>
+            <th style="text-align:center;cursor:default">Details</th>
           </tr>
         </thead>
         <tbody id="buyBody"></tbody>
@@ -2179,18 +2175,25 @@ function renderBuyTable(data) {
     }
     tr.appendChild(tdSrc);
 
-    // Buy notes/substitute indicator
+    // Details column — always shows edit button; icon reflects state
     const tdNotes = document.createElement('td');
     tdNotes.style.cssText = 'text-align:center;padding:4px 6px';
-    const hasnotes = !!(buyNotes[item.pb] && (buyNotes[item.pb].notes || (buyNotes[item.pb].sub && buyNotes[item.pb].sub.pn)));
-    if (hasnotes) {
-      const nb = document.createElement('button');
-      nb.style.cssText = 'background:none;border:none;cursor:pointer;font-size:13px;padding:0;opacity:0.9';
-      nb.title = buyNotes[item.pb].notes ? 'הערות: ' + buyNotes[item.pb].notes.substring(0,60) + (buyNotes[item.pb].sub && buyNotes[item.pb].sub.pn ? ' | חלופי: ' + buyNotes[item.pb].sub.pn : '') : 'חלופי: ' + (buyNotes[item.pb].sub && buyNotes[item.pb].sub.pn || '');
-      nb.textContent = buyNotes[item.pb].sub && buyNotes[item.pb].sub.pn ? (buyNotes[item.pb].sub.approved ? '✅' : '🔄') : '📝';
-      nb.addEventListener('click', () => openBuyNotesEditor(item.pb, item.desc));
-      tdNotes.appendChild(nb);
+    const bn = buyNotes[item.pb];
+    const hasnotes = !!(bn && (bn.notes || bn.price != null || bn.url || (bn.sub && bn.sub.pn)));
+    const detBtn = document.createElement('button');
+    detBtn.style.cssText = 'background:none;border:none;cursor:pointer;font-size:13px;padding:0;' + (hasnotes ? 'opacity:1' : 'opacity:0.35');
+    if (hasnotes && bn.sub && bn.sub.pn) {
+      detBtn.textContent = '🔄';
+      detBtn.title = 'חלופי: ' + bn.sub.pn + (bn.notes ? ' | ' + bn.notes.substring(0,40) : '');
+    } else if (hasnotes) {
+      detBtn.textContent = '📝';
+      detBtn.title = (bn.notes ? bn.notes.substring(0,60) : '') + (bn.price != null ? ' | ₪/$/€ ' + bn.price : '');
+    } else {
+      detBtn.textContent = '✏';
+      detBtn.title = 'עריכת פרטי פריט';
     }
+    detBtn.addEventListener('click', () => openBuyNotesEditor(item.pb, item.desc));
+    tdNotes.appendChild(detBtn);
     tr.appendChild(tdNotes);
 
     tbody.appendChild(tr);
@@ -2235,7 +2238,7 @@ function sortBuy(col) {
     const si = th.querySelector('.sico');
     if (si) si.textContent = '↕';
   });
-  const colMap = ['pb','desc','cat','mf','uom','totalQty','unitPrice','totalCost','src'];
+  const colMap = ['pb','desc','cat','mf','uom','totalQty','unitPrice','totalCost','src','__details__'];
   const ths = document.querySelectorAll('#buyTable thead th');
   const idx = colMap.indexOf(col);
   if (idx >= 0 && ths[idx]) {
@@ -2261,9 +2264,12 @@ function openBuyNotesEditor(pb, desc) {
   if (!m) {
     m = document.createElement('div');
     m.id = 'buyNotesModal';
-    m.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:1000;display:none;align-items:center;justify-content:center';
+    m.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:3000;display:none;align-items:center;justify-content:center';
     document.body.appendChild(m);
   }
+
+  const curCurrency = existing.currency || (priceEntry && priceEntry.currency) || 'USD';
+  const mkCurOpt = (val, lbl) => '<option value="' + val + '"' + (curCurrency===val?' selected':'') + '>' + lbl + '</option>';
 
   m.innerHTML =
     '<div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;width:560px;max-height:85vh;display:flex;flex-direction:column;overflow:hidden">' +
@@ -2276,10 +2282,16 @@ function openBuyNotesEditor(pb, desc) {
         '<button onclick="document.getElementById(\'buyNotesModal\').style.display=\'none\'" style="padding:4px 10px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;cursor:pointer">✕</button>' +
       '</div>' +
       '<div style="overflow:auto;flex:1;padding:14px;display:flex;flex-direction:column;gap:12px">' +
-        // Price + URL row
-        '<div style="display:grid;grid-template-columns:1fr 2fr;gap:8px">' +
+        // Price + Currency + URL row
+        '<div style="display:grid;grid-template-columns:80px 1fr 2fr;gap:8px;align-items:end">' +
           '<div>' +
-            '<label style="font-size:11px;font-weight:600;color:var(--text2);display:block;margin-bottom:4px">💰 מחיר (USD)</label>' +
+            '<label style="font-size:11px;font-weight:600;color:var(--text2);display:block;margin-bottom:4px">מטבע</label>' +
+            '<select id="bnCurrency" style="width:100%;padding:5px 6px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:13px">' +
+              mkCurOpt('USD','$ דולר') + mkCurOpt('EUR','€ יורו') + mkCurOpt('ILS','₪ שקל') +
+            '</select>' +
+          '</div>' +
+          '<div>' +
+            '<label style="font-size:11px;font-weight:600;color:var(--text2);display:block;margin-bottom:4px">💰 מחיר</label>' +
             '<input id="bnPrice" type="number" min="0" step="0.01" value="' + (currentPrice !== '' ? currentPrice : '') + '" placeholder="0.00" style="width:100%;box-sizing:border-box;padding:5px 8px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:13px">' +
           '</div>' +
           '<div>' +
@@ -2296,7 +2308,7 @@ function openBuyNotesEditor(pb, desc) {
         '<div style="border:1px solid var(--border);border-radius:6px;padding:10px">' +
           '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;font-weight:600;margin-bottom:8px">' +
             '<input type="checkbox" id="bnHasSub" ' + (hasSub?'checked':'') + ' onchange="toggleBnSubFields()">' +
-            '<span>🔄 פריט חלופי מאושר</span>' +
+            '<span>🔄 פריט חלופי</span>' +
           '</label>' +
           '<div id="bnSubFields" style="display:' + (hasSub?'flex':'none') + ';flex-direction:column;gap:6px">' +
             '<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px">' +
@@ -2307,10 +2319,6 @@ function openBuyNotesEditor(pb, desc) {
             '</div>' +
             '<div><label style="font-size:11px;color:var(--text2)">תיאור</label>' +
               '<input id="bnSubDesc" type="text" value="' + (existing.sub&&existing.sub.desc||'') + '" style="width:100%;box-sizing:border-box;padding:4px 6px;background:var(--surface);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px"></div>' +
-            '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px">' +
-              '<input type="checkbox" id="bnSubApproved" ' + (existing.sub&&existing.sub.approved?'checked':'') + '>' +
-              '<span>✅ אושר רשמית</span>' +
-            '</label>' +
           '</div>' +
         '</div>' +
       '</div>' +
@@ -2334,24 +2342,24 @@ function saveBuyNotes(pb) {
   const notes    = (document.getElementById('bnNotes')?.value || '').trim();
   const rawPrice = document.getElementById('bnPrice')?.value;
   const price    = (rawPrice !== '' && rawPrice != null) ? parseFloat(rawPrice) : null;
+  const currency = document.getElementById('bnCurrency')?.value || 'USD';
   const url      = (document.getElementById('bnUrl')?.value || '').trim();
   const hasSub   = document.getElementById('bnHasSub')?.checked;
   const sub = hasSub ? {
-    pn:       (document.getElementById('bnSubPn')?.value   || '').trim(),
-    desc:     (document.getElementById('bnSubDesc')?.value  || '').trim(),
-    src:      (document.getElementById('bnSubSrc')?.value   || '').trim(),
-    approved: !!(document.getElementById('bnSubApproved')?.checked),
+    pn:   (document.getElementById('bnSubPn')?.value   || '').trim(),
+    desc: (document.getElementById('bnSubDesc')?.value  || '').trim(),
+    src:  (document.getElementById('bnSubSrc')?.value   || '').trim(),
   } : null;
 
   if (notes || price != null || url || (sub && sub.pn)) {
-    buyNotes[pb] = { notes, price, url, sub: sub || {pn:'',desc:'',src:'',approved:false} };
+    buyNotes[pb] = { notes, price, currency, url, sub: sub || {pn:'',desc:'',src:''} };
   } else {
     delete buyNotes[pb];
   }
 
   // Keep the existing price-lookup system (getPriceEntry / computeTreeCosts) in sync
   if (price != null && price > 0) {
-    localStorage.setItem('px_' + pb, JSON.stringify({ p: price, src: url || '' }));
+    localStorage.setItem('px_' + pb, JSON.stringify({ p: price, src: url || '', currency }));
   }
 
   document.getElementById('buyNotesModal').style.display = 'none';
@@ -2929,7 +2937,7 @@ async function loadProcFromGraph() {
       // Sync prices stored in buyNotes to localStorage so getPriceEntry() works for all users
       Object.entries(buyNotes).forEach(([k, v]) => {
         if (v && v.price != null && v.price > 0) {
-          localStorage.setItem('px_' + k, JSON.stringify({ p: v.price, src: v.url || '' }));
+          localStorage.setItem('px_' + k, JSON.stringify({ p: v.price, src: v.url || '', currency: v.currency || 'USD' }));
         }
       });
     }
