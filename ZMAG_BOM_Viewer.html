@@ -495,7 +495,7 @@ const BOM = [{"lv":0,"pn":"6910W021-001/B","pb":"6910W021-001","cat":"407383883"
 // ─── State ──────────────────────────────────────────────
 // procData pre-declared here; second <script> will populate it from localStorage
 var procData = {};
-const BUILD_VER = 'v20260707.1300';
+const BUILD_VER = 'v20260707.1400';
 let rows = [];
 let selIdx = -1;
 let curSort = {col:null,asc:true};
@@ -575,14 +575,20 @@ const COLS = [
   {id:'type', label:'Type',       w:90,  sort:true},
   {id:'st',   label:'Status',     w:80,  sort:true},
   {id:'files',label:'Files',      w:60,  sort:false},
-  {id:'ucost',label:'💰 עלות שורה', w:90,  sort:false},
-  {id:'tcost',label:'🌳 Total',     w:90,  sort:false},
-  {id:'whd',  label:'⏱ ישיר',     w:65,  sort:false},
-  {id:'wht',  label:'⏱ עץ',       w:65,  sort:false}
+  {id:'setupH',label:'⚙ Setup',      w:65,  sort:false},
+  {id:'cycleH',label:'⏱ ייצור',     w:65,  sort:false},
+  {id:'cumCH', label:'⏱ עץ',        w:65,  sort:false},
+  {id:'totalH',label:'⏱ כולל',      w:70,  sort:false},
+  {id:'ucost', label:'💰 עבודה',     w:80,  sort:false},
+  {id:'tcost', label:'🌳 עלות עץ',   w:90,  sort:false},
+  {id:'pcost', label:'🌳 פרוייקט',  w:90,  sort:false},
 ];
 let colWidths = COLS.map(c=>c.w);
 let cumHours = [];
 let directHours = [];
+let setupHours = [];    // setup time in hours per item (not × qty)
+let directCycleH = [];  // cycle hours × item.tq per item (no setup)
+let cumCycleH = [];     // tree-cumulative cycle hours (no setup)
 let projectQty = 1;
 let buyNotes = {};
 let subData = {};
@@ -935,7 +941,28 @@ function buildTable(){
     }
     tdF.appendChild(fi); tr.appendChild(tdF);
 
-    // Unit Cost cell
+    // ⚙ Setup hours cell
+    const tdSetup = document.createElement('td');
+    tdSetup.className = 'cell-setupH';
+    tdSetup.style.cssText = 'text-align:right;font-size:11px;color:var(--text3)';
+    tr.appendChild(tdSetup);
+    // ⏱ Cycle/production hours cell (cycle × tq, no setup)
+    const tdCycH = document.createElement('td');
+    tdCycH.className = 'cell-cycleH';
+    tdCycH.style.cssText = 'text-align:right;font-size:11px;color:var(--accent2)';
+    tr.appendChild(tdCycH);
+    // ⏱ Tree cycle hours cell
+    const tdCumCH = document.createElement('td');
+    tdCumCH.className = 'cell-cumCH';
+    tdCumCH.style.cssText = 'text-align:right;font-size:11px;color:var(--text2)';
+    tr.appendChild(tdCumCH);
+    // ⏱ Total hours cell (tree × projectQty)
+    const tdTotH = document.createElement('td');
+    tdTotH.className = 'cell-totalH';
+    tdTotH.dataset.totalHIdx = idx;
+    tdTotH.style.cssText = 'text-align:right;font-size:11px;color:var(--text2)';
+    tr.appendChild(tdTotH);
+    // 💰 Direct labor/buy cost cell (unitCost × tq)
     const tdUC = document.createElement('td');
     tdUC.className = 'cost-val';
     tdUC.dataset.costIdx = idx;
@@ -952,21 +979,16 @@ function buildTable(){
       tdUC.title = 'Calculated from process costs (edit in ⚙ Process Types)';
     }
     tr.appendChild(tdUC);
-    // Tree Total cost cell
+    // 🌳 Tree cost cell
     const tdTC = document.createElement('td');
     tdTC.className = 'cost-val cost-tree';
     tdTC.dataset.treeCostIdx = idx;
     tr.appendChild(tdTC);
-    // Direct hours cell
-    const tdWHD = document.createElement('td');
-    tdWHD.className = 'wh-cell-direct';
-    tdWHD.style.cssText = 'text-align:right;font-size:11px;color:var(--text2)';
-    tr.appendChild(tdWHD);
-    // Cumulative (tree) hours cell
-    const tdWHT = document.createElement('td');
-    tdWHT.className = 'wh-cell-tree';
-    tdWHT.style.cssText = 'text-align:right;font-size:11px;color:var(--text2)';
-    tr.appendChild(tdWHT);
+    // 🌳 Project cost cell (treeCost × projectQty)
+    const tdPC = document.createElement('td');
+    tdPC.className = 'cost-val cost-proj';
+    tdPC.dataset.projCostIdx = idx;
+    tr.appendChild(tdPC);
     tr.addEventListener('click',()=>selectRow(idx));
     if(disabledRows.has(idx)) tr.classList.add('row-disabled');
     tbody.appendChild(tr);
@@ -978,44 +1000,62 @@ function buildTable(){
 
 // ─── Cumulative work hours ────────────────────────────────
 function buildCumulativeHours() {
-  cumHours = new Array(BOM.length).fill(0);
-  directHours = new Array(BOM.length).fill(0);
+  const n = BOM.length;
+  cumHours     = new Array(n).fill(0);
+  directHours  = new Array(n).fill(0);
+  setupHours   = new Array(n).fill(0);
+  directCycleH = new Array(n).fill(0);
+  cumCycleH    = new Array(n).fill(0);
   BOM.forEach((item, idx) => {
     if (item.type !== 'ELTDesign') return;
     const pb = item.pb || item.pn;
     const procs = procData[pb];
     if (!procs || !procs.length) return;
-    let itemH = 0;
+    let itemSetupH = 0;
+    let itemCycleH = 0;
     procs.forEach(p => {
-      // Only count time-based units (h, min) — skip m, m2, pcs
       const isTimeUnit = (p.unit === 'h' || p.unit === 'hr' || p.unit === 'min');
       if (!isTimeUnit) return;
       const cycleQty = p.qty || 0;
       const cycleMin = (p.unit === 'h' || p.unit === 'hr') ? cycleQty * 60 : cycleQty;
       const setupMin = (p.setupUnit === 'h' || p.setupUnit === 'hr') ? (p.setup||0)*60 : (p.setup||0);
-      itemH += (cycleMin * (item.tq || item.qty || 1) + setupMin) / 60;
+      itemSetupH += setupMin / 60;
+      itemCycleH += (cycleMin * (item.tq || item.qty || 1)) / 60;
     });
-    directHours[idx] = itemH;
-    cumHours[idx] += itemH;
-    // add to all direct ancestors (walk up the tree)
+    setupHours[idx]   = itemSetupH;
+    directCycleH[idx] = itemCycleH;
+    directHours[idx]  = itemCycleH + itemSetupH;  // combined (backward compat)
+    cumHours[idx]     += directHours[idx];
+    cumCycleH[idx]    += itemCycleH;
     let curLv = item.lv;
     for (let a = idx - 1; a >= 0; a--) {
       if (BOM[a].lv < curLv) {
-        cumHours[a] += itemH;
+        cumHours[a]  += directHours[idx];
+        cumCycleH[a] += itemCycleH;
         curLv = BOM[a].lv;
       }
     }
   });
 }
 function updateWHCells() {
-  document.querySelectorAll('.wh-cell-direct').forEach((td, i) => {
-    const h = directHours[i];
-    td.textContent = (h && h > 0.01) ? fmtTimeAuto(h * 60) : '';
-    td.style.color = 'var(--accent2)';
+  document.querySelectorAll('.cell-setupH').forEach((td, i) => {
+    const h = setupHours[i];
+    td.textContent = (h && h > 0.005) ? fmtTimeAuto(h * 60) : '';
   });
-  document.querySelectorAll('.wh-cell-tree').forEach((td, i) => {
-    const h = cumHours[i];
-    td.textContent = (h && h > 0.01) ? fmtTimeAuto(h * 60) : '';
+  document.querySelectorAll('.cell-cycleH').forEach((td, i) => {
+    const h = directCycleH[i];
+    td.textContent = (h && h > 0.005) ? fmtTimeAuto(h * 60) : '';
+  });
+  document.querySelectorAll('.cell-cumCH').forEach((td, i) => {
+    const h = cumCycleH[i];
+    td.textContent = (h && h > 0.005) ? fmtTimeAuto(h * 60) : '';
+  });
+  document.querySelectorAll('[data-total-h-idx]').forEach(function(td) {
+    const i = parseInt(td.dataset.totalHIdx);
+    const h = cumCycleH[i];
+    const tot = h > 0.005 ? h * projectQty : 0;
+    td.textContent = tot > 0.005 ? fmtTimeAuto(tot * 60) : '';
+    td.style.fontWeight = projectQty > 1 ? '600' : '';
   });
 }
 
@@ -1261,11 +1301,13 @@ function updateStats(vis){
   const pct = eligibleItems.length ? Math.round(analyzedItems.length / eligibleItems.length * 100) : 0;
   const progressHtml = `<span id="analysisProgress"><span style="font-size:11px;color:var(--text2);margin-left:12px">ניתוח: ${analyzedItems.length}/${eligibleItems.length}</span><span style="display:inline-block;width:80px;height:5px;background:var(--surface2);border-radius:3px;margin-left:6px;vertical-align:middle"><span style="display:block;width:${pct}%;height:100%;background:var(--accent2);border-radius:3px"></span></span></span>`;
   // Project totals
-  const rootCost = BOM.reduce((sum, item, i) => item.lv === 0 ? sum + (treeCosts[i] || 0) : sum, 0);
-  const rootHours = BOM.reduce((sum, item, i) => item.lv === 0 ? sum + (cumHours[i] || 0) : sum, 0);
-  const projCostStr = rootCost > 0 ? ' · 💰 ' + fmtC(rootCost * projectQty) : '';
-  const projHoursStr = rootHours > 0 ? ' · ⏱ ' + fmtTimeAuto(rootHours * projectQty * 60) : '';
-  const projStr = projectQty > 1 ? ` · ×${projectQty}` + projCostStr + projHoursStr : projCostStr + projHoursStr;
+  const rootCost  = BOM.reduce((sum, item, i) => item.lv === 0 ? sum + (treeCosts[i]  || 0) : sum, 0);
+  const rootCycleH = BOM.reduce((sum, item, i) => item.lv === 0 ? sum + (cumCycleH[i] || 0) : sum, 0);
+  const rootSetupH = setupHours.reduce((a, b) => a + b, 0);
+  const projCostStr  = rootCost   > 0 ? ' · 💰 ' + fmtC(rootCost * projectQty) : '';
+  const projHoursStr = rootCycleH > 0 ? ' · ⏱ ' + fmtTimeAuto(rootCycleH * projectQty * 60) : '';
+  const setupStr     = rootSetupH > 0 ? ' · ⚙ ' + fmtTimeAuto(rootSetupH * 60) : '';
+  const projStr = (projectQty > 1 ? ` · ×${projectQty}` : '') + projCostStr + projHoursStr + setupStr;
   document.getElementById('statsBar').innerHTML=`${s.toLocaleString()}/${t.toLocaleString()} parts · ${p} drawings · ${c} CAD`+disStr+projStr+progressHtml;
   // Update cost columns
   refreshCostCells();
@@ -1282,6 +1324,13 @@ function refreshCostCells() {
     const i = parseInt(td.dataset.treeCostIdx);
     const tc = treeCosts[i];
     td.textContent = tc ? fmtC(tc) : '—';
+  });
+  document.querySelectorAll('[data-proj-cost-idx]').forEach(function(td){
+    const i = parseInt(td.dataset.projCostIdx);
+    const tc = treeCosts[i];
+    const proj = tc ? tc * projectQty : 0;
+    td.textContent = proj > 0 ? fmtC(proj) : '—';
+    td.style.fontWeight = projectQty > 1 ? '700' : '';
   });
 }
 
@@ -3926,20 +3975,23 @@ function exportBomExcel() {
         properties: { summaryBelow: false, summaryRight: false }
       });
       ws.columns = [
-        { header: '#',              key: 'num',   width: 5  },
-        { header: 'רמה',            key: 'lv',    width: 6  },
-        { header: 'מק"ט',           key: 'pn',    width: 26 },
-        { header: 'תיאור',          key: 'desc',  width: 48 },
-        { header: 'קטלוג',          key: 'cat',   width: 15 },
-        { header: 'כמות',           key: 'qty',   width: 8  },
-        { header: 'כמות כוללת',     key: 'tq',    width: 13 },
-        { header: 'יחידה',          key: 'uom',   width: 8  },
-        { header: 'סוג',            key: 'type',  width: 12 },
-        { header: 'סטטוס',          key: 'st',    width: 12 },
-        { header: '⏱ שעות ישיר',   key: 'whd',   width: 14 },
-        { header: '⏱ שעות עץ',     key: 'wht',   width: 14 },
-        { header: '💰 עלות שורה',   key: 'ucost', width: 14 },
-        { header: '🌳 עלות כוללת',  key: 'tcost', width: 14 },
+        { header: '#',              key: 'num',    width: 5  },
+        { header: 'רמה',            key: 'lv',     width: 6  },
+        { header: 'מק"ט',           key: 'pn',     width: 26 },
+        { header: 'תיאור',          key: 'desc',   width: 48 },
+        { header: 'קטלוג',          key: 'cat',    width: 15 },
+        { header: 'כמות',           key: 'qty',    width: 8  },
+        { header: 'כמות כוללת',     key: 'tq',     width: 13 },
+        { header: 'יחידה',          key: 'uom',    width: 8  },
+        { header: 'סוג',            key: 'type',   width: 12 },
+        { header: 'סטטוס',          key: 'st',     width: 12 },
+        { header: '⚙ Setup',        key: 'setupH', width: 13 },
+        { header: '⏱ ייצור',       key: 'cycleH', width: 13 },
+        { header: '⏱ עץ',          key: 'cumCH',  width: 13 },
+        { header: '⏱ כולל',        key: 'totalH', width: 13 },
+        { header: '💰 עבודה',       key: 'ucost',  width: 14 },
+        { header: '🌳 עלות עץ',     key: 'tcost',  width: 14 },
+        { header: '🌳 פרוייקט',    key: 'pcost',  width: 14 },
       ];
       const hdrRow = ws.getRow(1);
       hdrRow.height = 20;
@@ -3949,17 +4001,20 @@ function exportBomExcel() {
         cell.alignment = { horizontal: 'center', vertical: 'middle', readingOrder: 'rightToLeft' };
         cell.border    = { bottom: { style: 'thin', color: { argb: 'FF8EA9C1' } } };
       });
-      ws.autoFilter = { from: 'A1', to: 'N1' };
+      ws.autoFilter = { from: 'A1', to: 'Q1' };
       const typeFill = { ELTDesign: 'FFD6E4BC', Buy: 'FFBDD7EE', Package: 'FFFFFFCC' };
 
       exportIndices.forEach((i, rowNum) => {
         const item = BOM[i];
         const relLv  = item.lv - rootLv;            // relative level (0 = root)
         const indent = '  '.repeat(relLv);
-        const whdVal = directHours[i] > 0.01 ? Math.round(directHours[i] * 10) / 10 : null;
-        const whtVal = cumHours[i]    > 0.01 ? Math.round(cumHours[i]    * 10) / 10 : null;
-        const ucVal  = unitCosts[i]   > 0    ? Math.round(unitCosts[i] * (item.tq || 1) * 100) / 100 : null;
-        const tcVal  = treeCosts[i]   > 0    ? Math.round(treeCosts[i] * 100) / 100 : null;
+        const setupV  = setupHours[i]   > 0.005 ? Math.round(setupHours[i]   * 100) / 100 : null;
+        const cycleV  = directCycleH[i] > 0.005 ? Math.round(directCycleH[i] * 100) / 100 : null;
+        const cumCV   = cumCycleH[i]    > 0.005 ? Math.round(cumCycleH[i]    * 100) / 100 : null;
+        const totalHV = cumCV != null           ? Math.round(cumCV * projectQty * 100) / 100 : null;
+        const ucVal   = unitCosts[i]    > 0     ? Math.round(unitCosts[i] * (item.tq || 1) * 100) / 100 : null;
+        const tcVal   = treeCosts[i]    > 0     ? Math.round(treeCosts[i] * 100) / 100 : null;
+        const pcVal   = tcVal != null           ? Math.round(tcVal * projectQty * 100) / 100 : null;
         const exRow = ws.addRow({
           num:   rowNum + 1,
           lv:    relLv,
@@ -3971,7 +4026,8 @@ function exportBomExcel() {
           uom:   item.uom  || '',
           type:  item.type || '',
           st:    item.st   || '',
-          whd:   whdVal, wht: whtVal, ucost: ucVal, tcost: tcVal,
+          setupH: setupV, cycleH: cycleV, cumCH: cumCV, totalH: totalHV,
+          ucost: ucVal, tcost: tcVal, pcost: pcVal,
         });
         exRow.outlineLevel = Math.min(relLv, 7);
         exRow.height = 15;
@@ -3986,11 +4042,11 @@ function exportBomExcel() {
           const cell = exRow.getCell(ws.getColumn(k).number);
           cell.alignment = { horizontal: 'center', vertical: 'middle' };
         });
-        ['whd','wht'].forEach(k => {
+        ['setupH','cycleH','cumCH','totalH'].forEach(k => {
           const cell = exRow.getCell(ws.getColumn(k).number);
-          cell.numFmt = '#,##0.0" hr"'; cell.alignment = { horizontal: 'right', vertical: 'middle' };
+          cell.numFmt = '#,##0.00" hr"'; cell.alignment = { horizontal: 'right', vertical: 'middle' };
         });
-        ['ucost','tcost'].forEach(k => {
+        ['ucost','tcost','pcost'].forEach(k => {
           const cell = exRow.getCell(ws.getColumn(k).number);
           cell.numFmt = '₪#,##0.00'; cell.alignment = { horizontal: 'right', vertical: 'middle' };
         });
@@ -4049,10 +4105,13 @@ function exportAssemblyExcel() {
       { header: 'יחידה',         key: 'uom',   width: 8  },
       { header: 'סוג',           key: 'type',  width: 12 },
       { header: 'סטטוס',         key: 'st',    width: 12 },
-      { header: '⏱ שעות ישיר',  key: 'whd',   width: 14 },
-      { header: '⏱ שעות עץ',    key: 'wht',   width: 14 },
-      { header: '💰 עלות שורה',  key: 'ucost', width: 14 },
-      { header: '🌳 עלות עץ',    key: 'tcost', width: 14 },
+      { header: '⚙ Setup',       key: 'setupH', width: 13 },
+      { header: '⏱ ייצור',      key: 'cycleH', width: 13 },
+      { header: '⏱ עץ',         key: 'cumCH',  width: 13 },
+      { header: '⏱ כולל',       key: 'totalH', width: 13 },
+      { header: '💰 עבודה',      key: 'ucost',  width: 14 },
+      { header: '🌳 עלות עץ',    key: 'tcost',  width: 14 },
+      { header: '🌳 פרוייקט',   key: 'pcost',  width: 14 },
     ];
     const hdrRow = ws.getRow(1);
     hdrRow.height = 20;
@@ -4061,15 +4120,18 @@ function exportAssemblyExcel() {
       cell.fill      = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1F3864' } };
       cell.alignment = { horizontal: 'center', vertical: 'middle', readingOrder: 'rightToLeft' };
     });
-    ws.autoFilter = { from: 'A1', to: 'N1' };
+    ws.autoFilter = { from: 'A1', to: 'Q1' };
     const typeFill = { ELTDesign: 'FFD6E4BC', Buy: 'FFBDD7EE', Package: 'FFFFFFCC' };
     indices.forEach((i, rowNum) => {
       const item = BOM[i];
       const indent = '  '.repeat(item.lv - rootLv);
-      const whd = directHours[i] > 0.01 ? Math.round(directHours[i] * 10) / 10 : null;
-      const wht = cumHours[i]    > 0.01 ? Math.round(cumHours[i]    * 10) / 10 : null;
-      const uc  = unitCosts[i]   > 0    ? Math.round(unitCosts[i] * (item.tq||1) * 100) / 100 : null;
-      const tc  = treeCosts[i]   > 0    ? Math.round(treeCosts[i] * 100) / 100 : null;
+      const setupV  = setupHours[i]   > 0.005 ? Math.round(setupHours[i]   * 100) / 100 : null;
+      const cycleV  = directCycleH[i] > 0.005 ? Math.round(directCycleH[i] * 100) / 100 : null;
+      const cumCV   = cumCycleH[i]    > 0.005 ? Math.round(cumCycleH[i]    * 100) / 100 : null;
+      const totalHV = cumCV != null           ? Math.round(cumCV * projectQty * 100) / 100 : null;
+      const uc      = unitCosts[i]    > 0     ? Math.round(unitCosts[i] * (item.tq||1) * 100) / 100 : null;
+      const tc      = treeCosts[i]    > 0     ? Math.round(treeCosts[i] * 100) / 100 : null;
+      const pcVal   = tc != null              ? Math.round(tc * projectQty * 100) / 100 : null;
       const exRow = ws.addRow({
         num:   rowNum + 1,
         lv:    item.lv - rootLv,
@@ -4081,7 +4143,8 @@ function exportAssemblyExcel() {
         uom:   item.uom  || '',
         type:  item.type || '',
         st:    item.st   || '',
-        whd, wht, ucost: uc, tcost: tc,
+        setupH: setupV, cycleH: cycleV, cumCH: cumCV, totalH: totalHV,
+        ucost: uc, tcost: tc, pcost: pcVal,
       });
       exRow.outlineLevel = Math.min(item.lv - rootLv, 7);
       exRow.height = 15;
@@ -4097,12 +4160,12 @@ function exportAssemblyExcel() {
         const cell = exRow.getCell(col.number);
         cell.alignment = { horizontal: 'center', vertical: 'middle' };
       });
-      ['whd','wht'].forEach(k => {
+      ['setupH','cycleH','cumCH','totalH'].forEach(k => {
         const cell = exRow.getCell(ws.getColumn(k).number);
-        cell.numFmt = '#,##0.0" hr"';
+        cell.numFmt = '#,##0.00" hr"';
         cell.alignment = { horizontal: 'right', vertical: 'middle' };
       });
-      ['ucost','tcost'].forEach(k => {
+      ['ucost','tcost','pcost'].forEach(k => {
         const cell = exRow.getCell(ws.getColumn(k).number);
         cell.numFmt = '₪#,##0.00';
         cell.alignment = { horizontal: 'right', vertical: 'middle' };
