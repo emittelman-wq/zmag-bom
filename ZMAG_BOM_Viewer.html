@@ -495,7 +495,7 @@ const BOM = [{"lv":0,"pn":"6910W021-001/B","pb":"6910W021-001","cat":"407383883"
 // ─── State ──────────────────────────────────────────────
 // procData pre-declared here; second <script> will populate it from localStorage
 var procData = {};
-const BUILD_VER = 'v20260707.1500';
+const BUILD_VER = 'v20260707.1600';
 let rows = [];
 let selIdx = -1;
 let curSort = {col:null,asc:true};
@@ -589,7 +589,8 @@ let colWidths = COLS.map(c=>c.w);
 let cumHours = [];
 let directHours = [];
 let setupHours = [];    // setup time in hours per item (not × qty)
-let directCycleH = [];  // cycle hours × item.tq per item (no setup)
+let perUnitH = [];      // cycle hours per 1 unit (no tq, no setup)
+let directCycleH = [];  // cycle hours × item.tq per item (for tree accumulation)
 let cumCycleH = [];     // tree-cumulative cycle hours (no setup)
 let projectQty = 1;
 let buyNotes = {};
@@ -1026,6 +1027,7 @@ function buildCumulativeHours() {
   cumHours     = new Array(n).fill(0);
   directHours  = new Array(n).fill(0);
   setupHours   = new Array(n).fill(0);
+  perUnitH     = new Array(n).fill(0);
   directCycleH = new Array(n).fill(0);
   cumCycleH    = new Array(n).fill(0);
   BOM.forEach((item, idx) => {
@@ -1033,20 +1035,23 @@ function buildCumulativeHours() {
     const pb = item.pb || item.pn;
     const procs = procData[pb];
     if (!procs || !procs.length) return;
-    let itemSetupH = 0;
-    let itemCycleH = 0;
+    let itemSetupH  = 0;
+    let itemPerUnit = 0;  // cycle per 1 unit (no tq)
     procs.forEach(p => {
       const isTimeUnit = (p.unit === 'h' || p.unit === 'hr' || p.unit === 'min');
       if (!isTimeUnit) return;
       const cycleQty = p.qty || 0;
       const cycleMin = (p.unit === 'h' || p.unit === 'hr') ? cycleQty * 60 : cycleQty;
       const setupMin = (p.setupUnit === 'h' || p.setupUnit === 'hr') ? (p.setup||0)*60 : (p.setup||0);
-      itemSetupH += setupMin / 60;
-      itemCycleH += (cycleMin * (item.tq || item.qty || 1)) / 60;
+      itemSetupH  += setupMin / 60;
+      itemPerUnit += cycleMin / 60;   // per 1 unit
     });
+    const tq = item.tq || item.qty || 1;
+    const itemCycleH = itemPerUnit * tq;  // cycle × tq for tree accumulation
     setupHours[idx]   = itemSetupH;
+    perUnitH[idx]     = itemPerUnit;
     directCycleH[idx] = itemCycleH;
-    directHours[idx]  = itemCycleH + itemSetupH;  // combined (backward compat)
+    directHours[idx]  = itemCycleH + itemSetupH;
     cumHours[idx]     += directHours[idx];
     cumCycleH[idx]    += itemCycleH;
     let curLv = item.lv;
@@ -1065,7 +1070,7 @@ function updateWHCells() {
     td.textContent = (h && h > 0.005) ? fmtTimeAuto(h * 60) : '';
   });
   document.querySelectorAll('.cell-cycleH').forEach((td, i) => {
-    const h = directCycleH[i];
+    const h = perUnitH[i];
     td.textContent = (h && h > 0.005) ? fmtTimeAuto(h * 60) : '';
   });
   document.querySelectorAll('.cell-cumCH').forEach((td, i) => {
@@ -1338,9 +1343,8 @@ function refreshCostCells() {
   if (!unitCosts.length) return;
   document.querySelectorAll('[data-cost-idx]').forEach(function(td){
     const i = parseInt(td.dataset.costIdx);
-    const uc = unitCosts[i];
-    const extCost = uc ? uc * (BOM[i].tq || 1) : 0;
-    td.textContent = extCost > 0 ? fmtC(extCost) : '—';
+    const uc = unitCosts[i] || 0;
+    td.textContent = uc > 0 ? fmtC(uc) : '—';
   });
   document.querySelectorAll('[data-tree-cost-idx]').forEach(function(td){
     const i = parseInt(td.dataset.treeCostIdx);
@@ -4031,11 +4035,11 @@ function exportBomExcel() {
         const item = BOM[i];
         const relLv  = item.lv - rootLv;            // relative level (0 = root)
         const indent = '  '.repeat(relLv);
-        const setupV  = setupHours[i]   > 0.005 ? Math.round(setupHours[i]   * 100) / 100 : null;
-        const cycleV  = directCycleH[i] > 0.005 ? Math.round(directCycleH[i] * 100) / 100 : null;
-        const cumCV   = cumCycleH[i]    > 0.005 ? Math.round(cumCycleH[i]    * 100) / 100 : null;
-        const totalHV = cumCV != null           ? Math.round(cumCV * projectQty * 100) / 100 : null;
-        const ucVal   = unitCosts[i]    > 0     ? Math.round(unitCosts[i] * (item.tq || 1) * 100) / 100 : null;
+        const setupV  = setupHours[i] > 0.005 ? Math.round(setupHours[i] * 100) / 100 : null;
+        const cycleV  = perUnitH[i]   > 0.005 ? Math.round(perUnitH[i]   * 100) / 100 : null;
+        const cumCV   = cumCycleH[i]  > 0.005 ? Math.round(cumCycleH[i]  * 100) / 100 : null;
+        const totalHV = cumCV != null          ? Math.round(cumCV * projectQty * 100) / 100 : null;
+        const ucVal   = unitCosts[i]  > 0      ? Math.round(unitCosts[i]  * 100) / 100 : null;
         const tcVal   = treeCosts[i]    > 0     ? Math.round(treeCosts[i] * 100) / 100 : null;
         const setupC  = (cumSetupCosts && cumSetupCosts[i] > 0) ? cumSetupCosts[i] : 0;
         const pcVal   = (tcVal != null || setupC > 0) ? Math.round(((tcVal || 0) * projectQty + setupC) * 100) / 100 : null;
@@ -4149,11 +4153,11 @@ function exportAssemblyExcel() {
     indices.forEach((i, rowNum) => {
       const item = BOM[i];
       const indent = '  '.repeat(item.lv - rootLv);
-      const setupV  = setupHours[i]   > 0.005 ? Math.round(setupHours[i]   * 100) / 100 : null;
-      const cycleV  = directCycleH[i] > 0.005 ? Math.round(directCycleH[i] * 100) / 100 : null;
-      const cumCV   = cumCycleH[i]    > 0.005 ? Math.round(cumCycleH[i]    * 100) / 100 : null;
-      const totalHV = cumCV != null           ? Math.round(cumCV * projectQty * 100) / 100 : null;
-      const uc      = unitCosts[i]    > 0     ? Math.round(unitCosts[i] * (item.tq||1) * 100) / 100 : null;
+      const setupV  = setupHours[i] > 0.005 ? Math.round(setupHours[i] * 100) / 100 : null;
+      const cycleV  = perUnitH[i]   > 0.005 ? Math.round(perUnitH[i]   * 100) / 100 : null;
+      const cumCV   = cumCycleH[i]  > 0.005 ? Math.round(cumCycleH[i]  * 100) / 100 : null;
+      const totalHV = cumCV != null          ? Math.round(cumCV * projectQty * 100) / 100 : null;
+      const uc      = unitCosts[i]  > 0      ? Math.round(unitCosts[i]  * 100) / 100 : null;
       const tc      = treeCosts[i]    > 0     ? Math.round(treeCosts[i] * 100) / 100 : null;
       const setupC  = (cumSetupCosts && cumSetupCosts[i] > 0) ? cumSetupCosts[i] : 0;
       const pcVal   = (tc != null || setupC > 0) ? Math.round(((tc || 0) * projectQty + setupC) * 100) / 100 : null;
