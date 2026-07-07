@@ -410,6 +410,12 @@ tr.row-disabled .badge,tr.row-disabled .proc-btn{opacity:.5}
   <button class="btn" id="xlsxBtn" onclick="exportBomExcel()" title="ייצוא BOM לקובץ Excel עם היררכיה וקיבוץ">📊 Excel</button>
   <button class="btn" id="adminFolderBtn" onclick="adminGetFolderItemId()" title="Admin: Get SharePoint Folder Item ID for hardcoding" style="display:none;font-size:10px;opacity:.6">🔧 Get Folder ID</button>
   <button class="btn" id="themeBtn" onclick="toggleTheme()" title="Toggle light/dark mode">☀️</button>
+  <span id="projectQtyWrap" style="font-size:11px;color:var(--text2);display:flex;align-items:center;gap:4px">
+    ערכות:
+    <input type="number" id="projectQtyInput" value="1" min="1" max="9999" step="1"
+      style="width:48px;padding:2px 4px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:11px;text-align:center"
+      onchange="setProjectQty(this.value)" oninput="setProjectQty(this.value)">
+  </span>
   <div class="stats" id="statsBar">Loading…</div>
 </div>
 
@@ -469,6 +475,9 @@ tr.row-disabled .badge,tr.row-disabled .proc-btn{opacity:.5}
     </div>
     <div class="ms-saved" id="msSaved">✓ Saved</div>
     <button class="ms-add-btn" id="msAddBtn" style="display:none" onclick="msAddRow()">＋ Add Process</button>
+    <div style="padding:6px 10px;border-top:1px solid var(--border)">
+      <button id="msExportAssyBtn" onclick="exportAssemblyExcel()" style="display:none;width:100%;padding:5px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;cursor:pointer;font-size:11px">📊 ייצוא הרכבה לאקסל</button>
+    </div>
     <div id="msSubSection" style="display:none;padding:8px 10px 10px;border-top:1px solid var(--border);margin-top:4px">
       <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;color:var(--text2)">
         <input type="checkbox" id="msSubCheck" onchange="msSideSub()">
@@ -488,7 +497,7 @@ const BOM = [{"lv":0,"pn":"6910W021-001/B","pb":"6910W021-001","cat":"407383883"
 // ─── State ──────────────────────────────────────────────
 // procData pre-declared here; second <script> will populate it from localStorage
 var procData = {};
-const BUILD_VER = 'v20260702.1600';
+const BUILD_VER = 'v20260707.1000';
 let rows = [];
 let selIdx = -1;
 let curSort = {col:null,asc:true};
@@ -568,12 +577,16 @@ const COLS = [
   {id:'type', label:'Type',       w:90,  sort:true},
   {id:'st',   label:'Status',     w:80,  sort:true},
   {id:'files',label:'Files',      w:60,  sort:false},
-  {id:'ucost',label:'💰 Cost',    w:80,  sort:false},
-  {id:'tcost',label:'🌳 Total',   w:90,  sort:false},
-  {id:'wh',   label:'⏱ Hours',   w:70,  sort:false}
+  {id:'ucost',label:'💰 עלות שורה', w:90,  sort:false},
+  {id:'tcost',label:'🌳 Total',     w:90,  sort:false},
+  {id:'whd',  label:'⏱ ישיר',     w:65,  sort:false},
+  {id:'wht',  label:'⏱ עץ',       w:65,  sort:false}
 ];
 let colWidths = COLS.map(c=>c.w);
 let cumHours = [];
+let directHours = [];
+let projectQty = 1;
+let buyNotes = {};
 let subData = {};
 
 // ─── Build header ────────────────────────────────────────
@@ -817,6 +830,15 @@ function buildTable(){
         scBadge.style.cssText = 'font-size:10px;margin-left:2px;cursor:default';
         tdP.appendChild(scBadge);
       }
+    } else if (item.type === 'Buy') {
+      const pb = item.pb || item.pn;
+      const hasnotes = !!(buyNotes[pb] && (buyNotes[pb].notes || (buyNotes[pb].sub && buyNotes[pb].sub.pn)));
+      const notesBtn = document.createElement('button');
+      notesBtn.className = 'proc-btn' + (hasnotes ? ' proc-has' : '');
+      notesBtn.title = hasnotes ? 'הערות/חלופי — לחץ לעריכה' : 'הוסף הערות/חלופי';
+      notesBtn.textContent = hasnotes ? '📝' : '✎';
+      notesBtn.addEventListener('click', ev => { ev.stopPropagation(); openBuyNotesEditor(pb, item.desc); });
+      tdP.appendChild(notesBtn);
     }
     tr.appendChild(tdP);
 
@@ -937,13 +959,16 @@ function buildTable(){
     tdTC.className = 'cost-val cost-tree';
     tdTC.dataset.treeCostIdx = idx;
     tr.appendChild(tdTC);
-    // Work hours cell
-    const tdWH = document.createElement('td');
-    tdWH.className = 'wh-cell';
-    tdWH.style.textAlign = 'right';
-    tdWH.style.fontSize = '11px';
-    tdWH.style.color = 'var(--text2)';
-    tr.appendChild(tdWH);
+    // Direct hours cell
+    const tdWHD = document.createElement('td');
+    tdWHD.className = 'wh-cell-direct';
+    tdWHD.style.cssText = 'text-align:right;font-size:11px;color:var(--text2)';
+    tr.appendChild(tdWHD);
+    // Cumulative (tree) hours cell
+    const tdWHT = document.createElement('td');
+    tdWHT.className = 'wh-cell-tree';
+    tdWHT.style.cssText = 'text-align:right;font-size:11px;color:var(--text2)';
+    tr.appendChild(tdWHT);
     tr.addEventListener('click',()=>selectRow(idx));
     if(disabledRows.has(idx)) tr.classList.add('row-disabled');
     tbody.appendChild(tr);
@@ -956,6 +981,7 @@ function buildTable(){
 // ─── Cumulative work hours ────────────────────────────────
 function buildCumulativeHours() {
   cumHours = new Array(BOM.length).fill(0);
+  directHours = new Array(BOM.length).fill(0);
   BOM.forEach((item, idx) => {
     if (item.type !== 'ELTDesign') return;
     const pb = item.pb || item.pn;
@@ -971,6 +997,7 @@ function buildCumulativeHours() {
       const setupMin = (p.setupUnit === 'h' || p.setupUnit === 'hr') ? (p.setup||0)*60 : (p.setup||0);
       itemH += (cycleMin * (item.tq || item.qty || 1) + setupMin) / 60;
     });
+    directHours[idx] = itemH;
     cumHours[idx] += itemH;
     // add to all direct ancestors (walk up the tree)
     let curLv = item.lv;
@@ -983,7 +1010,12 @@ function buildCumulativeHours() {
   });
 }
 function updateWHCells() {
-  document.querySelectorAll('.wh-cell').forEach((td, i) => {
+  document.querySelectorAll('.wh-cell-direct').forEach((td, i) => {
+    const h = directHours[i];
+    td.textContent = (h && h > 0.01) ? fmtTimeAuto(h * 60) : '';
+    td.style.color = 'var(--accent2)';
+  });
+  document.querySelectorAll('.wh-cell-tree').forEach((td, i) => {
     const h = cumHours[i];
     td.textContent = (h && h > 0.01) ? fmtTimeAuto(h * 60) : '';
   });
@@ -1205,6 +1237,13 @@ function updateRowCheckVisuals(){
   });
   updateStats();
 }
+function setProjectQty(v) {
+  const n = Math.max(1, parseInt(v) || 1);
+  projectQty = n;
+  const inp = document.getElementById('projectQtyInput');
+  if (inp && parseInt(inp.value) !== n) inp.value = n;
+  updateStats();
+}
 function updateStats(vis){
   const t=BOM.length;
   const p=BOM.filter(r=>r.pdf).length;
@@ -1223,7 +1262,13 @@ function updateStats(vis){
   });
   const pct = eligibleItems.length ? Math.round(analyzedItems.length / eligibleItems.length * 100) : 0;
   const progressHtml = `<span id="analysisProgress"><span style="font-size:11px;color:var(--text2);margin-left:12px">ניתוח: ${analyzedItems.length}/${eligibleItems.length}</span><span style="display:inline-block;width:80px;height:5px;background:var(--surface2);border-radius:3px;margin-left:6px;vertical-align:middle"><span style="display:block;width:${pct}%;height:100%;background:var(--accent2);border-radius:3px"></span></span></span>`;
-  document.getElementById('statsBar').innerHTML=`${s.toLocaleString()}/${t.toLocaleString()} parts · ${p} drawings · ${c} CAD`+disStr+progressHtml;
+  // Project totals
+  const rootCost = BOM.reduce((sum, item, i) => item.lv === 0 ? sum + (treeCosts[i] || 0) : sum, 0);
+  const rootHours = BOM.reduce((sum, item, i) => item.lv === 0 ? sum + (cumHours[i] || 0) : sum, 0);
+  const projCostStr = rootCost > 0 ? ' · 💰 ' + fmtC(rootCost * projectQty) : '';
+  const projHoursStr = rootHours > 0 ? ' · ⏱ ' + fmtTimeAuto(rootHours * projectQty * 60) : '';
+  const projStr = projectQty > 1 ? ` · ×${projectQty}` + projCostStr + projHoursStr : projCostStr + projHoursStr;
+  document.getElementById('statsBar').innerHTML=`${s.toLocaleString()}/${t.toLocaleString()} parts · ${p} drawings · ${c} CAD`+disStr+projStr+progressHtml;
   // Update cost columns
   refreshCostCells();
 }
@@ -1232,7 +1277,8 @@ function refreshCostCells() {
   document.querySelectorAll('[data-cost-idx]').forEach(function(td){
     const i = parseInt(td.dataset.costIdx);
     const uc = unitCosts[i];
-    td.textContent = uc ? fmtC(uc) : '—';
+    const extCost = uc ? uc * (BOM[i].tq || 1) : 0;
+    td.textContent = extCost > 0 ? fmtC(extCost) : '—';
   });
   document.querySelectorAll('[data-tree-cost-idx]').forEach(function(td){
     const i = parseInt(td.dataset.treeCostIdx);
@@ -1249,6 +1295,8 @@ function selectRow(idx){
   rows[idx].scrollIntoView({block:'nearest', behavior:'smooth'});
   showPreview(BOM[idx]);
   renderMfgSide(BOM[idx]);
+  const assyBtn = document.getElementById('msExportAssyBtn');
+  if (assyBtn) assyBtn.style.display = '';
 }
 function closePreview(){
   if(selIdx>=0&&rows[selIdx]) rows[selIdx].classList.remove('sel');
@@ -1690,6 +1738,7 @@ updateStats();
           <col style="width:90px">
           <col style="width:90px">
           <col style="width:40px">
+          <col style="width:36px">
         </colgroup>
         <thead>
           <tr>
@@ -1704,6 +1753,7 @@ updateStats();
             <th onclick="sortBuy('unitPrice')" style="text-align:right">Unit Price <span class="sico">↕</span></th>
             <th onclick="sortBuy('totalCost')" style="text-align:right">Total Cost <span class="sico">↕</span></th>
             <th style="text-align:center;cursor:default">Src</th>
+            <th style="text-align:center;cursor:default">📝</th>
           </tr>
         </thead>
         <tbody id="buyBody"></tbody>
@@ -2129,6 +2179,20 @@ function renderBuyTable(data) {
     }
     tr.appendChild(tdSrc);
 
+    // Buy notes/substitute indicator
+    const tdNotes = document.createElement('td');
+    tdNotes.style.cssText = 'text-align:center;padding:4px 6px';
+    const hasnotes = !!(buyNotes[item.pb] && (buyNotes[item.pb].notes || (buyNotes[item.pb].sub && buyNotes[item.pb].sub.pn)));
+    if (hasnotes) {
+      const nb = document.createElement('button');
+      nb.style.cssText = 'background:none;border:none;cursor:pointer;font-size:13px;padding:0;opacity:0.9';
+      nb.title = buyNotes[item.pb].notes ? 'הערות: ' + buyNotes[item.pb].notes.substring(0,60) + (buyNotes[item.pb].sub && buyNotes[item.pb].sub.pn ? ' | חלופי: ' + buyNotes[item.pb].sub.pn : '') : 'חלופי: ' + (buyNotes[item.pb].sub && buyNotes[item.pb].sub.pn || '');
+      nb.textContent = buyNotes[item.pb].sub && buyNotes[item.pb].sub.pn ? (buyNotes[item.pb].sub.approved ? '✅' : '🔄') : '📝';
+      nb.addEventListener('click', () => openBuyNotesEditor(item.pb, item.desc));
+      tdNotes.appendChild(nb);
+    }
+    tr.appendChild(tdNotes);
+
     tbody.appendChild(tr);
   });
 
@@ -2181,6 +2245,90 @@ function sortBuy(col) {
   }
   renderBuyTable(getSortedBuyData());
   filterBuyTable();
+}
+
+// ─── Buy Notes / Substitute Editor ──────────────────────────
+function openBuyNotesEditor(pb, desc) {
+  const existing = buyNotes[pb] || {notes:'', sub:{pn:'',desc:'',cat:'',src:'',approved:false}};
+  const hasSub = !!(existing.sub && existing.sub.pn);
+
+  let m = document.getElementById('buyNotesModal');
+  if (!m) {
+    m = document.createElement('div');
+    m.id = 'buyNotesModal';
+    m.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:1000;display:none;align-items:center;justify-content:center';
+    document.body.appendChild(m);
+  }
+
+  m.innerHTML =
+    '<div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;width:540px;max-height:80vh;display:flex;flex-direction:column;overflow:hidden">' +
+      '<div style="padding:10px 16px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">' +
+        '<div>' +
+          '<div style="font-weight:600;font-size:13px">📝 הערות ו-חלופי</div>' +
+          '<div style="font-size:11px;color:var(--text2);font-family:monospace">' + pb + '</div>' +
+          '<div style="font-size:11px;color:var(--text2)">' + desc + '</div>' +
+        '</div>' +
+        '<button onclick="document.getElementById(\'buyNotesModal\').style.display=\'none\'" style="padding:4px 10px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;cursor:pointer">✕</button>' +
+      '</div>' +
+      '<div style="overflow:auto;flex:1;padding:14px;display:flex;flex-direction:column;gap:12px">' +
+        '<div>' +
+          '<label style="font-size:12px;font-weight:600;color:var(--text2);display:block;margin-bottom:4px">הערות</label>' +
+          '<textarea id="bnNotes" rows="4" style="width:100%;box-sizing:border-box;padding:6px 8px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px;resize:vertical">' + (existing.notes||'') + '</textarea>' +
+        '</div>' +
+        '<div style="border:1px solid var(--border);border-radius:6px;padding:10px">' +
+          '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;font-weight:600;margin-bottom:8px">' +
+            '<input type="checkbox" id="bnHasSub" ' + (hasSub?'checked':'') + ' onchange="toggleBnSubFields()">' +
+            '<span>🔄 פריט חלופי</span>' +
+          '</label>' +
+          '<div id="bnSubFields" style="display:' + (hasSub?'flex':'none') + ';flex-direction:column;gap:6px">' +
+            '<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px">' +
+              '<div><label style="font-size:11px;color:var(--text2)">מק"ט חלופי</label><input id="bnSubPn" type="text" value="' + (existing.sub&&existing.sub.pn||'') + '" style="width:100%;box-sizing:border-box;padding:4px 6px;background:var(--surface);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px"></div>' +
+              '<div><label style="font-size:11px;color:var(--text2)">קטלוג</label><input id="bnSubCat" type="text" value="' + (existing.sub&&existing.sub.cat||'') + '" style="width:100%;box-sizing:border-box;padding:4px 6px;background:var(--surface);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px"></div>' +
+            '</div>' +
+            '<div><label style="font-size:11px;color:var(--text2)">תיאור</label><input id="bnSubDesc" type="text" value="' + (existing.sub&&existing.sub.desc||'') + '" style="width:100%;box-sizing:border-box;padding:4px 6px;background:var(--surface);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px"></div>' +
+            '<div><label style="font-size:11px;color:var(--text2)">ספק/מקור</label><input id="bnSubSrc" type="text" value="' + (existing.sub&&existing.sub.src||'') + '" style="width:100%;box-sizing:border-box;padding:4px 6px;background:var(--surface);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px"></div>' +
+            '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px">' +
+              '<input type="checkbox" id="bnSubApproved" ' + (existing.sub&&existing.sub.approved?'checked':'') + '>' +
+              '<span>✅ פריט חלופי מאושר</span>' +
+            '</label>' +
+          '</div>' +
+        '</div>' +
+      '</div>' +
+      '<div style="padding:10px 14px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:8px">' +
+        '<button onclick="saveBuyNotes(\'' + pb.replace(/'/g,"\\'") + '\')" style="padding:5px 16px;background:var(--accent);color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:12px">💾 שמור</button>' +
+        '<button onclick="document.getElementById(\'buyNotesModal\').style.display=\'none\'" style="padding:5px 12px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;cursor:pointer;font-size:12px">ביטול</button>' +
+      '</div>' +
+    '</div>';
+
+  m.style.display = 'flex';
+}
+
+function toggleBnSubFields() {
+  const chk = document.getElementById('bnHasSub');
+  const fields = document.getElementById('bnSubFields');
+  if (fields) fields.style.display = (chk && chk.checked) ? 'flex' : 'none';
+}
+
+function saveBuyNotes(pb) {
+  const notes = (document.getElementById('bnNotes')?.value || '').trim();
+  const hasSub = document.getElementById('bnHasSub')?.checked;
+  const sub = hasSub ? {
+    pn:       (document.getElementById('bnSubPn')?.value   || '').trim(),
+    desc:     (document.getElementById('bnSubDesc')?.value  || '').trim(),
+    cat:      (document.getElementById('bnSubCat')?.value   || '').trim(),
+    src:      (document.getElementById('bnSubSrc')?.value   || '').trim(),
+    approved: !!(document.getElementById('bnSubApproved')?.checked),
+  } : null;
+
+  if (notes || (sub && sub.pn)) {
+    buyNotes[pb] = { notes, sub: sub || {pn:'',desc:'',cat:'',src:'',approved:false} };
+  } else {
+    delete buyNotes[pb];
+  }
+
+  document.getElementById('buyNotesModal').style.display = 'none';
+  saveProcToFile();
+  buildTable(); applyFilters();
 }
 
 function openBuyModal() {
@@ -2696,7 +2844,8 @@ async function _graphWriteProcFile() {
     customProcTypes: PROC_TYPES,
     processes: procData,
     flaggedRows: Array.from(flaggedRows),
-    subcontractors: subData
+    subcontractors: subData,
+    buyNotes: buyNotes
   }, null, 2);
   const r = await fetch(url, {
     method: 'PUT',
@@ -2746,6 +2895,7 @@ async function loadProcFromGraph() {
       setFileSyncStatus('✅ נטען מ-SharePoint' + savedBy, 'ok');
     }
     if (obj.subcontractors) subData = obj.subcontractors;
+    if (obj.buyNotes) buyNotes = obj.buyNotes;
     {
       // MERGE flags: server + local → union (preserves all users' flags)
       const preLocal = new Set([...flaggedRows]);
@@ -3705,8 +3855,9 @@ function exportBomExcel() {
         { header: 'יחידה',          key: 'uom',   width: 8  },
         { header: 'סוג',            key: 'type',  width: 12 },
         { header: 'סטטוס',          key: 'st',    width: 12 },
-        { header: '⏱ שעות עבודה',  key: 'wh',    width: 14 },
-        { header: '💰 עלות יחידה',  key: 'ucost', width: 14 },
+        { header: '⏱ שעות ישיר',   key: 'whd',   width: 14 },
+        { header: '⏱ שעות עץ',     key: 'wht',   width: 14 },
+        { header: '💰 עלות שורה',   key: 'ucost', width: 14 },
         { header: '🌳 עלות כוללת',  key: 'tcost', width: 14 },
       ];
       // Header style
@@ -3718,7 +3869,7 @@ function exportBomExcel() {
         cell.alignment = { horizontal: 'center', vertical: 'middle', readingOrder: 'rightToLeft' };
         cell.border    = { bottom: { style: 'thin', color: { argb: 'FF8EA9C1' } } };
       });
-      ws.autoFilter = { from: 'A1', to: 'M1' };
+      ws.autoFilter = { from: 'A1', to: 'N1' };
       // Type fill colors
       const typeFill = {
         ELTDesign: 'FFD6E4BC',
@@ -3731,9 +3882,10 @@ function exportBomExcel() {
         if (!tr || tr.classList.contains('hid') || tr.classList.contains('vhid')) return;
         rowNum++;
         const indent = '  '.repeat(item.lv);
-        const whVal   = cumHours[i] > 0.01 ? Math.round(cumHours[i] * 10) / 10 : null;
-        const ucVal   = unitCosts[i] > 0   ? Math.round(unitCosts[i] * 100) / 100 : null;
-        const tcVal   = treeCosts[i] > 0   ? Math.round(treeCosts[i] * 100) / 100 : null;
+        const whdVal  = directHours[i] > 0.01 ? Math.round(directHours[i] * 10) / 10 : null;
+        const whtVal  = cumHours[i]    > 0.01 ? Math.round(cumHours[i]    * 10) / 10 : null;
+        const ucVal   = unitCosts[i]   > 0    ? Math.round(unitCosts[i] * (item.tq || 1) * 100) / 100 : null;
+        const tcVal   = treeCosts[i]   > 0    ? Math.round(treeCosts[i] * 100) / 100 : null;
         const exRow = ws.addRow({
           num:   rowNum,
           lv:    item.lv,
@@ -3745,7 +3897,8 @@ function exportBomExcel() {
           uom:   item.uom  || '',
           type:  item.type || '',
           st:    item.st   || '',
-          wh:    whVal,
+          whd:   whdVal,
+          wht:   whtVal,
           ucost: ucVal,
           tcost: tcVal,
         });
@@ -3764,10 +3917,12 @@ function exportBomExcel() {
           const cell = exRow.getCell(col.number);
           cell.alignment = { horizontal: 'center', vertical: 'middle' };
         });
-        // Format work hours: show as decimal hours with 1 decimal
-        const whCell = exRow.getCell(ws.getColumn('wh').number);
-        whCell.numFmt = '#,##0.0" hr"';
-        whCell.alignment = { horizontal: 'right', vertical: 'middle' };
+        // Format work hours columns
+        ['whd','wht'].forEach(k => {
+          const cell = exRow.getCell(ws.getColumn(k).number);
+          cell.numFmt = '#,##0.0" hr"';
+          cell.alignment = { horizontal: 'right', vertical: 'middle' };
+        });
         // Format costs as currency
         ['ucost','tcost'].forEach(k => {
           const cell = exRow.getCell(ws.getColumn(k).number);
@@ -3794,6 +3949,114 @@ function exportBomExcel() {
   s.src = 'https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.3.0/exceljs.min.js';
   s.onload = run;
   s.onerror = () => { alert('לא ניתן לטעון ספריית Excel'); restore(); };
+  document.head.appendChild(s);
+}
+
+function exportAssemblyExcel() {
+  if (selIdx < 0) return;
+  const rootItem = BOM[selIdx];
+  const rootLv = rootItem.lv;
+
+  // Collect root + all descendants
+  const indices = [selIdx];
+  for (let j = selIdx + 1; j < BOM.length; j++) {
+    if (BOM[j].lv <= rootLv) break;
+    indices.push(j);
+  }
+
+  const run = () => {
+    const wb = new ExcelJS.Workbook();
+    wb.creator = 'ZMAG BOM Viewer';
+    const ws = wb.addWorksheet('Assembly', {
+      views: [{ rightToLeft: true, state: 'frozen', ySplit: 1 }],
+      properties: { summaryBelow: false }
+    });
+    ws.columns = [
+      { header: '#',             key: 'num',   width: 5  },
+      { header: 'רמה',           key: 'lv',    width: 6  },
+      { header: 'מק"ט',          key: 'pn',    width: 26 },
+      { header: 'תיאור',         key: 'desc',  width: 48 },
+      { header: 'קטלוג',         key: 'cat',   width: 15 },
+      { header: 'כמות',          key: 'qty',   width: 8  },
+      { header: 'כמות כוללת',    key: 'tq',    width: 13 },
+      { header: 'יחידה',         key: 'uom',   width: 8  },
+      { header: 'סוג',           key: 'type',  width: 12 },
+      { header: 'סטטוס',         key: 'st',    width: 12 },
+      { header: '⏱ שעות ישיר',  key: 'whd',   width: 14 },
+      { header: '⏱ שעות עץ',    key: 'wht',   width: 14 },
+      { header: '💰 עלות שורה',  key: 'ucost', width: 14 },
+      { header: '🌳 עלות עץ',    key: 'tcost', width: 14 },
+    ];
+    const hdrRow = ws.getRow(1);
+    hdrRow.height = 20;
+    hdrRow.eachCell(cell => {
+      cell.font      = { bold: true, color: { argb: 'FFFFFFFF' }, size: 10, name: 'Arial' };
+      cell.fill      = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1F3864' } };
+      cell.alignment = { horizontal: 'center', vertical: 'middle', readingOrder: 'rightToLeft' };
+    });
+    ws.autoFilter = { from: 'A1', to: 'N1' };
+    const typeFill = { ELTDesign: 'FFD6E4BC', Buy: 'FFBDD7EE', Package: 'FFFFFFCC' };
+    indices.forEach((i, rowNum) => {
+      const item = BOM[i];
+      const indent = '  '.repeat(item.lv - rootLv);
+      const whd = directHours[i] > 0.01 ? Math.round(directHours[i] * 10) / 10 : null;
+      const wht = cumHours[i]    > 0.01 ? Math.round(cumHours[i]    * 10) / 10 : null;
+      const uc  = unitCosts[i]   > 0    ? Math.round(unitCosts[i] * (item.tq||1) * 100) / 100 : null;
+      const tc  = treeCosts[i]   > 0    ? Math.round(treeCosts[i] * 100) / 100 : null;
+      const exRow = ws.addRow({
+        num:   rowNum + 1,
+        lv:    item.lv - rootLv,
+        pn:    indent + (item.pn  || ''),
+        desc:  item.desc || '',
+        cat:   item.cat  || '',
+        qty:   item.qty  != null ? item.qty  : '',
+        tq:    item.tq   != null ? item.tq   : '',
+        uom:   item.uom  || '',
+        type:  item.type || '',
+        st:    item.st   || '',
+        whd, wht, ucost: uc, tcost: tc,
+      });
+      exRow.outlineLevel = Math.min(item.lv - rootLv, 7);
+      exRow.height = 15;
+      const bg = typeFill[item.type];
+      exRow.eachCell({ includeEmpty: true }, cell => {
+        cell.font      = { name: 'Arial', size: 9 };
+        cell.alignment = { vertical: 'middle', readingOrder: 'rightToLeft' };
+        if (bg) cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: bg } };
+        cell.border    = { bottom: { style: 'hair', color: { argb: 'FFD0D0D0' } } };
+      });
+      ['num','lv','qty','tq'].forEach(k => {
+        const col = ws.getColumn(k);
+        const cell = exRow.getCell(col.number);
+        cell.alignment = { horizontal: 'center', vertical: 'middle' };
+      });
+      ['whd','wht'].forEach(k => {
+        const cell = exRow.getCell(ws.getColumn(k).number);
+        cell.numFmt = '#,##0.0" hr"';
+        cell.alignment = { horizontal: 'right', vertical: 'middle' };
+      });
+      ['ucost','tcost'].forEach(k => {
+        const cell = exRow.getCell(ws.getColumn(k).number);
+        cell.numFmt = '₪#,##0.00';
+        cell.alignment = { horizontal: 'right', vertical: 'middle' };
+      });
+    });
+    const safeName = (rootItem.pn||'assembly').replace(/[\/\\*?[\]:]/g,'_');
+    wb.xlsx.writeBuffer().then(buf => {
+      const blob = new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'ZMAG_' + safeName + '.xlsx';
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(url);
+    });
+  };
+  if (window.ExcelJS) { run(); return; }
+  const s = document.createElement('script');
+  s.src = 'https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.3.0/exceljs.min.js';
+  s.onload = run;
+  s.onerror = () => alert('לא ניתן לטעון ספריית Excel');
   document.head.appendChild(s);
 }
 
