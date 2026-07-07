@@ -495,7 +495,7 @@ const BOM = [{"lv":0,"pn":"6910W021-001/B","pb":"6910W021-001","cat":"407383883"
 // ─── State ──────────────────────────────────────────────
 // procData pre-declared here; second <script> will populate it from localStorage
 var procData = {};
-const BUILD_VER = 'v20260707.1400';
+const BUILD_VER = 'v20260707.1500';
 let rows = [];
 let selIdx = -1;
 let curSort = {col:null,asc:true};
@@ -507,6 +507,8 @@ try{flaggedRows=new Set(JSON.parse(localStorage.getItem('zmag_flagged_6910W021')
 if(localStorage.getItem('zmag_theme')==='light'){document.body.classList.add('light-mode');}
 let unitCosts = []; // cost per unit for each BOM index
 let treeCosts = []; // cumulative subtree cost for each BOM index
+let itemSetupCost = []; // setup cost per item (not × qty)
+let cumSetupCosts = []; // cumulative setup costs for subtree
 let curTab = 'drawing';
 let curItem = null;
 let searchTerm = '';
@@ -579,7 +581,7 @@ const COLS = [
   {id:'cycleH',label:'⏱ ייצור',     w:65,  sort:false},
   {id:'cumCH', label:'⏱ עץ',        w:65,  sort:false},
   {id:'totalH',label:'⏱ כולל',      w:70,  sort:false},
-  {id:'ucost', label:'💰 עבודה',     w:80,  sort:false},
+  {id:'ucost', label:'💰 עלות שורה', w:90,  sort:false},
   {id:'tcost', label:'🌳 עלות עץ',   w:90,  sort:false},
   {id:'pcost', label:'🌳 פרוייקט',  w:90,  sort:false},
 ];
@@ -753,20 +755,40 @@ function normProcQty(qty, fromUnit, toUnit) {
   if (fromUnit === 'h'   && toUnit === 'min') return qty * 60;
   return qty; // different dimensions — no normalization
 }
+function getItemSetupCost(item) {
+  if (item.type !== 'ELTDesign') return 0;
+  const pb = item.pb || item.pn;
+  const procs = procData[pb] || [];
+  return procs.reduce(function(sum, p) {
+    if (!p.type || !p.setup) return sum;
+    const t = PROC_TYPES.find(function(x){ return x.id === p.type; });
+    if (!t || !t.cost) return sum;
+    const qty = normProcQty(p.setup, p.setupUnit, t.costUnit);
+    return sum + qty * t.cost;
+  }, 0);
+}
 function computeTreeCosts() {
   const n = BOM.length;
-  unitCosts = new Array(n);
-  treeCosts = new Array(n).fill(0);
-  for (let i = 0; i < n; i++) unitCosts[i] = getItemUnitCost(BOM[i]);
+  unitCosts    = new Array(n);
+  treeCosts    = new Array(n).fill(0);
+  itemSetupCost = new Array(n).fill(0);
+  cumSetupCosts = new Array(n).fill(0);
+  for (let i = 0; i < n; i++) {
+    unitCosts[i]    = getItemUnitCost(BOM[i]);
+    itemSetupCost[i] = getItemSetupCost(BOM[i]);
+  }
   // Bottom-up: tree cost = own extended cost + children tree costs
   for (let i = n - 1; i >= 0; i--) {
     const lv = BOM[i].lv;
-    let sum = unitCosts[i] * (BOM[i].tq || 0);
+    let tsum = unitCosts[i] * (BOM[i].tq || 0);
+    let ssum = itemSetupCost[i];
     for (let j = i + 1; j < n; j++) {
       if (BOM[j].lv <= lv) break;
-      sum += unitCosts[j] * (BOM[j].tq || 0);
+      tsum += unitCosts[j] * (BOM[j].tq || 0);
+      ssum += itemSetupCost[j];
     }
-    treeCosts[i] = sum;
+    treeCosts[i]    = tsum;
+    cumSetupCosts[i] = ssum;
   }
 }
 function fmtC(n) {
@@ -1327,10 +1349,11 @@ function refreshCostCells() {
   });
   document.querySelectorAll('[data-proj-cost-idx]').forEach(function(td){
     const i = parseInt(td.dataset.projCostIdx);
-    const tc = treeCosts[i];
-    const proj = tc ? tc * projectQty : 0;
+    const tc = treeCosts[i] || 0;
+    const sc = cumSetupCosts[i] || 0;
+    const proj = tc * projectQty + sc;
     td.textContent = proj > 0 ? fmtC(proj) : '—';
-    td.style.fontWeight = projectQty > 1 ? '700' : '';
+    td.style.fontWeight = (projectQty > 1 || sc > 0) ? '700' : '';
   });
 }
 
@@ -3989,7 +4012,7 @@ function exportBomExcel() {
         { header: '⏱ ייצור',       key: 'cycleH', width: 13 },
         { header: '⏱ עץ',          key: 'cumCH',  width: 13 },
         { header: '⏱ כולל',        key: 'totalH', width: 13 },
-        { header: '💰 עבודה',       key: 'ucost',  width: 14 },
+        { header: '💰 עלות שורה',   key: 'ucost',  width: 14 },
         { header: '🌳 עלות עץ',     key: 'tcost',  width: 14 },
         { header: '🌳 פרוייקט',    key: 'pcost',  width: 14 },
       ];
@@ -4014,7 +4037,8 @@ function exportBomExcel() {
         const totalHV = cumCV != null           ? Math.round(cumCV * projectQty * 100) / 100 : null;
         const ucVal   = unitCosts[i]    > 0     ? Math.round(unitCosts[i] * (item.tq || 1) * 100) / 100 : null;
         const tcVal   = treeCosts[i]    > 0     ? Math.round(treeCosts[i] * 100) / 100 : null;
-        const pcVal   = tcVal != null           ? Math.round(tcVal * projectQty * 100) / 100 : null;
+        const setupC  = (cumSetupCosts && cumSetupCosts[i] > 0) ? cumSetupCosts[i] : 0;
+        const pcVal   = (tcVal != null || setupC > 0) ? Math.round(((tcVal || 0) * projectQty + setupC) * 100) / 100 : null;
         const exRow = ws.addRow({
           num:   rowNum + 1,
           lv:    relLv,
@@ -4109,7 +4133,7 @@ function exportAssemblyExcel() {
       { header: '⏱ ייצור',      key: 'cycleH', width: 13 },
       { header: '⏱ עץ',         key: 'cumCH',  width: 13 },
       { header: '⏱ כולל',       key: 'totalH', width: 13 },
-      { header: '💰 עבודה',      key: 'ucost',  width: 14 },
+      { header: '💰 עלות שורה',  key: 'ucost',  width: 14 },
       { header: '🌳 עלות עץ',    key: 'tcost',  width: 14 },
       { header: '🌳 פרוייקט',   key: 'pcost',  width: 14 },
     ];
@@ -4131,7 +4155,8 @@ function exportAssemblyExcel() {
       const totalHV = cumCV != null           ? Math.round(cumCV * projectQty * 100) / 100 : null;
       const uc      = unitCosts[i]    > 0     ? Math.round(unitCosts[i] * (item.tq||1) * 100) / 100 : null;
       const tc      = treeCosts[i]    > 0     ? Math.round(treeCosts[i] * 100) / 100 : null;
-      const pcVal   = tc != null              ? Math.round(tc * projectQty * 100) / 100 : null;
+      const setupC  = (cumSetupCosts && cumSetupCosts[i] > 0) ? cumSetupCosts[i] : 0;
+      const pcVal   = (tc != null || setupC > 0) ? Math.round(((tc || 0) * projectQty + setupC) * 100) / 100 : null;
       const exRow = ws.addRow({
         num:   rowNum + 1,
         lv:    item.lv - rootLv,
