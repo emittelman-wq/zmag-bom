@@ -3920,7 +3920,7 @@ function exportBomExcel() {
     try {
       const wb = new ExcelJS.Workbook();
       wb.creator = 'ZMAG BOM Viewer';
-      const wsName = isAssembly ? (rootItem.pn || 'Assembly').substring(0, 31) : 'BOM';
+      const wsName = isAssembly ? (rootItem.pn || 'Assembly').replace(/[\[\]\/\\:?*]/g, '-').substring(0, 31) : 'BOM';
       const ws = wb.addWorksheet(wsName, {
         views: [{ rightToLeft: true, state: 'frozen', ySplit: 1 }],
         properties: { summaryBelow: false, summaryRight: false }
