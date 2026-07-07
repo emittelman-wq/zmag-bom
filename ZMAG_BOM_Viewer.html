@@ -475,9 +475,7 @@ tr.row-disabled .badge,tr.row-disabled .proc-btn{opacity:.5}
     </div>
     <div class="ms-saved" id="msSaved">✓ Saved</div>
     <button class="ms-add-btn" id="msAddBtn" style="display:none" onclick="msAddRow()">＋ Add Process</button>
-    <div style="padding:6px 10px;border-top:1px solid var(--border)">
-      <button id="msExportAssyBtn" onclick="exportAssemblyExcel()" style="display:none;width:100%;padding:5px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;cursor:pointer;font-size:11px">📊 ייצוא הרכבה לאקסל</button>
-    </div>
+    <div id="msExportAssyBtn" style="display:none"></div>
     <div id="msSubSection" style="display:none;padding:8px 10px 10px;border-top:1px solid var(--border);margin-top:4px">
       <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;color:var(--text2)">
         <input type="checkbox" id="msSubCheck" onchange="msSideSub()">
@@ -497,7 +495,7 @@ const BOM = [{"lv":0,"pn":"6910W021-001/B","pb":"6910W021-001","cat":"407383883"
 // ─── State ──────────────────────────────────────────────
 // procData pre-declared here; second <script> will populate it from localStorage
 var procData = {};
-const BUILD_VER = 'v20260707.1200';
+const BUILD_VER = 'v20260707.1300';
 let rows = [];
 let selIdx = -1;
 let curSort = {col:null,asc:true};
@@ -1297,10 +1295,14 @@ function selectRow(idx){
   renderMfgSide(BOM[idx]);
   const assyBtn = document.getElementById('msExportAssyBtn');
   if (assyBtn) assyBtn.style.display = '';
+  const xlsxBtn = document.getElementById('xlsxBtn');
+  if (xlsxBtn) xlsxBtn.textContent = '📊 הרכבה';
 }
 function closePreview(){
   if(selIdx>=0&&rows[selIdx]) rows[selIdx].classList.remove('sel');
   selIdx=-1; curItem=null; viewerActive=false;
+  const xlsxBtn = document.getElementById('xlsxBtn');
+  if (xlsxBtn) xlsxBtn.textContent = '📊 Excel';
   document.getElementById('noSel').style.display='flex';
   document.getElementById('pvContent').style.display='none';
 }
@@ -3877,15 +3879,49 @@ function exportRFQCSV() {
 }
 
 // ── Excel BOM Export ──────────────────────────────────────
+// Helper: given BOM index i, returns its <tr> regardless of current sort order
+function _bomTrByIdx(i) {
+  return document.querySelector('#bomBody tr[data-idx="' + i + '"]');
+}
+
 function exportBomExcel() {
   const btn = document.getElementById('xlsxBtn');
+  // Determine scope: selected assembly subtree, or entire visible BOM
+  const isAssembly = selIdx >= 0;
+  const rootItem   = isAssembly ? BOM[selIdx] : null;
+  const rootLv     = isAssembly ? rootItem.lv : 0;
+
+  // Build the ordered list of BOM indices to export
+  let exportIndices;
+  if (isAssembly) {
+    // Subtree: root + descendants (in BOM order, visibility-unchecked — export all children)
+    exportIndices = [selIdx];
+    for (let j = selIdx + 1; j < BOM.length; j++) {
+      if (BOM[j].lv <= rootLv) break;
+      exportIndices.push(j);
+    }
+  } else {
+    // Full BOM: only currently-visible rows, in BOM order
+    exportIndices = [];
+    BOM.forEach((_, i) => {
+      const tr = _bomTrByIdx(i);
+      if (tr && !tr.classList.contains('hid') && !tr.classList.contains('vhid')) {
+        exportIndices.push(i);
+      }
+    });
+  }
+
   if (btn) { btn.textContent = '⏳'; btn.disabled = true; }
-  const restore = () => { if (btn) { btn.textContent = '📊 Excel'; btn.disabled = false; } };
+  const restore = () => {
+    if (btn) { btn.textContent = isAssembly ? '📊 הרכבה' : '📊 Excel'; btn.disabled = false; }
+  };
+
   const run = () => {
     try {
       const wb = new ExcelJS.Workbook();
       wb.creator = 'ZMAG BOM Viewer';
-      const ws = wb.addWorksheet('BOM', {
+      const wsName = isAssembly ? (rootItem.pn || 'Assembly').substring(0, 31) : 'BOM';
+      const ws = wb.addWorksheet(wsName, {
         views: [{ rightToLeft: true, state: 'frozen', ySplit: 1 }],
         properties: { summaryBelow: false, summaryRight: false }
       });
@@ -3905,7 +3941,6 @@ function exportBomExcel() {
         { header: '💰 עלות שורה',   key: 'ucost', width: 14 },
         { header: '🌳 עלות כוללת',  key: 'tcost', width: 14 },
       ];
-      // Header style
       const hdrRow = ws.getRow(1);
       hdrRow.height = 20;
       hdrRow.eachCell(cell => {
@@ -3915,25 +3950,19 @@ function exportBomExcel() {
         cell.border    = { bottom: { style: 'thin', color: { argb: 'FF8EA9C1' } } };
       });
       ws.autoFilter = { from: 'A1', to: 'N1' };
-      // Type fill colors
-      const typeFill = {
-        ELTDesign: 'FFD6E4BC',
-        Buy:       'FFBDD7EE',
-        Package:   'FFFFFFCC',
-      };
-      let rowNum = 0;
-      BOM.forEach((item, i) => {
-        const tr = rows[i];
-        if (!tr || tr.classList.contains('hid') || tr.classList.contains('vhid')) return;
-        rowNum++;
-        const indent = '  '.repeat(item.lv);
-        const whdVal  = directHours[i] > 0.01 ? Math.round(directHours[i] * 10) / 10 : null;
-        const whtVal  = cumHours[i]    > 0.01 ? Math.round(cumHours[i]    * 10) / 10 : null;
-        const ucVal   = unitCosts[i]   > 0    ? Math.round(unitCosts[i] * (item.tq || 1) * 100) / 100 : null;
-        const tcVal   = treeCosts[i]   > 0    ? Math.round(treeCosts[i] * 100) / 100 : null;
+      const typeFill = { ELTDesign: 'FFD6E4BC', Buy: 'FFBDD7EE', Package: 'FFFFFFCC' };
+
+      exportIndices.forEach((i, rowNum) => {
+        const item = BOM[i];
+        const relLv  = item.lv - rootLv;            // relative level (0 = root)
+        const indent = '  '.repeat(relLv);
+        const whdVal = directHours[i] > 0.01 ? Math.round(directHours[i] * 10) / 10 : null;
+        const whtVal = cumHours[i]    > 0.01 ? Math.round(cumHours[i]    * 10) / 10 : null;
+        const ucVal  = unitCosts[i]   > 0    ? Math.round(unitCosts[i] * (item.tq || 1) * 100) / 100 : null;
+        const tcVal  = treeCosts[i]   > 0    ? Math.round(treeCosts[i] * 100) / 100 : null;
         const exRow = ws.addRow({
-          num:   rowNum,
-          lv:    item.lv,
+          num:   rowNum + 1,
+          lv:    relLv,
           pn:    indent + (item.pn  || ''),
           desc:  item.desc || '',
           cat:   item.cat  || '',
@@ -3942,12 +3971,9 @@ function exportBomExcel() {
           uom:   item.uom  || '',
           type:  item.type || '',
           st:    item.st   || '',
-          whd:   whdVal,
-          wht:   whtVal,
-          ucost: ucVal,
-          tcost: tcVal,
+          whd:   whdVal, wht: whtVal, ucost: ucVal, tcost: tcVal,
         });
-        exRow.outlineLevel = Math.min(item.lv, 7);
+        exRow.outlineLevel = Math.min(relLv, 7);
         exRow.height = 15;
         const bg = typeFill[item.type];
         exRow.eachCell({ includeEmpty: true }, cell => {
@@ -3956,34 +3982,30 @@ function exportBomExcel() {
           if (bg) cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: bg } };
           cell.border    = { bottom: { style: 'hair', color: { argb: 'FFD0D0D0' } } };
         });
-        // Center numeric cells
         ['num','lv','qty','tq'].forEach(k => {
-          const col = ws.getColumn(k);
-          const cell = exRow.getCell(col.number);
+          const cell = exRow.getCell(ws.getColumn(k).number);
           cell.alignment = { horizontal: 'center', vertical: 'middle' };
         });
-        // Format work hours columns
         ['whd','wht'].forEach(k => {
           const cell = exRow.getCell(ws.getColumn(k).number);
-          cell.numFmt = '#,##0.0" hr"';
-          cell.alignment = { horizontal: 'right', vertical: 'middle' };
+          cell.numFmt = '#,##0.0" hr"'; cell.alignment = { horizontal: 'right', vertical: 'middle' };
         });
-        // Format costs as currency
         ['ucost','tcost'].forEach(k => {
           const cell = exRow.getCell(ws.getColumn(k).number);
-          cell.numFmt = '₪#,##0.00';
-          cell.alignment = { horizontal: 'right', vertical: 'middle' };
+          cell.numFmt = '₪#,##0.00'; cell.alignment = { horizontal: 'right', vertical: 'middle' };
         });
       });
+
       const date = new Date().toISOString().slice(0,10).replace(/-/g,'');
+      const fname = isAssembly
+        ? 'ZMAG_' + (rootItem.pn || 'Assembly').replace(/[\/\\*?[\]:]/g,'_') + '_' + date + '.xlsx'
+        : 'ZMAG_BOM_' + date + '.xlsx';
       wb.xlsx.writeBuffer().then(buf => {
         const blob = new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
         const url  = URL.createObjectURL(blob);
         const a    = document.createElement('a');
-        a.href     = url;
-        a.download = 'ZMAG_BOM_' + date + '.xlsx';
-        document.body.appendChild(a);
-        a.click(); a.remove();
+        a.href = url; a.download = fname;
+        document.body.appendChild(a); a.click(); a.remove();
         URL.revokeObjectURL(url);
         restore();
       }).catch(e => { alert('שגיאה בייצוא: ' + e.message); restore(); });
