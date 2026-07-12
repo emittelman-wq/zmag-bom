@@ -495,7 +495,22 @@ const BOM = [{"lv":0,"pn":"6910W021-001/B","pb":"6910W021-001","cat":"407383883"
 // ─── State ──────────────────────────────────────────────
 // procData pre-declared here; second <script> will populate it from localStorage
 var procData = {};
-const BUILD_VER = 'v20260707.1600';
+var procMeta = {};  // { [pn]: { analyzedAt, updatedAt, analyzedBy, updatedBy } }
+
+// ── Exchange rates (ILS per 1 foreign currency unit) ────────
+let FX_RATES = { USD: 3.70, EUR: 4.05 };
+try { const _fx = localStorage.getItem('fxRates'); if (_fx) FX_RATES = Object.assign({}, FX_RATES, JSON.parse(_fx)); } catch(e) {}
+function toILS(price, currency) {
+  if (!price || isNaN(price)) return 0;
+  if (!currency || currency === 'ILS') return price;
+  return price * (FX_RATES[currency] || 1);
+}
+function currencySym(currency) {
+  if (currency === 'ILS') return '₪';
+  if (currency === 'EUR') return '€';
+  return '$';
+}
+const BUILD_VER = 'v20260712.1800';
 let rows = [];
 let selIdx = -1;
 let curSort = {col:null,asc:true};
@@ -734,7 +749,7 @@ function applyColWidths(){
 function getItemUnitCost(item) {
   if (item.type === 'Buy') {
     const e = getPriceEntry(item.pb || item.pn);
-    return e ? e.p : 0;
+    return e ? toILS(e.p, e.currency || 'USD') : 0;  // always returns ILS
   }
   if (item.type === 'ELTDesign') {
     const pb = item.pb || item.pn;
@@ -1802,6 +1817,13 @@ updateStats();
       <button class="bm-export" onclick="exportBuyCSV()">⬇ Export CSV</button>
       <span class="price-disclaimer" title="Bulk industrial unit prices, reference only">💰 Prices: bulk ref, June 2026 · Click price to edit · 🔗=verified source · 🔍=Google search</span>
     </div>
+    <div style="display:flex;align-items:center;gap:10px;padding:6px 12px;background:var(--header-bg);border-bottom:1px solid var(--border);font-size:12px;color:var(--text2)">
+      <span>💱 שערי המרה:</span>
+      <label style="display:flex;align-items:center;gap:4px">$1 = ₪<input type="number" id="fxUSD" step="0.01" min="0.01" style="width:58px;font-size:12px;padding:2px 4px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text)"></label>
+      <label style="display:flex;align-items:center;gap:4px">€1 = ₪<input type="number" id="fxEUR" step="0.01" min="0.01" style="width:58px;font-size:12px;padding:2px 4px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text)"></label>
+      <button onclick="applyFxRates()" style="font-size:12px;padding:3px 10px;border:1px solid var(--accent);border-radius:4px;background:none;color:var(--accent);cursor:pointer">✓ עדכן</button>
+      <span id="fxStatus" style="font-size:11px;color:var(--accent2);opacity:0;transition:opacity 0.4s"></span>
+    </div>
     <div class="bm-body">
       <table id="buyTable">
         <colgroup>
@@ -1813,6 +1835,7 @@ updateStats();
           <col style="width:80px">
           <col style="width:90px">
           <col style="width:90px">
+          <col style="width:95px">
           <col style="width:40px">
           <col style="width:54px">
         </colgroup>
@@ -1826,6 +1849,7 @@ updateStats();
             <th onclick="sortBuy('totalQty')" style="text-align:right" class="bsorted">Total QTY <span class="sico">↑</span></th>
             <th onclick="sortBuy('unitPrice')" style="text-align:right">Unit Price <span class="sico">↕</span></th>
             <th onclick="sortBuy('totalCost')" style="text-align:right">Total Cost <span class="sico">↕</span></th>
+            <th onclick="sortBuy('costILS')" style="text-align:right;color:var(--accent2)">עלות ₪ <span class="sico">↕</span></th>
             <th style="text-align:center;cursor:default">Src</th>
             <th style="text-align:center;cursor:default">Details</th>
           </tr>
@@ -2029,15 +2053,17 @@ const PRICE_DB = {
   'SD64BSLF': {p:0.15,  src:'https://boltdepot.com/Product-Details?product=15369', note:'3/16" large-flange blind rivet, zinc steel'},
 };
 
-function fmtPrice(n) {
+function fmtPrice(n, currency) {
   if (n === null || n === undefined) return '';
-  if (n < 0.01) return '$' + n.toFixed(4);
-  if (n < 0.10) return '$' + n.toFixed(3);
-  return '$' + n.toFixed(2);
+  const sym = currencySym(currency || 'USD');
+  if (n < 0.01) return sym + n.toFixed(4);
+  if (n < 0.10) return sym + n.toFixed(3);
+  return sym + n.toFixed(2);
 }
-function fmtCost(n) {
+function fmtCost(n, currency) {
   if (!n) return '';
-  return '$' + n.toFixed(2);
+  const sym = currencySym(currency || 'USD');
+  return sym + n.toFixed(2);
 }
 
 function getPriceEntry(pb) {
@@ -2045,8 +2071,13 @@ function getPriceEntry(pb) {
   if (raw !== null) {
     try {
       const obj = JSON.parse(raw);
-      return {p: obj.p, src: obj.src || '', note: 'Custom (click to edit)', custom: true};
+      return {p: obj.p, src: obj.src || '', currency: obj.currency || 'USD', note: 'Custom (click to edit)', custom: true};
     } catch(e) {}
+  }
+  // Fallback: check buyNotes for price
+  const bn = buyNotes[pb];
+  if (bn && bn.price != null && bn.price > 0) {
+    return {p: bn.price, src: bn.url || '', currency: bn.currency || 'USD', note: 'Custom', custom: true};
   }
   return PRICE_DB[pb] || null;
 }
@@ -2133,6 +2164,10 @@ function getSortedBuyData() {
     } else if (col === 'totalCost') {
       const ea = getPriceEntry(a.pb), eb = getPriceEntry(b.pb);
       va = ea ? ea.p * a.totalQty : -1; vb = eb ? eb.p * b.totalQty : -1;
+    } else if (col === 'costILS') {
+      const ea = getPriceEntry(a.pb), eb = getPriceEntry(b.pb);
+      va = ea ? toILS(ea.p * a.totalQty, ea.currency || 'USD') : -1;
+      vb = eb ? toILS(eb.p * b.totalQty, eb.currency || 'USD') : -1;
     } else {
       va = a[col] ?? ''; vb = b[col] ?? '';
     }
@@ -2147,14 +2182,16 @@ function renderBuyTable(data) {
   const tfoot = document.getElementById('buyTfoot');
   tbody.innerHTML = '';
 
-  let grandTotal = 0;
+  let grandTotalILS = 0;
   let pricedCount = 0;
 
   data.forEach(item => {
     const entry = getPriceEntry(item.pb);
     const unitPrice = entry ? entry.p : null;
+    const currency  = entry ? (entry.currency || 'USD') : 'USD';
     const totalCost = (unitPrice !== null) ? unitPrice * item.totalQty : null;
-    if (totalCost !== null) { grandTotal += totalCost; pricedCount++; }
+    const totalILS  = totalCost !== null ? toILS(totalCost, currency) : null;
+    if (totalILS !== null) { grandTotalILS += totalILS; pricedCount++; }
 
     const tr = document.createElement('tr');
 
@@ -2200,7 +2237,7 @@ function renderBuyTable(data) {
     if (unitPrice !== null) {
       const priceSpan = document.createElement('span');
       priceSpan.className = 'price-val' + (entry.custom ? ' price-custom' : '');
-      priceSpan.textContent = fmtPrice(unitPrice);
+      priceSpan.textContent = fmtPrice(unitPrice, currency);
       priceSpan.title = (entry.note || '') + ' — לחץ לעריכה';
       priceSpan.style.cursor = 'pointer';
       priceSpan.addEventListener('click', () => openBuyNotesEditor(item.pb, item.desc));
@@ -2222,12 +2259,23 @@ function renderBuyTable(data) {
     }
     tr.appendChild(tdUp);
 
-    // Total Cost
+    // Total Cost (in original currency)
     const tdTc = document.createElement('td');
     tdTc.style.cssText = 'text-align:right;font-weight:700';
     tdTc.style.color = totalCost !== null ? 'var(--accent)' : 'var(--text3)';
-    tdTc.textContent = totalCost !== null ? fmtCost(totalCost) : '';
+    tdTc.textContent = totalCost !== null ? fmtCost(totalCost, currency) : '';
     tr.appendChild(tdTc);
+
+    // עלות ₪ (converted to ILS)
+    const tdILS = document.createElement('td');
+    tdILS.style.cssText = 'text-align:right;font-weight:700;color:var(--accent2)';
+    if (totalILS !== null) {
+      tdILS.textContent = fmtC(totalILS);
+      if (currency !== 'ILS') {
+        tdILS.title = '× ' + FX_RATES[currency] + ' (' + currency + '→₪)';
+      }
+    }
+    tr.appendChild(tdILS);
 
     // Source
     const tdSrc = document.createElement('td');
@@ -2284,7 +2332,8 @@ function renderBuyTable(data) {
     '<td colspan="5" style="text-align:right;color:var(--text2);font-size:12px;padding-right:8px">Grand Total (' + pricedCount + ' of ' + data.length + ' items priced)</td>' +
     '<td></td>' +
     '<td></td>' +
-    '<td style="text-align:right;font-family:monospace;font-weight:700;color:var(--accent);font-size:14px">' + fmtCost(grandTotal) + '</td>' +
+    '<td></td>' +
+    '<td style="text-align:right;font-family:monospace;font-weight:700;color:var(--accent2);font-size:14px">' + fmtC(grandTotalILS) + '</td>' +
     '<td></td>';
   tfoot.appendChild(tftr);
 }
@@ -2446,7 +2495,27 @@ function saveBuyNotes(pb) {
   buildTable(); applyFilters();
 }
 
+function applyFxRates() {
+  const usd = parseFloat(document.getElementById('fxUSD').value);
+  const eur = parseFloat(document.getElementById('fxEUR').value);
+  if (!isNaN(usd) && usd > 0) FX_RATES.USD = usd;
+  if (!isNaN(eur) && eur > 0) FX_RATES.EUR = eur;
+  localStorage.setItem('fxRates', JSON.stringify(FX_RATES));
+  buyBuilt = false;
+  buildBuyData();
+  renderBuyTable(getSortedBuyData());
+  filterBuyTable();
+  computeTreeCosts(); refreshCostCells();
+  const st = document.getElementById('fxStatus');
+  if (st) { st.textContent = '✓ עודכן'; st.style.opacity = '1'; setTimeout(() => st.style.opacity = '0', 1800); }
+}
+
 function openBuyModal() {
+  // Populate FX rate inputs with current values
+  const fxU = document.getElementById('fxUSD');
+  const fxE = document.getElementById('fxEUR');
+  if (fxU) fxU.value = FX_RATES.USD;
+  if (fxE) fxE.value = FX_RATES.EUR;
   buildBuyData();
   document.getElementById('bmSub').textContent = buyData.length + ' unique purchased items';
   renderBuyTable(getSortedBuyData());
@@ -2630,9 +2699,18 @@ function msCollectAndSave() {
   });
   const valid = rows.filter(function(r) { return r.type; });
   if (valid.length > 0) {
+    const now = new Date().toISOString();
+    const user = _msalAcct ? (_msalAcct.username || _msalAcct.name || '') : '';
+    if (!procMeta[_msCurPb]) {
+      procMeta[_msCurPb] = { analyzedAt: now, analyzedBy: user, updatedAt: now, updatedBy: user };
+    } else {
+      procMeta[_msCurPb].updatedAt = now;
+      procMeta[_msCurPb].updatedBy = user;
+    }
     procData[_msCurPb] = valid;
   } else if (rows.length === 0) {
     delete procData[_msCurPb];
+    delete procMeta[_msCurPb];
   }
   saveProcData();
   buildTable();
@@ -2854,6 +2932,7 @@ async function loadProcFromSP() {
       const loaded = obj.processes || obj;
       if (typeof loaded === 'object' && loaded !== null && Object.keys(loaded).length > 0) {
         procData = loaded;
+        _mergeLoadedProc(obj);
         localStorage.setItem(PROC_STORAGE_KEY, JSON.stringify(procData));
         localStorage.setItem(TYPES_STORAGE_KEY, JSON.stringify(PROC_TYPES));
         buildTable();
@@ -2876,7 +2955,8 @@ async function _spWriteFile() {
     version: 1, project: 'ZMAG-6910W021',
     lastSaved: new Date().toISOString(),
     customProcTypes: PROC_TYPES,
-    processes: procData
+    processes: procData,
+    procMeta: procMeta
   }, null, 2);
   const r = await fetch(_spUploadUrl(), {
     method: 'POST',
@@ -2904,6 +2984,7 @@ async function loadProcFromFile() {
       const loaded = obj.processes || obj;
       if (typeof loaded === 'object' && loaded !== null && Object.keys(loaded).length > 0) {
         procData = loaded;
+        _mergeLoadedProc(obj);
         localStorage.setItem(PROC_STORAGE_KEY, JSON.stringify(procData));
         localStorage.setItem(TYPES_STORAGE_KEY, JSON.stringify(PROC_TYPES));
         buildTable();
@@ -2918,6 +2999,20 @@ async function loadProcFromFile() {
     console.error('loadProcFromFile:', e);
     setFileSyncStatus('⚠ שגיאת קובץ', 'err');
   }
+}
+
+function _mergeLoadedProc(obj) {
+  // Merge procMeta from loaded object, backfilling any entries that lack it
+  if (obj.procMeta && typeof obj.procMeta === 'object') {
+    Object.assign(procMeta, obj.procMeta);
+  }
+  const fallback = obj.lastSaved || new Date().toISOString();
+  const by = obj.savedBy || '';
+  Object.keys(procData).forEach(function(pn) {
+    if (!procMeta[pn]) {
+      procMeta[pn] = { analyzedAt: fallback, analyzedBy: by, updatedAt: fallback, updatedBy: by };
+    }
+  });
 }
 
 async function saveProcToFile() {
@@ -2958,6 +3053,7 @@ async function _graphWriteProcFile() {
     savedBy: _msalAcct ? (_msalAcct.username || _msalAcct.name || '') : '',
     customProcTypes: PROC_TYPES,
     processes: procData,
+    procMeta: procMeta,
     flaggedRows: Array.from(flaggedRows),
     subcontractors: subData,
     buyNotes: buyNotes
@@ -2999,6 +3095,14 @@ async function loadProcFromGraph() {
     const loaded = obj.processes || obj;
     if (typeof loaded === 'object' && loaded !== null && Object.keys(loaded).length > 0) {
       procData = loaded;
+      // Load procMeta; backfill legacy entries that have no metadata
+      procMeta = obj.procMeta || {};
+      const fallbackDate = obj.lastSaved || new Date().toISOString();
+      Object.keys(procData).forEach(function(pn) {
+        if (!procMeta[pn]) {
+          procMeta[pn] = { analyzedAt: fallbackDate, analyzedBy: obj.savedBy || '', updatedAt: fallbackDate, updatedBy: obj.savedBy || '' };
+        }
+      });
       localStorage.setItem(PROC_STORAGE_KEY, JSON.stringify(procData));
       localStorage.setItem(TYPES_STORAGE_KEY, JSON.stringify(PROC_TYPES));
       buildTable();
@@ -3053,7 +3157,8 @@ async function _writeProcFile() {
     version: 1, project: 'ZMAG-6910W021',
     lastSaved: new Date().toISOString(),
     customProcTypes: PROC_TYPES,
-    processes: procData
+    processes: procData,
+    procMeta: procMeta
   }, null, 2);
   const w = await _procFileHandle.createWritable();
   await w.write(payload); await w.close();
@@ -3083,6 +3188,7 @@ async function syncProcFromFile() {
       const loaded = obj.processes || obj;
       if (typeof loaded === 'object' && loaded !== null) {
         procData = loaded;
+        _mergeLoadedProc(obj);
         localStorage.setItem(PROC_STORAGE_KEY, JSON.stringify(procData));
         localStorage.setItem(TYPES_STORAGE_KEY, JSON.stringify(PROC_TYPES));
         buildTable();
@@ -3102,6 +3208,7 @@ async function syncProcFromFile() {
     const loaded = obj.processes || obj;
     if (typeof loaded === 'object' && loaded !== null) {
       procData = loaded;
+      _mergeLoadedProc(obj);
       localStorage.setItem(PROC_STORAGE_KEY, JSON.stringify(procData));
       localStorage.setItem(TYPES_STORAGE_KEY, JSON.stringify(PROC_TYPES));
       buildTable();
