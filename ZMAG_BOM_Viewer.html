@@ -546,7 +546,7 @@ function currencySym(currency) {
   if (currency === 'EUR') return '€';
   return '$';
 }
-const BUILD_VER = 'v20260713.1200';
+const BUILD_VER = 'v20260713.1300';
 let rows = [];
 let selIdx = -1;
 let curSort = {col:null,asc:true};
@@ -1458,12 +1458,13 @@ async function _callAnthropicAPI(key, prompt) {
 }
 
 function _buildAIPrompt(items) {
-  return 'אתה מהנדס ייצור מנוסה. קיבלת רשימת אנומליות שזוהו אוטומטית בBOM של מוצר הנדסי.\n' +
-    'לכל פריט ברשימה, ענה בדיוק בפורמט JSON הבא ללא טקסט נוסף:\n' +
-    '[\n  {"key":"...", "verdict":"ריאלי|שגיאה|לבדיקה", "explanation":"הסבר קצר בעברית", "action":"המלצה קצרה לפעולה"}\n]\n\n' +
-    'פריטים לניתוח:\n' +
-    items.map(function(a){ return JSON.stringify({key:a.key, pn:a.pn, desc:a.desc, reason:a.reason, severity:a.severity}); }).join('\n') +
-    '\n\nהחזר JSON בלבד. verdict: "ריאלי" אם הזמן סביר, "שגיאה" אם נראה שגיאת הזנה, "לבדיקה" אם לא ברור.';
+  // Compact prompt to minimise input tokens
+  const lines = items.map(function(a){
+    return a.key+'|'+a.pn+'|'+a.desc.slice(0,40)+'|'+a.reason;
+  }).join('\n');
+  return 'מהנדס ייצור. BOM אנומליות — ענה JSON בלבד:\n'+
+    '[{"key":"...","verdict":"ריאלי|שגיאה|לבדיקה","explanation":"<20 מילים בעברית","action":"<10 מילים"}]\n\n'+
+    lines;
 }
 
 async function runAIAnomalyAnalysis() {
@@ -1472,28 +1473,60 @@ async function runAIAnomalyAnalysis() {
   localStorage.setItem(ANOM_API_KEY, key);
   loadAnomalyInsights();
 
-  const active = anomalies.filter(function(a){ return !a.dismissed; });
-  if (!active.length) { alert('אין אנומליות פעילות לניתוח'); return; }
+  // Only analyze items without an existing insight
+  const active = anomalies.filter(function(a){ return !a.dismissed && !anomInsights[a.key]; });
+  if (!active.length) {
+    const rerun = anomalies.filter(function(a){ return !a.dismissed; });
+    if (!rerun.length) { alert('אין אנומליות פעילות לניתוח'); return; }
+    // All already analyzed — ask to rerun
+    if (!confirm('כל האנומליות כבר נותחו. להריץ מחדש?')) return;
+    active.push.apply(active, rerun);
+  }
 
   const btn = document.getElementById('anomAnalyzeAllBtn');
-  if (btn) { btn.textContent = '⏳ מנתח…'; btn.disabled = true; }
+  const BATCH = 8;          // items per API call
+  const DELAY_MS = 5000;    // ms between batches (stay under 10K tokens/min)
+  let done = 0;
+  let hadError = false;
 
-  try {
-    const text = await _callAnthropicAPI(key, _buildAIPrompt(active));
-    // Parse JSON from response
-    const jsonMatch = text.match(/\[[\s\S]*\]/);
-    if (!jsonMatch) throw new Error('תשובה לא תקינה מ-AI');
-    const results = JSON.parse(jsonMatch[0]);
-    results.forEach(function(r) {
-      if (r.key && r.verdict) anomInsights[r.key] = {verdict:r.verdict, explanation:r.explanation||'', action:r.action||''};
-    });
-    saveAnomalyInsights();
-    renderAnomalyList();
-  } catch(e) {
-    alert('❌ ' + e.message);
-  } finally {
-    if (btn) { btn.textContent = '🤖 נתח הכל'; btn.disabled = false; }
+  if (btn) { btn.disabled = true; }
+
+  for (let i = 0; i < active.length; i += BATCH) {
+    const batch = active.slice(i, i + BATCH);
+    if (btn) btn.textContent = '⏳ ' + Math.min(i+BATCH, active.length) + '/' + active.length + '…';
+
+    try {
+      const text = await _callAnthropicAPI(key, _buildAIPrompt(batch));
+      const jsonMatch = text.match(/\[[\s\S]*\]/);
+      if (jsonMatch) {
+        const results = JSON.parse(jsonMatch[0]);
+        results.forEach(function(r){
+          if (r.key && r.verdict) anomInsights[r.key] = {verdict:r.verdict, explanation:r.explanation||'', action:r.action||''};
+        });
+        saveAnomalyInsights();
+        done += batch.length;
+        renderAnomalyList();  // update UI progressively
+      }
+    } catch(e) {
+      hadError = true;
+      // On rate-limit (429) wait longer before retrying
+      if (e.message.includes('429')) {
+        if (btn) btn.textContent = '⏳ המתנה (rate limit)…';
+        await new Promise(function(res){ setTimeout(res, 15000); });
+        i -= BATCH;  // retry this batch
+        continue;
+      }
+      console.warn('AI batch error:', e.message);
+    }
+
+    // Delay between batches (skip after last batch)
+    if (i + BATCH < active.length) {
+      await new Promise(function(res){ setTimeout(res, DELAY_MS); });
+    }
   }
+
+  if (btn) { btn.textContent = '🤖 נתח הכל'; btn.disabled = false; }
+  if (hadError) document.getElementById('anomApiStatus').textContent = '⚠ חלק מהבקשות נכשלו';
 }
 
 async function runAIForItem(evt, anomKey) {
