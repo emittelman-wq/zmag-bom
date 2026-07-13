@@ -296,10 +296,17 @@ tr.anom-row-med td:nth-child(3){border-right:3px solid #ffaa00}
 .anom-flt{background:var(--surface2);border:1px solid var(--border);border-radius:5px;color:var(--text2);padding:3px 10px;font-size:11px;cursor:pointer}
 .anom-flt.on{background:rgba(79,142,247,.2);border-color:var(--accent);color:var(--accent);font-weight:600}
 /* AI panel inside anomaly modal */
-.anom-ai-panel{background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:14px;margin-top:10px}
-.anom-ai-result{font-size:12px;color:var(--text);white-space:pre-wrap;line-height:1.6;max-height:300px;overflow-y:auto}
-.anom-api-row{display:flex;gap:8px;align-items:center;margin-bottom:10px}
-.anom-api-input{flex:1;background:var(--surface);border:1px solid var(--border);border-radius:5px;color:var(--text);padding:5px 8px;font-size:11px;font-family:monospace}
+.anom-insight{background:rgba(79,142,247,.07);border:1px solid rgba(79,142,247,.2);border-radius:5px;padding:7px 10px;margin-top:7px}
+.anom-verdict{display:inline-block;border-radius:4px;padding:1px 7px;font-size:11px;font-weight:700;margin-bottom:3px}
+.anom-verdict.real{background:rgba(56,161,105,.2);color:#38a169}
+.anom-verdict.error{background:rgba(229,62,62,.2);color:#e53e3e}
+.anom-verdict.check{background:rgba(237,137,54,.2);color:#ed8936}
+.anom-insight-text{font-size:11px;color:var(--text2);line-height:1.5}
+.anom-insight-action{font-size:11px;color:var(--accent);margin-top:3px;font-style:italic}
+.anom-ai-spinner{display:inline-block;animation:spin .8s linear infinite;font-size:13px}
+@keyframes spin{to{transform:rotate(360deg)}}
+.anom-api-bar{display:flex;gap:8px;align-items:center;padding:6px 18px;border-bottom:1px solid var(--border);background:var(--surface2);flex-shrink:0}
+.anom-api-input{flex:1;background:var(--surface);border:1px solid var(--border);border-radius:5px;color:var(--text);padding:4px 8px;font-size:11px;font-family:monospace}
 .mfg-setup{color:var(--text3);font-size:11px}
 /* Price edit modal */
 #priceEditBox{position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:3000;display:flex;align-items:center;justify-content:center}
@@ -539,7 +546,7 @@ function currencySym(currency) {
   if (currency === 'EUR') return '€';
   return '$';
 }
-const BUILD_VER = 'v20260713.1000';
+const BUILD_VER = 'v20260713.1200';
 let rows = [];
 let selIdx = -1;
 let curSort = {col:null,asc:true};
@@ -1192,7 +1199,7 @@ function detectAnomalies() {
     });
   });
 
-  // 4. Setup >> cycle ratio flag
+  // 4. Setup >> cycle ratio flag (הערכת יתר לסטאפ)
   BOM.forEach(function(item, idx) {
     if (item.type !== 'ELTDesign') return;
     const ph = perUnitH[idx], sh = setupHours[idx];
@@ -1203,6 +1210,51 @@ function detectAnomalies() {
         type: 'setup-ratio', reason: 'יחס סטאפ/מחזור גבוה: ' + fmtTimeAuto(sh*60) + ' סטאפ vs ' + fmtTimeAuto(ph*60) + ' מחזור',
         cycleH: ph, median: null, direction: 'none', key, dismissed: !!dismissedAnomalies[key] });
     }
+  });
+
+  // 5. הערכת חסר — תהליכים מורכבים ללא סטאפ (CNC/לייזר/ריתוך/כיפוף)
+  const SETUP_REQUIRED = ['cnc','laser','welding','bending','pressing'];
+  BOM.forEach(function(item, idx) {
+    if (item.type !== 'ELTDesign') return;
+    const pb = item.pb || item.pn;
+    const procs = (procData[pb] || []).filter(function(p){ return p.type; });
+    procs.forEach(function(p) {
+      if (!SETUP_REQUIRED.includes(p.type)) return;
+      const setup = p.setup || 0;
+      if (setup > 0) return;  // has setup — OK
+      const pt = PROC_TYPES.find(function(t){ return t.id===p.type; }) || {};
+      const key = pb + '_no-setup-' + p.type;
+      anomalies.push({ idx, pn: pb, desc: item.desc, severity: 'medium',
+        type: 'no-setup', subtype: p.type,
+        reason: 'הערכת חסר: אין סטאפ מוגדר לתהליך ' + (pt.label||p.type) + ' — תהליך זה בד"כ דורש הכנת מכונה',
+        cycleH: perUnitH[idx], median: null, direction: 'low', key,
+        dismissed: !!dismissedAnomalies[key] });
+    });
+  });
+
+  // 6. הערכת חסר — הרכבה עם עץ גדול אך זמן מחזור קצר מאוד (<5 דק')
+  BOM.forEach(function(item, idx) {
+    if (item.type !== 'ELTDesign') return;
+    const ph = perUnitH[idx];
+    if (!(ph > 0) || ph >= 5/60) return;  // skip if >= 5 min
+    const pb = item.pb || item.pn;
+    const procs = (procData[pb] || []).filter(function(p){ return p.type; });
+    const hasAssembly = procs.some(function(p){ return p.type==='assembly'; });
+    if (!hasAssembly) return;
+    // count ELTDesign direct children
+    const lv = item.lv;
+    let childCount = 0;
+    for (let j = idx+1; j < BOM.length; j++) {
+      if (BOM[j].lv <= lv) break;
+      if (BOM[j].lv === lv+1) childCount++;
+    }
+    if (childCount < 4) return;  // small assembly — OK
+    const key = pb + '_short-assembly';
+    anomalies.push({ idx, pn: pb, desc: item.desc, severity: 'medium',
+      type: 'underest-assembly',
+      reason: 'הערכת חסר: הרכבה עם ' + childCount + ' רכיבים ישירים אך זמן מחזור ' + fmtTimeAuto(ph*60) + ' בלבד',
+      cycleH: ph, median: null, direction: 'low', key,
+      dismissed: !!dismissedAnomalies[key] });
   });
 
   // Update badge counter
@@ -1249,19 +1301,37 @@ function updateAnomalyBadges() {
 
 // ─── Anomaly Panel UI ────────────────────────────────────
 let anomFilter = 'all';
+const ANOM_INSIGHTS_KEY = 'zmag_anom_insights';
+let anomInsights = {};  // {key: {verdict, explanation, action}}
+
+function loadAnomalyInsights() {
+  try { anomInsights = JSON.parse(localStorage.getItem(ANOM_INSIGHTS_KEY) || '{}'); } catch(e) { anomInsights = {}; }
+}
+function saveAnomalyInsights() {
+  localStorage.setItem(ANOM_INSIGHTS_KEY, JSON.stringify(anomInsights));
+}
+
 function openAnomalyPanel(jumpIdx) {
+  loadAnomalyInsights();
+  const inp = document.getElementById('anomApiKey');
+  if (inp) inp.value = localStorage.getItem(ANOM_API_KEY) || '';
   document.getElementById('anomalyModal').classList.remove('hidden');
   renderAnomalyList();
   if (jumpIdx != null) {
     setTimeout(function() {
-      const el = document.querySelector('.anom-item[data-idx="'+jumpIdx+'"]');
-      if (el) el.scrollIntoView({block:'center', behavior:'smooth'});
-    }, 50);
+      const el = document.querySelector('.anom-item[data-anom-key]');
+      const all = document.querySelectorAll('.anom-item');
+      for (let i=0;i<all.length;i++){
+        if (parseInt(all[i].dataset.idx)===jumpIdx){
+          all[i].scrollIntoView({block:'center', behavior:'smooth'});
+          break;
+        }
+      }
+    }, 80);
   }
 }
 function closeAnomalyPanel() {
   document.getElementById('anomalyModal').classList.add('hidden');
-  document.getElementById('anomAIPanel').style.display='none';
 }
 function setAnomFilter(f) {
   anomFilter = f;
@@ -1270,6 +1340,24 @@ function setAnomFilter(f) {
   });
   renderAnomalyList();
 }
+
+function _anomInsightHTML(a) {
+  const ins = anomInsights[a.key];
+  if (!ins) {
+    return '<div class="anom-insight" style="display:flex;align-items:center;gap:8px;color:var(--text3);font-size:11px">'+
+      '<button class="btn" style="font-size:10px;padding:2px 6px;flex-shrink:0" onclick="runAIForItem(event,\''+a.key+'\')">🤖 נתח</button>'+
+      '<span>אין ניתוח AI עדיין</span></div>';
+  }
+  const vClass = ins.verdict==='ריאלי'?'real':ins.verdict==='שגיאה'?'error':'check';
+  const vIcon  = ins.verdict==='ריאלי'?'✅':ins.verdict==='שגיאה'?'⚠️':'🔍';
+  return '<div class="anom-insight">'+
+    '<span class="anom-verdict '+vClass+'">'+vIcon+' '+ins.verdict+'</span>'+
+    '<div class="anom-insight-text">'+ins.explanation+'</div>'+
+    (ins.action ? '<div class="anom-insight-action">↪ '+ins.action+'</div>' : '')+
+    '<button class="btn" style="font-size:10px;padding:1px 5px;margin-top:4px" onclick="runAIForItem(event,\''+a.key+'\')">↻ עדכן</button>'+
+  '</div>';
+}
+
 function renderAnomalyList() {
   const sevOrd = function(s){ return s==='high'?0:s==='medium'?1:2; };
   const sorted = anomalies.slice().sort(function(a,b){
@@ -1283,8 +1371,9 @@ function renderAnomalyList() {
   });
   const total = anomalies.length;
   const active = anomalies.filter(function(a){ return !a.dismissed; }).length;
+  const withAI = Object.keys(anomInsights).length;
   document.getElementById('anomSummary').textContent =
-    total + ' אנומליות סה"כ — ' + active + ' פעילות, ' + (total-active) + ' אושרו';
+    total + ' אנומליות — ' + active + ' פעילות · ' + withAI + ' נותחו ע"י AI';
 
   const list = document.getElementById('anomList');
   if (!filtered.length) {
@@ -1296,22 +1385,29 @@ function renderAnomalyList() {
     const div = document.createElement('div');
     div.className = 'anom-item' + (a.dismissed?' dismissed':'');
     div.dataset.idx = a.idx;
+    div.dataset.anomKey = a.key;
     const icon = a.severity==='high'?'🔴':a.severity==='medium'?'🟡':'⚪';
+    const typeTag = a.type==='no-proc'?'<span style="font-size:10px;color:var(--text3);margin-left:4px">ללא תהליכים</span>':
+                    a.type==='no-setup'?'<span style="font-size:10px;color:var(--text3);margin-left:4px">סטאפ חסר</span>':
+                    a.direction==='low'?'<span style="font-size:10px;color:#4299e1;margin-left:4px">הערכת חסר</span>':
+                    a.direction==='high'?'<span style="font-size:10px;color:#e53e3e;margin-left:4px">הערכת יתר</span>':'';
     div.innerHTML =
       '<span class="anom-badge-big">'+icon+'</span>'+
       '<div class="anom-item-info">'+
-        '<div class="anom-pn">'+a.pn+'</div>'+
+        '<div style="display:flex;align-items:center;gap:4px"><span class="anom-pn">'+a.pn+'</span>'+typeTag+'</div>'+
         '<div class="anom-desc">'+a.desc+'</div>'+
         '<div class="anom-reason">'+a.reason+'</div>'+
+        _anomInsightHTML(a)+
       '</div>'+
       '<div class="anom-actions">'+
         '<button class="btn" style="font-size:10px;padding:2px 7px" onclick="jumpToAnomaly('+a.idx+')">🔗 עבור</button>'+
-        '<button class="btn" style="font-size:10px;padding:2px 7px" onclick="dismissAnomaly(\''+a.key+'\','+a.idx+')">'+
+        '<button class="btn" style="font-size:10px;padding:2px 7px" data-dismiss-btn="'+a.key+'" onclick="dismissAnomaly(\''+a.key+'\','+a.idx+')">'+
           (a.dismissed?'↩ בטל':'✓ אושר')+'</button>'+
       '</div>';
     list.appendChild(div);
   });
 }
+
 function jumpToAnomaly(idx) {
   closeAnomalyPanel();
   if (rows[idx]) {
@@ -1324,7 +1420,6 @@ function dismissAnomaly(key, idx) {
   dismissedAnomalies[key] = !dismissedAnomalies[key];
   if (!dismissedAnomalies[key]) delete dismissedAnomalies[key];
   localStorage.setItem(ANOMALY_DISMISS_KEY, JSON.stringify(dismissedAnomalies));
-  // update local state
   anomalies.forEach(function(a){ if (a.key===key) a.dismissed = !!dismissedAnomalies[key]; });
   const activeCount = anomalies.filter(function(a){ return !a.dismissed && a.severity!=='low'; }).length;
   const badge = document.getElementById('anomalyBadge');
@@ -1335,55 +1430,102 @@ function dismissAnomaly(key, idx) {
 
 // ─── AI Analysis ─────────────────────────────────────────
 const ANOM_API_KEY = 'zmag_anthropic_key';
-function saveAnomalyApiKey(v){ if(v) localStorage.setItem(ANOM_API_KEY, v); }
-function openAIAnalysis() {
-  const panel = document.getElementById('anomAIPanel');
-  panel.style.display = panel.style.display==='none' ? '' : 'none';
-  const inp = document.getElementById('anomApiKey');
-  inp.value = localStorage.getItem(ANOM_API_KEY) || '';
-  document.getElementById('anomAIResult').style.display='none';
+function saveAnomalyApiKey(v){
+  if(v) { localStorage.setItem(ANOM_API_KEY, v); document.getElementById('anomApiStatus').textContent='✓ נשמר'; }
 }
+
+async function _callAnthropicAPI(key, prompt) {
+  const resp = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': key,
+      'anthropic-version': '2023-06-01',
+      'anthropic-dangerous-direct-browser-access': 'true'
+    },
+    body: JSON.stringify({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 3000,
+      messages: [{ role: 'user', content: prompt }]
+    })
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(function(){ return {}; });
+    throw new Error('שגיאה ' + resp.status + ': ' + ((err.error&&err.error.message)||resp.statusText));
+  }
+  const data = await resp.json();
+  return data.content && data.content[0] ? data.content[0].text : '';
+}
+
+function _buildAIPrompt(items) {
+  return 'אתה מהנדס ייצור מנוסה. קיבלת רשימת אנומליות שזוהו אוטומטית בBOM של מוצר הנדסי.\n' +
+    'לכל פריט ברשימה, ענה בדיוק בפורמט JSON הבא ללא טקסט נוסף:\n' +
+    '[\n  {"key":"...", "verdict":"ריאלי|שגיאה|לבדיקה", "explanation":"הסבר קצר בעברית", "action":"המלצה קצרה לפעולה"}\n]\n\n' +
+    'פריטים לניתוח:\n' +
+    items.map(function(a){ return JSON.stringify({key:a.key, pn:a.pn, desc:a.desc, reason:a.reason, severity:a.severity}); }).join('\n') +
+    '\n\nהחזר JSON בלבד. verdict: "ריאלי" אם הזמן סביר, "שגיאה" אם נראה שגיאת הזנה, "לבדיקה" אם לא ברור.';
+}
+
 async function runAIAnomalyAnalysis() {
   const key = document.getElementById('anomApiKey').value.trim();
-  if (!key) { alert('נא להזין Anthropic API Key'); return; }
+  if (!key) { alert('נא להזין Anthropic API Key בשדה למעלה'); return; }
   localStorage.setItem(ANOM_API_KEY, key);
+  loadAnomalyInsights();
 
   const active = anomalies.filter(function(a){ return !a.dismissed; });
   if (!active.length) { alert('אין אנומליות פעילות לניתוח'); return; }
 
-  const resEl = document.getElementById('anomAIResult');
-  resEl.style.display='';
-  resEl.textContent = '⏳ מנתח…';
-
-  const prompt = 'אתה מנהל הנדסת ייצור. קיבלת רשימת אנומליות אוטומטיות שזוהו בBOM של מוצר הנדסי. לכל אנומליה ציין: האם היא ריאלית או שגיאת הזנה? מהי הסיבה הסבירה? מה לבדוק?\n\nאנומליות שזוהו:\n' +
-    active.map(function(a,i){
-      return (i+1)+'. ['+a.severity.toUpperCase()+'] '+a.pn+' ('+a.desc+'): '+a.reason;
-    }).join('\n') + '\n\nהשב בעברית בצורה תמציתית. לכל פריט: שורה אחת של הסבר + המלצה.';
+  const btn = document.getElementById('anomAnalyzeAllBtn');
+  if (btn) { btn.textContent = '⏳ מנתח…'; btn.disabled = true; }
 
   try {
-    const resp = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': key,
-        'anthropic-version': '2023-06-01',
-        'anthropic-dangerous-direct-browser-access': 'true'
-      },
-      body: JSON.stringify({
-        model: 'claude-haiku-4-5-20251001',
-        max_tokens: 2048,
-        messages: [{ role: 'user', content: prompt }]
-      })
+    const text = await _callAnthropicAPI(key, _buildAIPrompt(active));
+    // Parse JSON from response
+    const jsonMatch = text.match(/\[[\s\S]*\]/);
+    if (!jsonMatch) throw new Error('תשובה לא תקינה מ-AI');
+    const results = JSON.parse(jsonMatch[0]);
+    results.forEach(function(r) {
+      if (r.key && r.verdict) anomInsights[r.key] = {verdict:r.verdict, explanation:r.explanation||'', action:r.action||''};
     });
-    if (!resp.ok) {
-      const err = await resp.json().catch(function(){ return {}; });
-      resEl.textContent = '❌ שגיאה ' + resp.status + ': ' + (err.error&&err.error.message||resp.statusText);
-      return;
-    }
-    const data = await resp.json();
-    resEl.textContent = data.content && data.content[0] ? data.content[0].text : '(אין תשובה)';
+    saveAnomalyInsights();
+    renderAnomalyList();
   } catch(e) {
-    resEl.textContent = '❌ ' + e.message;
+    alert('❌ ' + e.message);
+  } finally {
+    if (btn) { btn.textContent = '🤖 נתח הכל'; btn.disabled = false; }
+  }
+}
+
+async function runAIForItem(evt, anomKey) {
+  evt.stopPropagation();
+  const key = localStorage.getItem(ANOM_API_KEY) || document.getElementById('anomApiKey').value.trim();
+  if (!key) { alert('נא להזין Anthropic API Key'); return; }
+  const a = anomalies.find(function(x){ return x.key===anomKey; });
+  if (!a) return;
+
+  loadAnomalyInsights();
+  // Show spinner in insight block
+  const insightEl = evt.target.closest('.anom-insight');
+  if (insightEl) insightEl.innerHTML = '<span class="anom-ai-spinner">⟳</span> מנתח…';
+
+  try {
+    const text = await _callAnthropicAPI(key, _buildAIPrompt([a]));
+    const jsonMatch = text.match(/\[[\s\S]*\]/);
+    if (!jsonMatch) throw new Error('תשובה לא תקינה');
+    const results = JSON.parse(jsonMatch[0]);
+    if (results[0] && results[0].verdict) {
+      anomInsights[anomKey] = {verdict:results[0].verdict, explanation:results[0].explanation||'', action:results[0].action||''};
+      saveAnomalyInsights();
+    }
+    renderAnomalyList();
+    // Scroll back to item
+    setTimeout(function(){
+      const el = document.querySelector('.anom-item[data-anom-key="'+anomKey+'"]');
+      if (el) el.scrollIntoView({block:'nearest', behavior:'smooth'});
+    }, 50);
+  } catch(e) {
+    alert('❌ ' + e.message);
+    renderAnomalyList();
   }
 }
 
@@ -2328,12 +2470,17 @@ updateStats();
     <div class="anom-hdr">
       <h3>🔍 אנומליות בהערכות שעות</h3>
       <div style="display:flex;gap:8px;align-items:center">
-        <button class="btn" id="anomAIBtn" onclick="openAIAnalysis()" title="ניתוח AI — שלח חריגים ל-Claude API" style="font-size:11px">🤖 AI ניתוח</button>
+        <button class="btn" id="anomAnalyzeAllBtn" onclick="runAIAnomalyAnalysis()" title="שלח כל האנומליות הפעילות ל-Claude לניתוח" style="font-size:11px">🤖 נתח הכל</button>
         <button class="btn" onclick="closeAnomalyPanel()" style="font-size:11px">✕ סגור</button>
       </div>
     </div>
-    <div style="padding:10px 18px 0;flex-shrink:0">
-      <div id="anomSummary" style="font-size:12px;color:var(--text2);margin-bottom:8px"></div>
+    <div class="anom-api-bar">
+      <span style="font-size:11px;color:var(--text2);flex-shrink:0">🔑 Anthropic API Key:</span>
+      <input class="anom-api-input" type="password" id="anomApiKey" placeholder="sk-ant-api03-…" oninput="saveAnomalyApiKey(this.value)">
+      <span id="anomApiStatus" style="font-size:11px;color:var(--accent2);flex-shrink:0"></span>
+    </div>
+    <div style="padding:8px 18px 0;flex-shrink:0">
+      <div id="anomSummary" style="font-size:12px;color:var(--text2);margin-bottom:6px"></div>
       <div class="anom-filter-row">
         <button class="anom-flt on" id="afAll" onclick="setAnomFilter('all')">הכל</button>
         <button class="anom-flt" id="afActive" onclick="setAnomFilter('active')">פעיל</button>
@@ -2341,15 +2488,6 @@ updateStats();
       </div>
     </div>
     <div class="anom-body" id="anomList"></div>
-    <div id="anomAIPanel" class="anom-ai-panel" style="display:none;margin:0 18px 14px;flex-shrink:0">
-      <div style="font-weight:600;font-size:13px;margin-bottom:8px">🤖 ניתוח AI (Anthropic Claude)</div>
-      <div class="anom-api-row">
-        <span style="font-size:11px;color:var(--text2);flex-shrink:0">API Key:</span>
-        <input class="anom-api-input" type="password" id="anomApiKey" placeholder="sk-ant-api03-…" oninput="saveAnomalyApiKey(this.value)">
-        <button class="btn" onclick="runAIAnomalyAnalysis()" style="font-size:11px;flex-shrink:0">▶ הרץ ניתוח</button>
-      </div>
-      <div id="anomAIResult" class="anom-ai-result" style="display:none"></div>
-    </div>
   </div>
 </div>
 
