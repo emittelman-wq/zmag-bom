@@ -272,6 +272,34 @@ td{padding:5px 8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;ver
 #mfgTable td{padding:6px 10px;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #mfgTable tfoot td{background:var(--header-bg);font-weight:700;border-top:2px solid var(--border)}
 .proc-type-badge{display:inline-block;background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:2px 8px;font-size:11px;color:var(--accent2);font-weight:600}
+/* Anomaly badges */
+.anom-badge{display:inline-block;font-size:11px;cursor:pointer;margin-left:2px;border-radius:3px;line-height:1;vertical-align:middle}
+tr.anom-row-high td:nth-child(3){border-right:3px solid #ff4444}
+tr.anom-row-med td:nth-child(3){border-right:3px solid #ffaa00}
+/* Anomaly modal */
+#anomalyModal{position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:4000;display:flex;align-items:center;justify-content:center}
+#anomalyModal.hidden{display:none}
+.anom-box{background:var(--surface);border:1px solid var(--border);border-radius:10px;width:720px;max-width:95vw;max-height:85vh;display:flex;flex-direction:column;overflow:hidden}
+.anom-hdr{padding:14px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px;flex-shrink:0}
+.anom-hdr h3{margin:0;font-size:15px;flex:1}
+.anom-body{flex:1;overflow-y:auto;padding:14px 18px}
+.anom-item{display:flex;align-items:flex-start;gap:10px;padding:10px 12px;border:1px solid var(--border);border-radius:6px;margin-bottom:8px;background:var(--surface2)}
+.anom-item.dismissed{opacity:.4}
+.anom-item-info{flex:1;min-width:0}
+.anom-pn{font-weight:700;font-size:12px;color:var(--accent);font-family:monospace}
+.anom-desc{font-size:11px;color:var(--text2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.anom-reason{font-size:12px;color:var(--text);margin-top:3px}
+.anom-actions{display:flex;flex-direction:column;gap:5px;flex-shrink:0}
+.anom-badge-big{font-size:18px;flex-shrink:0;margin-top:2px}
+.anom-counter{background:#ff4444;color:#fff;border-radius:10px;font-size:10px;font-weight:700;padding:1px 5px;margin-left:3px;vertical-align:middle}
+.anom-filter-row{display:flex;gap:6px;margin-bottom:10px;flex-shrink:0}
+.anom-flt{background:var(--surface2);border:1px solid var(--border);border-radius:5px;color:var(--text2);padding:3px 10px;font-size:11px;cursor:pointer}
+.anom-flt.on{background:rgba(79,142,247,.2);border-color:var(--accent);color:var(--accent);font-weight:600}
+/* AI panel inside anomaly modal */
+.anom-ai-panel{background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:14px;margin-top:10px}
+.anom-ai-result{font-size:12px;color:var(--text);white-space:pre-wrap;line-height:1.6;max-height:300px;overflow-y:auto}
+.anom-api-row{display:flex;gap:8px;align-items:center;margin-bottom:10px}
+.anom-api-input{flex:1;background:var(--surface);border:1px solid var(--border);border-radius:5px;color:var(--text);padding:5px 8px;font-size:11px;font-family:monospace}
 .mfg-setup{color:var(--text3);font-size:11px}
 /* Price edit modal */
 #priceEditBox{position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:3000;display:flex;align-items:center;justify-content:center}
@@ -407,6 +435,7 @@ tr.row-disabled .badge,tr.row-disabled .proc-btn{opacity:.5}
   <button class="btn" id="buyBtn" onclick="openBuyModal()" title="Show aggregated Buy items list">📦 Buy Summary</button>
   <button class="btn" id="mfgBtn" onclick="openMfgModal()" title="Manufacturing processes summary">⚙ Manufacturing</button>
   <button class="btn" id="rfqBtn" onclick="openRFQModal()" title="Subcontractor RFQ list">🔧 RFQ</button>
+  <button class="btn" id="anomalyBtn" onclick="openAnomalyPanel()" title="בדיקת אנומליות בהערכות שעות">🔍 אנומליות<span class="anom-counter" id="anomalyBadge" style="display:none">0</span></button>
   <button class="btn" id="xlsxBtn" onclick="exportBomExcel()" title="ייצוא BOM לקובץ Excel עם היררכיה וקיבוץ">📊 Excel</button>
   <button class="btn" id="adminFolderBtn" onclick="adminGetFolderItemId()" title="Admin: Get SharePoint Folder Item ID for hardcoding" style="display:none;font-size:10px;opacity:.6">🔧 Get Folder ID</button>
   <button class="btn" id="themeBtn" onclick="toggleTheme()" title="Toggle light/dark mode">☀️</button>
@@ -510,7 +539,7 @@ function currencySym(currency) {
   if (currency === 'EUR') return '€';
   return '$';
 }
-const BUILD_VER = 'v20260712.1800';
+const BUILD_VER = 'v20260713.1000';
 let rows = [];
 let selIdx = -1;
 let curSort = {col:null,asc:true};
@@ -610,6 +639,9 @@ let cumCycleH = [];     // tree-cumulative cycle hours (no setup)
 let projectQty = 1;
 let buyNotes = {};
 let subData = {};
+let anomalies = [];
+let dismissedAnomalies = {};
+const ANOMALY_DISMISS_KEY = 'zmag_anom_dismissed';
 
 // ─── Build header ────────────────────────────────────────
 // ─── Theme toggle ────────────────────────────────────────
@@ -1079,6 +1111,282 @@ function buildCumulativeHours() {
     }
   });
 }
+// ─── Anomaly Detection ───────────────────────────────────
+function detectAnomalies() {
+  try { dismissedAnomalies = JSON.parse(localStorage.getItem(ANOMALY_DISMISS_KEY) || '{}'); } catch(e) { dismissedAnomalies = {}; }
+  anomalies = [];
+
+  // 1. ELTDesign items with zero processes → flag for review
+  BOM.forEach(function(item, idx) {
+    if (item.type !== 'ELTDesign') return;
+    const pb = item.pb || item.pn;
+    const procs = (procData[pb] || []).filter(function(p){ return p.type; });
+    if (procs.length === 0) {
+      const key = pb + '_no-proc';
+      anomalies.push({ idx, pn: pb, desc: item.desc, severity: 'low',
+        type: 'no-proc', reason: 'אין תהליכי ייצור מוגדרים',
+        cycleH: 0, median: null, direction: 'none', key, dismissed: !!dismissedAnomalies[key] });
+    }
+  });
+
+  // 2. Collect cycle hours per dominant-process-type group
+  const groups = {};
+  BOM.forEach(function(item, idx) {
+    if (item.type !== 'ELTDesign') return;
+    const ph = perUnitH[idx];
+    if (!(ph > 0)) return;
+    const pb = item.pb || item.pn;
+    const procs = (procData[pb] || []).filter(function(p){ return p.type; });
+    if (!procs.length) return;
+    // dominant = longest cycle process
+    let domType = procs[0].type, domMin = 0;
+    procs.forEach(function(p) {
+      const isTime = (p.unit==='h'||p.unit==='hr'||p.unit==='min');
+      if (!isTime) return;
+      const m = (p.unit==='h'||p.unit==='hr') ? (p.qty||0)*60 : (p.qty||0);
+      if (m > domMin) { domMin = m; domType = p.type; }
+    });
+    if (!groups[domType]) groups[domType] = [];
+    groups[domType].push({ idx, cycleH: ph, pn: pb, desc: item.desc });
+  });
+  // global group
+  const allItems = [];
+  Object.values(groups).forEach(function(g){ g.forEach(function(x){ allItems.push(x); }); });
+  if (allItems.length >= 4) groups['__all__'] = allItems;
+
+  // 3. IQR per group → flag outliers
+  const flaggedIdxTypes = new Set();
+  Object.entries(groups).forEach(function([grpType, items]) {
+    if (items.length < 4) return;
+    const vals = items.map(function(x){ return x.cycleH; }).sort(function(a,b){ return a-b; });
+    const q1 = vals[Math.floor(vals.length*0.25)];
+    const q3 = vals[Math.floor(vals.length*0.75)];
+    const median = vals[Math.floor(vals.length*0.5)];
+    const iqr = q3 - q1;
+    if (iqr < 0.001) return;
+    const lo = q1 - 1.5*iqr, hi = q3 + 1.5*iqr, hiX = q3 + 3*iqr;
+    const grpLabel = grpType === '__all__' ? 'כלל ELTDesign'
+      : ((PROC_TYPES.find(function(t){ return t.id===grpType; })||{}).label || grpType);
+
+    items.forEach(function(x) {
+      const fkey = x.idx + '_' + grpType;
+      if (flaggedIdxTypes.has(fkey)) return;
+      let severity = null, direction = null, reason = null;
+      if (x.cycleH > hiX) {
+        severity = 'high'; direction = 'high';
+        reason = 'זמן מחזור גבוה מאוד: ' + fmtTimeAuto(x.cycleH*60) + ' (חציון ' + grpLabel + ': ' + fmtTimeAuto(median*60) + ')';
+      } else if (x.cycleH > hi) {
+        severity = 'medium'; direction = 'high';
+        reason = 'זמן מחזור גבוה: ' + fmtTimeAuto(x.cycleH*60) + ' (חציון ' + grpLabel + ': ' + fmtTimeAuto(median*60) + ')';
+      } else if (x.cycleH > 0 && x.cycleH < lo) {
+        severity = 'medium'; direction = 'low';
+        reason = 'זמן מחזור נמוך: ' + fmtTimeAuto(x.cycleH*60) + ' (חציון ' + grpLabel + ': ' + fmtTimeAuto(median*60) + ')';
+      }
+      if (severity) {
+        flaggedIdxTypes.add(fkey);
+        const key = x.pn + '_cyc_' + grpType;
+        anomalies.push({ idx: x.idx, pn: x.pn, desc: x.desc, severity,
+          type: 'cycle-outlier', subtype: grpType, reason, cycleH: x.cycleH,
+          median, direction, key, dismissed: !!dismissedAnomalies[key] });
+      }
+    });
+  });
+
+  // 4. Setup >> cycle ratio flag
+  BOM.forEach(function(item, idx) {
+    if (item.type !== 'ELTDesign') return;
+    const ph = perUnitH[idx], sh = setupHours[idx];
+    if (ph > 0 && sh > ph * 3) {
+      const pb = item.pb || item.pn;
+      const key = pb + '_setup-ratio';
+      anomalies.push({ idx, pn: pb, desc: item.desc, severity: 'medium',
+        type: 'setup-ratio', reason: 'יחס סטאפ/מחזור גבוה: ' + fmtTimeAuto(sh*60) + ' סטאפ vs ' + fmtTimeAuto(ph*60) + ' מחזור',
+        cycleH: ph, median: null, direction: 'none', key, dismissed: !!dismissedAnomalies[key] });
+    }
+  });
+
+  // Update badge counter
+  const activeCount = anomalies.filter(function(a){ return !a.dismissed && a.severity !== 'low'; }).length;
+  const badge = document.getElementById('anomalyBadge');
+  if (badge) {
+    badge.textContent = activeCount;
+    badge.style.display = activeCount > 0 ? 'inline-block' : 'none';
+  }
+  updateAnomalyBadges();
+}
+
+function updateAnomalyBadges() {
+  // Clear previous
+  document.querySelectorAll('.anom-badge').forEach(function(b){ b.remove(); });
+  document.querySelectorAll('tr.anom-row-high,tr.anom-row-med').forEach(function(tr){
+    tr.classList.remove('anom-row-high','anom-row-med');
+  });
+  if (!anomalies.length) return;
+  // Build worst-per-idx map
+  const sevOrd = function(s){ return s==='high'?2:s==='medium'?1:0; };
+  const byIdx = {};
+  anomalies.forEach(function(a) {
+    if (a.dismissed || a.severity==='low') return;
+    const cur = byIdx[a.idx];
+    if (!cur || sevOrd(a.severity) > sevOrd(cur.severity)) byIdx[a.idx] = a;
+  });
+  Object.entries(byIdx).forEach(function([idxStr, a]) {
+    const idx = parseInt(idxStr);
+    const tr = rows[idx];
+    if (!tr) return;
+    tr.classList.add(a.severity==='high' ? 'anom-row-high' : 'anom-row-med');
+    // 3rd child = proc cell (after row# and flag)
+    const procTd = tr.children[2];
+    if (!procTd) return;
+    const badge = document.createElement('span');
+    badge.className = 'anom-badge';
+    badge.textContent = a.severity==='high' ? '🔴' : '🟡';
+    badge.title = a.reason;
+    badge.onclick = function(e){ e.stopPropagation(); openAnomalyPanel(idx); };
+    procTd.appendChild(badge);
+  });
+}
+
+// ─── Anomaly Panel UI ────────────────────────────────────
+let anomFilter = 'all';
+function openAnomalyPanel(jumpIdx) {
+  document.getElementById('anomalyModal').classList.remove('hidden');
+  renderAnomalyList();
+  if (jumpIdx != null) {
+    setTimeout(function() {
+      const el = document.querySelector('.anom-item[data-idx="'+jumpIdx+'"]');
+      if (el) el.scrollIntoView({block:'center', behavior:'smooth'});
+    }, 50);
+  }
+}
+function closeAnomalyPanel() {
+  document.getElementById('anomalyModal').classList.add('hidden');
+  document.getElementById('anomAIPanel').style.display='none';
+}
+function setAnomFilter(f) {
+  anomFilter = f;
+  ['all','active','dismissed'].forEach(function(x){
+    document.getElementById('af'+x.charAt(0).toUpperCase()+x.slice(1)).classList.toggle('on', x===f);
+  });
+  renderAnomalyList();
+}
+function renderAnomalyList() {
+  const sevOrd = function(s){ return s==='high'?0:s==='medium'?1:2; };
+  const sorted = anomalies.slice().sort(function(a,b){
+    if (a.dismissed!==b.dismissed) return a.dismissed?1:-1;
+    return sevOrd(a.severity)-sevOrd(b.severity);
+  });
+  const filtered = sorted.filter(function(a){
+    if (anomFilter==='active')    return !a.dismissed;
+    if (anomFilter==='dismissed') return a.dismissed;
+    return true;
+  });
+  const total = anomalies.length;
+  const active = anomalies.filter(function(a){ return !a.dismissed; }).length;
+  document.getElementById('anomSummary').textContent =
+    total + ' אנומליות סה"כ — ' + active + ' פעילות, ' + (total-active) + ' אושרו';
+
+  const list = document.getElementById('anomList');
+  if (!filtered.length) {
+    list.innerHTML = '<div style="text-align:center;color:var(--text3);padding:30px;font-size:13px">אין אנומליות להצגה</div>';
+    return;
+  }
+  list.innerHTML = '';
+  filtered.forEach(function(a) {
+    const div = document.createElement('div');
+    div.className = 'anom-item' + (a.dismissed?' dismissed':'');
+    div.dataset.idx = a.idx;
+    const icon = a.severity==='high'?'🔴':a.severity==='medium'?'🟡':'⚪';
+    div.innerHTML =
+      '<span class="anom-badge-big">'+icon+'</span>'+
+      '<div class="anom-item-info">'+
+        '<div class="anom-pn">'+a.pn+'</div>'+
+        '<div class="anom-desc">'+a.desc+'</div>'+
+        '<div class="anom-reason">'+a.reason+'</div>'+
+      '</div>'+
+      '<div class="anom-actions">'+
+        '<button class="btn" style="font-size:10px;padding:2px 7px" onclick="jumpToAnomaly('+a.idx+')">🔗 עבור</button>'+
+        '<button class="btn" style="font-size:10px;padding:2px 7px" onclick="dismissAnomaly(\''+a.key+'\','+a.idx+')">'+
+          (a.dismissed?'↩ בטל':'✓ אושר')+'</button>'+
+      '</div>';
+    list.appendChild(div);
+  });
+}
+function jumpToAnomaly(idx) {
+  closeAnomalyPanel();
+  if (rows[idx]) {
+    rows[idx].scrollIntoView({block:'center', behavior:'smooth'});
+    rows[idx].style.outline='2px solid var(--accent)';
+    setTimeout(function(){ rows[idx].style.outline=''; }, 2000);
+  }
+}
+function dismissAnomaly(key, idx) {
+  dismissedAnomalies[key] = !dismissedAnomalies[key];
+  if (!dismissedAnomalies[key]) delete dismissedAnomalies[key];
+  localStorage.setItem(ANOMALY_DISMISS_KEY, JSON.stringify(dismissedAnomalies));
+  // update local state
+  anomalies.forEach(function(a){ if (a.key===key) a.dismissed = !!dismissedAnomalies[key]; });
+  const activeCount = anomalies.filter(function(a){ return !a.dismissed && a.severity!=='low'; }).length;
+  const badge = document.getElementById('anomalyBadge');
+  if (badge) { badge.textContent=activeCount; badge.style.display=activeCount>0?'inline-block':'none'; }
+  updateAnomalyBadges();
+  renderAnomalyList();
+}
+
+// ─── AI Analysis ─────────────────────────────────────────
+const ANOM_API_KEY = 'zmag_anthropic_key';
+function saveAnomalyApiKey(v){ if(v) localStorage.setItem(ANOM_API_KEY, v); }
+function openAIAnalysis() {
+  const panel = document.getElementById('anomAIPanel');
+  panel.style.display = panel.style.display==='none' ? '' : 'none';
+  const inp = document.getElementById('anomApiKey');
+  inp.value = localStorage.getItem(ANOM_API_KEY) || '';
+  document.getElementById('anomAIResult').style.display='none';
+}
+async function runAIAnomalyAnalysis() {
+  const key = document.getElementById('anomApiKey').value.trim();
+  if (!key) { alert('נא להזין Anthropic API Key'); return; }
+  localStorage.setItem(ANOM_API_KEY, key);
+
+  const active = anomalies.filter(function(a){ return !a.dismissed; });
+  if (!active.length) { alert('אין אנומליות פעילות לניתוח'); return; }
+
+  const resEl = document.getElementById('anomAIResult');
+  resEl.style.display='';
+  resEl.textContent = '⏳ מנתח…';
+
+  const prompt = 'אתה מנהל הנדסת ייצור. קיבלת רשימת אנומליות אוטומטיות שזוהו בBOM של מוצר הנדסי. לכל אנומליה ציין: האם היא ריאלית או שגיאת הזנה? מהי הסיבה הסבירה? מה לבדוק?\n\nאנומליות שזוהו:\n' +
+    active.map(function(a,i){
+      return (i+1)+'. ['+a.severity.toUpperCase()+'] '+a.pn+' ('+a.desc+'): '+a.reason;
+    }).join('\n') + '\n\nהשב בעברית בצורה תמציתית. לכל פריט: שורה אחת של הסבר + המלצה.';
+
+  try {
+    const resp = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': key,
+        'anthropic-version': '2023-06-01',
+        'anthropic-dangerous-direct-browser-access': 'true'
+      },
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 2048,
+        messages: [{ role: 'user', content: prompt }]
+      })
+    });
+    if (!resp.ok) {
+      const err = await resp.json().catch(function(){ return {}; });
+      resEl.textContent = '❌ שגיאה ' + resp.status + ': ' + (err.error&&err.error.message||resp.statusText);
+      return;
+    }
+    const data = await resp.json();
+    resEl.textContent = data.content && data.content[0] ? data.content[0].text : '(אין תשובה)';
+  } catch(e) {
+    resEl.textContent = '❌ ' + e.message;
+  }
+}
+
 function updateWHCells() {
   document.querySelectorAll('.cell-setupH').forEach((td, i) => {
     const h = setupHours[i];
@@ -1796,6 +2104,7 @@ buildHeader();
 buildTable();
 buildCumulativeHours();
 updateWHCells();
+detectAnomalies();
 loadFilterState();
 applyFilters();
 updateStats();
@@ -2014,6 +2323,36 @@ updateStats();
 </div>
 
 <!-- Price edit modal -->
+<div id="anomalyModal" class="hidden">
+  <div class="anom-box">
+    <div class="anom-hdr">
+      <h3>🔍 אנומליות בהערכות שעות</h3>
+      <div style="display:flex;gap:8px;align-items:center">
+        <button class="btn" id="anomAIBtn" onclick="openAIAnalysis()" title="ניתוח AI — שלח חריגים ל-Claude API" style="font-size:11px">🤖 AI ניתוח</button>
+        <button class="btn" onclick="closeAnomalyPanel()" style="font-size:11px">✕ סגור</button>
+      </div>
+    </div>
+    <div style="padding:10px 18px 0;flex-shrink:0">
+      <div id="anomSummary" style="font-size:12px;color:var(--text2);margin-bottom:8px"></div>
+      <div class="anom-filter-row">
+        <button class="anom-flt on" id="afAll" onclick="setAnomFilter('all')">הכל</button>
+        <button class="anom-flt" id="afActive" onclick="setAnomFilter('active')">פעיל</button>
+        <button class="anom-flt" id="afDismissed" onclick="setAnomFilter('dismissed')">אושרו</button>
+      </div>
+    </div>
+    <div class="anom-body" id="anomList"></div>
+    <div id="anomAIPanel" class="anom-ai-panel" style="display:none;margin:0 18px 14px;flex-shrink:0">
+      <div style="font-weight:600;font-size:13px;margin-bottom:8px">🤖 ניתוח AI (Anthropic Claude)</div>
+      <div class="anom-api-row">
+        <span style="font-size:11px;color:var(--text2);flex-shrink:0">API Key:</span>
+        <input class="anom-api-input" type="password" id="anomApiKey" placeholder="sk-ant-api03-…" oninput="saveAnomalyApiKey(this.value)">
+        <button class="btn" onclick="runAIAnomalyAnalysis()" style="font-size:11px;flex-shrink:0">▶ הרץ ניתוח</button>
+      </div>
+      <div id="anomAIResult" class="anom-ai-result" style="display:none"></div>
+    </div>
+  </div>
+</div>
+
 <div id="priceEditBox" class="hidden">
   <div class="pe-inner">
     <div class="pe-title" id="peTitle">✏️ Edit Price</div>
@@ -2676,6 +3015,7 @@ function msDelRow(btn) {
   buildTable();
   buildCumulativeHours();
   updateWHCells();
+  detectAnomalies();
   msBuildRows(procData[_msCurPb] || []);
   msFlashSaved();
 }
@@ -2716,6 +3056,7 @@ function msCollectAndSave() {
   buildTable();
   buildCumulativeHours();
   updateWHCells();
+  detectAnomalies();
   computeTreeCosts(); refreshCostCells();
   msFlashSaved();
 }
@@ -3108,6 +3449,7 @@ async function loadProcFromGraph() {
       buildTable();
       buildCumulativeHours();
       updateWHCells();
+      detectAnomalies();
       applyFilters(); // restore saved filter state after table rebuild
       if (typeof curItem !== 'undefined' && curItem) renderMfgSide && renderMfgSide(curItem);
       const savedBy = obj.savedBy ? ' (נשמר ע"י ' + obj.savedBy + ')' : '';
