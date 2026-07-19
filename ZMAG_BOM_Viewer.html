@@ -547,7 +547,7 @@ function currencySym(currency) {
   if (currency === 'EUR') return '€';
   return '$';
 }
-const BUILD_VER = 'v20260719.1000';
+const BUILD_VER = 'v20260719.1300';
 let rows = [];
 let selIdx = -1;
 let curSort = {col:null,asc:true};
@@ -618,7 +618,7 @@ async function getFileBuffer(relPath){
 
 // ─── Column definitions ──────────────────────────────────
 const COLS = [
-  {id:'proc', label:'Proc',       w:55,  sort:false},
+  {id:'proc', label:'Proc',       w:60,  sort:false},
   {id:'lv',   label:'Level',      w:60,  sort:true},
   {id:'pn',   label:'Part Number',w:160, sort:true},
   {id:'desc', label:'Description',w:300, sort:true},
@@ -901,7 +901,7 @@ function buildTable(){
 
     // Proc column — ELTDesign items only (moved here: between flag and level)
     const tdP = document.createElement('td');
-    tdP.style.textAlign = 'center';
+    tdP.style.cssText = 'text-align:center;white-space:nowrap;padding:1px 2px';
     if (item.type === 'ELTDesign') {
       const pb = item.pb || item.pn;
       const procs = (procData[pb] || []).filter(p => p.type);
@@ -930,22 +930,6 @@ function buildTable(){
       notesBtn.textContent = hasnotes ? '📝' : '✎';
       notesBtn.addEventListener('click', ev => { ev.stopPropagation(); openBuyNotesEditor(pb, item.desc); });
       tdP.appendChild(notesBtn);
-      // AI price search button
-      const aiPriceBtn = document.createElement('button');
-      aiPriceBtn.className = 'proc-btn';
-      aiPriceBtn.title = 'חיפוש מחיר ב-AI';
-      aiPriceBtn.textContent = '🤖';
-      aiPriceBtn.style.cssText = 'font-size:11px;margin-right:2px';
-      aiPriceBtn.addEventListener('click', ev => { ev.stopPropagation(); openAIPriceSearch(pb, item.desc, item.cat||''); });
-      tdP.appendChild(aiPriceBtn);
-      // Raw material button
-      const rmBtn = document.createElement('button');
-      rmBtn.className = 'proc-btn' + (rawMatData[pb] ? ' proc-has' : '');
-      rmBtn.title = rawMatData[pb] ? 'חומר גלם מוגדר — לחץ לעריכה' : 'הגדר כחומר גלם';
-      rmBtn.textContent = '🧱';
-      rmBtn.style.cssText = 'font-size:11px;margin-right:2px';
-      rmBtn.addEventListener('click', ev => { ev.stopPropagation(); openRawMatEditor(pb, item.desc, item.tq||1); });
-      tdP.appendChild(rmBtn);
     }
     tr.appendChild(tdP);
 
@@ -1609,13 +1593,14 @@ const MATERIAL_DB = {
   rubber:       {label:'גומי',          density:1200, color:'#48bb78', grades:[{id:'generic',label:'כללי',density:1200}]},
 };
 const MATERIAL_FORMS = [
-  {id:'sheet',      label:'פח / לוח',           dims:[{k:'L',u:'mm',ph:'אורך'},{k:'W',u:'mm',ph:'רוחב'},{k:'T',u:'mm',ph:'עובי'}]},
-  {id:'bar_round',  label:'מוט עגול',            dims:[{k:'L',u:'mm',ph:'אורך'},{k:'D',u:'mm',ph:'קוטר'}]},
-  {id:'bar_square', label:'מוט מרובע/שטוח',      dims:[{k:'L',u:'mm',ph:'אורך'},{k:'S',u:'mm',ph:'רוחב'},{k:'S2',u:'mm',ph:'גובה'}]},
-  {id:'tube_round', label:'צינור עגול',           dims:[{k:'L',u:'mm',ph:'אורך'},{k:'D',u:'mm',ph:'⌀ חיצוני'},{k:'d',u:'mm',ph:'⌀ פנימי'}]},
-  {id:'tube_square',label:'צינור מרובע',          dims:[{k:'L',u:'mm',ph:'אורך'},{k:'S',u:'mm',ph:'צלע'},{k:'t',u:'mm',ph:'עובי דופן'}]},
-  {id:'angle',      label:'זווית (L)',             dims:[{k:'L',u:'mm',ph:'אורך'},{k:'W',u:'mm',ph:'רגל 1'},{k:'W2',u:'mm',ph:'רגל 2'},{k:'T',u:'mm',ph:'עובי'}]},
-  {id:'profile',    label:'פרופיל (שטח חתך)',     dims:[{k:'L',u:'mm',ph:'אורך'},{k:'A',u:'mm²',ph:'שטח חתך'}]},
+  {id:'sheet',      label:'פח / לוח',              dims:[{k:'L',u:'mm',ph:'אורך'},{k:'W',u:'mm',ph:'רוחב'},{k:'T',u:'mm',ph:'עובי'}]},
+  {id:'bar_round',  label:'מוט עגול',               dims:[{k:'L',u:'mm',ph:'אורך'},{k:'D',u:'mm',ph:'קוטר'}]},
+  {id:'bar_square', label:'מוט מרובע/שטוח',         dims:[{k:'L',u:'mm',ph:'אורך'},{k:'S',u:'mm',ph:'רוחב'},{k:'S2',u:'mm',ph:'גובה'}]},
+  {id:'tube_round', label:'צינור עגול',              dims:[{k:'L',u:'mm',ph:'אורך'},{k:'D',u:'mm',ph:'⌀ חיצוני'},{k:'d',u:'mm',ph:'⌀ פנימי'}]},
+  {id:'tube_square',label:'צינור מרובע (SHS)',       dims:[{k:'L',u:'mm',ph:'אורך'},{k:'S',u:'mm',ph:'צלע'},{k:'t',u:'mm',ph:'עובי דופן'}]},
+  {id:'tube_rect',  label:'צינור מלבני (RHS)',       dims:[{k:'L',u:'mm',ph:'אורך'},{k:'W',u:'mm',ph:'רוחב חיצוני'},{k:'H',u:'mm',ph:'גובה חיצוני'},{k:'t',u:'mm',ph:'עובי דופן'}]},
+  {id:'angle',      label:'זווית (L)',               dims:[{k:'L',u:'mm',ph:'אורך'},{k:'W',u:'mm',ph:'רגל 1'},{k:'W2',u:'mm',ph:'רגל 2'},{k:'T',u:'mm',ph:'עובי'}]},
+  {id:'profile',    label:'פרופיל (שטח חתך)',        dims:[{k:'L',u:'mm',ph:'אורך'},{k:'A',u:'mm²',ph:'שטח חתך'}]},
 ];
 
 function calcRawMatVolume(form, dims) {
@@ -1626,6 +1611,7 @@ function calcRawMatVolume(form, dims) {
     case 'bar_square':  return m('L')*m('S')*(parseFloat(dims.S2)||parseFloat(dims.S)||0)/1000;
     case 'tube_round':  return Math.PI*(Math.pow(m('D')/2,2)-Math.pow(m('d')/2,2))*m('L');
     case 'tube_square': { const o=Math.pow(m('S'),2), i=Math.pow(Math.max(0,m('S')-2*m('t')),2); return (o-i)*m('L'); }
+    case 'tube_rect':   { const o=m('W')*m('H'), i=Math.max(0,m('W')-2*m('t'))*Math.max(0,m('H')-2*m('t')); return (o-i)*m('L'); }
     case 'angle': {
       const t=m('T'), l1=m('W')*t, l2=(m('W2')||m('W')-t)*t;
       return (l1+l2)*m('L');
@@ -1633,6 +1619,97 @@ function calcRawMatVolume(form, dims) {
     case 'profile':     return ((parseFloat(dims.A)||0)*(parseFloat(dims.L)||0))/1e9;
     default:            return 0;
   }
+}
+
+// ─── Auto-detect material + form + dims from PN / description ─
+function parseRawMatHints(pb, desc) {
+  const src = ((pb||'') + ' ' + (desc||'')).toUpperCase().replace(/,/g,' ');
+  const h = {};
+
+  // ── Family + grade ─────────────────────────────────────
+  if (/\b(6061|7075|5052|2024|ALUM|ALUMIN|DURAL)\b|(\bAL\b)/.test(src)) {
+    h.family = 'aluminum';
+    if      (/6061/.test(src)) h.grade = '6061-T6';
+    else if (/7075/.test(src)) h.grade = '7075-T6';
+    else if (/5052/.test(src)) h.grade = '5052-H32';
+    else if (/2024/.test(src)) h.grade = '2024-T3';
+    else                        h.grade = 'generic';
+  } else if (/\b(304|316|STAINLESS|INOX)\b|(\bSS\b)/.test(src)) {
+    h.family = 'stainless';
+    h.grade  = /316/.test(src) ? '316' : '304';
+  } else if (/\b(STEEL|S235|S275|S355|A36|ST37|ST52|S235JRH|S275JRH|4140|42CRMO|CARBON)\b/.test(src)) {
+    h.family = 'steel';
+    h.grade  = /4140|42CR/.test(src) ? '4140' : 'A36';
+  } else if (/\b(BRASS|BRONZE|CUZN)\b/.test(src)) {
+    h.family = 'brass'; h.grade = 'generic';
+  } else if (/\b(COPPER)\b|\bCU\b/.test(src)) {
+    h.family = 'copper'; h.grade = 'generic';
+  } else if (/\b(POM|DELRIN|ACETAL)\b/.test(src)) {
+    h.family = 'plastic_pom'; h.grade = 'generic';
+  } else if (/\b(ABS)\b/.test(src)) {
+    h.family = 'plastic_abs'; h.grade = 'generic';
+  } else if (/\b(UHMW|HDPE)\b/.test(src)) {
+    h.family = 'plastic_uhmw'; h.grade = 'generic';
+  }
+  if (h.family) {
+    const fd = MATERIAL_DB[h.family];
+    const gr = (fd && fd.grades||[]).find(function(g){return g.id===h.grade;});
+    h.density = gr ? gr.density : (fd ? fd.density : 7850);
+  }
+
+  // ── Extract all numbers (may be dims) ──────────────────
+  // Find pattern NxNxN or NxN from the PN/desc
+  const allDims = src.match(/(\d+(?:\.\d+)?)\s*[Xx×]\s*(\d+(?:\.\d+)?)(?:\s*[Xx×]\s*(\d+(?:\.\d+)?))?/);
+  const d1 = allDims ? parseFloat(allDims[1]) : 0;
+  const d2 = allDims ? parseFloat(allDims[2]) : 0;
+  const d3 = allDims ? parseFloat(allDims[3]) : 0;  // wall or thickness
+
+  // ── Form ───────────────────────────────────────────────
+  // Rectangular tube (TR, RHS, RECT TUBE, RECTANGULAR)
+  if (/\b(TR\b|RHS\b|RECT(ANGULAR)?\s*TUB|TUB\w*\s*RECT|HOLLOW\s*RECT)/.test(src)) {
+    h.form = 'tube_rect';
+    if (d1 && d2 && d3) h.dims = {W:String(d1), H:String(d2), t:String(d3)};
+    else if (d1 && d2)  h.dims = {W:String(Math.max(d1,d2)), H:String(Math.min(d1,d2))};
+  }
+  // Square hollow section (SHS, TSQ, square tube)
+  else if (/\b(SHS\b|TSQ\b|SQUARE\s*TUB|TUB\w*\s*SQ|SQUARE\s*HOLLOW)/.test(src)) {
+    h.form = 'tube_square';
+    if (d1 && d3) h.dims = {S:String(d1), t:String(d3)};
+    else if (d1 && d2 && d1===d2) h.dims = {S:String(d1), t:String(d3||d2)};
+  }
+  // Round tube / pipe (CHS, PIPE, RD TUBE)
+  else if (/\b(PIPE\b|CHS\b|TUBE\b|TUB\b|ROUND\s*TUB|TUB\w*\s*RD|ROUND\s*HOLLOW)/.test(src) && !/RECT|SQ\b|RHS/.test(src)) {
+    h.form = 'tube_round';
+    if (d1 && d2) {
+      const id = Math.max(0, d1 - 2*d2);
+      h.dims = {D:String(d1), d:String(Math.round(id*100)/100)};
+    }
+  }
+  // Round bar / rod
+  else if (/\b(ROD\b|ROUND\s*BAR|BAR\s*ROUND|RD\s*BAR|\bRB\b|\bBR\b)/.test(src)) {
+    h.form = 'bar_round';
+    if (d1) h.dims = {D:String(d1)};
+  }
+  // Flat bar / square bar
+  else if (/\b(FLAT\s*BAR|BAR\s*FLAT|\bFB\b|SQUARE\s*BAR|SQ\s*BAR|BAR\s*SQ|\bBFS\b)/.test(src)) {
+    h.form = 'bar_square';
+    if (d1 && d2) h.dims = {S:String(Math.max(d1,d2)), S2:String(Math.min(d1,d2))};
+    else if (d1)  h.dims = {S:String(d1), S2:String(d1)};
+  }
+  // Sheet / plate
+  else if (/\b(SHEET|PLATE|\bPL\b|\bSH\b|SHIM|CHECKER\s*PLATE)/.test(src)) {
+    h.form = 'sheet';
+    if (d1 && d2 && d3) h.dims = {L:String(Math.max(d1,d2)), W:String(Math.min(d1,d2)), T:String(d3)};
+    else if (d1 && d2)  h.dims = {W:String(Math.max(d1,d2)), T:String(Math.min(d1,d2))};
+  }
+  // Angle
+  else if (/\b(ANGLE\b|L\s*PROFILE|UA\b|EQUAL\s*ANGLE|UNEQUAL\s*ANGLE)/.test(src)) {
+    h.form = 'angle';
+    if (d1 && d2 && d3) h.dims = {W:String(d1), W2:String(d2), T:String(d3)};
+    else if (d1 && d2)  h.dims = {W:String(d1), W2:String(d1), T:String(d2)};
+  }
+
+  return h;
 }
 
 function getRawMatCost(pb) {
@@ -1656,16 +1733,34 @@ function getRawMatCost(pb) {
 // ─── Raw Material Editor ─────────────────────────────────
 function openRawMatEditor(pb, desc, tq) {
   const existing = rawMatData[pb] || {};
+  const isNew = !rawMatData[pb];
   const safePb = pb.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
   let m = document.getElementById('rawMatModal');
   if (!m) { m=document.createElement('div'); m.id='rawMatModal'; m.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:3500;display:none;align-items:center;justify-content:center'; document.body.appendChild(m); }
 
-  const fam = existing.family || 'aluminum';
+  // Auto-detect hints from PN + desc for new items
+  const hints = isNew ? parseRawMatHints(pb, desc) : {};
+  const detectedFields = isNew ? Object.keys(hints).filter(function(k){ return k!=='dims'; }) : [];
+
+  const fam = existing.family || hints.family || 'aluminum';
   const famData = MATERIAL_DB[fam] || MATERIAL_DB.aluminum;
-  const formId  = existing.form || 'sheet';
+  const grade = existing.grade || hints.grade || 'generic';
+  const formId  = existing.form || hints.form || 'sheet';
   const formData = MATERIAL_FORMS.find(function(f){return f.id===formId;})||MATERIAL_FORMS[0];
-  const curDens = existing.density || famData.density;
+  const mergedDims = Object.assign({}, hints.dims||{}, existing.dims||{});
+  const curDens = existing.density || hints.density || famData.density;
   const curCostUnit = existing.costUnit || 'kg';
+
+  // Build detection banner
+  const detectedLabels = [];
+  if (isNew && hints.family) detectedLabels.push('חומר: '+(MATERIAL_DB[hints.family]||{}).label);
+  if (isNew && hints.grade && hints.grade!=='generic') detectedLabels.push('סגסוגת: '+hints.grade);
+  if (isNew && hints.form) detectedLabels.push('צורה: '+(MATERIAL_FORMS.find(function(f){return f.id===hints.form;})||{}).label);
+  if (isNew && hints.dims && Object.keys(hints.dims).length) detectedLabels.push('מידות: '+Object.entries(hints.dims).map(function(e){return e[0]+'='+e[1];}).join(', '));
+  const detectedBanner = detectedLabels.length
+    ? '<div style="background:rgba(56,161,105,.12);border:1px solid rgba(56,161,105,.35);border-radius:5px;padding:6px 10px;font-size:11px;color:#38a169;margin-bottom:10px">'+
+        '🔍 זוהה אוטומטית: '+detectedLabels.join(' · ')+'<br><span style="font-size:10px;opacity:.8">אשר או תקן לפני שמירה</span></div>'
+    : '';
 
   function famOpts() {
     return Object.entries(MATERIAL_DB).map(function(e){
@@ -1674,7 +1769,7 @@ function openRawMatEditor(pb, desc, tq) {
   }
   function gradeOpts(fd) {
     return (fd.grades||[]).map(function(g){
-      return '<option value="'+g.id+'"'+(existing.grade===g.id?' selected':'')+'>'+ g.label+'</option>';
+      return '<option value="'+g.id+'"'+(grade===g.id?' selected':'')+'>'+ g.label+'</option>';
     }).join('');
   }
   function formOpts() {
@@ -1684,10 +1779,12 @@ function openRawMatEditor(pb, desc, tq) {
   }
   function dimFields(fd) {
     return fd.dims.map(function(d){
+      const val = mergedDims[d.k] || '';
+      const isDetected = isNew && hints.dims && hints.dims[d.k];
       return '<div style="display:flex;flex-direction:column;gap:2px">'+
-        '<label style="font-size:10px;color:var(--text2)">'+d.ph+' ('+d.u+')</label>'+
-        '<input class="rm-dim" data-key="'+d.k+'" type="number" min="0" step="0.1" value="'+(existing.dims&&existing.dims[d.k]||'')+'" placeholder="0"'+
-        ' style="width:70px;padding:3px 5px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px"'+
+        '<label style="font-size:10px;color:'+(isDetected?'#38a169':'var(--text2)')+'">'+d.ph+' ('+d.u+')'+(isDetected?' ✓':'')+'</label>'+
+        '<input class="rm-dim" data-key="'+d.k+'" type="number" min="0" step="0.1" value="'+val+'" placeholder="0"'+
+        ' style="width:70px;padding:3px 5px;background:var(--surface2);border:1px solid '+(isDetected?'rgba(56,161,105,.6)':'var(--border)')+';color:var(--text);border-radius:4px;font-size:12px"'+
         ' oninput="rmUpdateCalc()"></div>';
     }).join('');
   }
@@ -1701,6 +1798,7 @@ function openRawMatEditor(pb, desc, tq) {
         '<button onclick="document.getElementById(\'rawMatModal\').style.display=\'none\'" style="padding:4px 10px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;cursor:pointer">✕</button>'+
       '</div>'+
       '<div style="overflow:auto;flex:1;padding:14px;display:flex;flex-direction:column;gap:12px">'+
+        detectedBanner+
         // Family + grade
         '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">'+
           '<div><label style="font-size:11px;font-weight:600;color:var(--text2);display:block;margin-bottom:4px">משפחת חומר</label>'+
@@ -1937,15 +2035,16 @@ function saveAIPrice(pb) {
 
 // ─── Raw Materials Excel Export ───────────────────────────
 async function exportRawMaterials() {
+  // Use aggregated buyData (totalQty = sum across all BOM occurrences)
+  buildBuyData();
   const items = [];
-  BOM.forEach(function(item, idx) {
-    if (item.type !== 'Buy') return;
-    const pb = item.pb || item.pn;
+  buyData.forEach(function(item) {
+    const pb = item.pb;
     const rm = rawMatData[pb];
     if (!rm) return;
-    const famData = MATERIAL_DB[rm.family]||{label:rm.family};
+    const famData = MATERIAL_DB[rm.family]||{label:rm.family||pb};
     const res = getRawMatCost(pb);
-    const tq = item.tq || item.qty || 1;
+    const tq = item.totalQty || 1;
     items.push({
       pb, desc: item.desc, family: famData.label, grade: rm.grade||'',
       form: (MATERIAL_FORMS.find(function(f){return f.id===rm.form;})||{}).label||rm.form,
@@ -2728,6 +2827,8 @@ async function load3D(stpPath, container){
 try {
   const savedW = JSON.parse(localStorage.getItem(COL_WIDTHS_KEY));
   if (Array.isArray(savedW) && savedW.length === COLS.length) colWidths = savedW;
+  // Enforce minimum width for proc column (index 0)
+  if (colWidths[0] < 55) colWidths[0] = 55;
 } catch(e) {}
 buildHeader();
 buildTable();
@@ -2776,6 +2877,8 @@ updateStats();
           <col style="width:95px">
           <col style="width:40px">
           <col style="width:54px">
+          <col style="width:80px">
+          <col style="width:76px">
         </colgroup>
         <thead>
           <tr>
@@ -2790,6 +2893,8 @@ updateStats();
             <th onclick="sortBuy('costILS')" style="text-align:right;color:var(--accent2)">עלות ₪ <span class="sico">↕</span></th>
             <th style="text-align:center;cursor:default">Src</th>
             <th style="text-align:center;cursor:default">Details</th>
+            <th onclick="sortBuy('mass')" style="text-align:right;color:#68d391;cursor:pointer">⚖ ק"ג <span class="sico">↕</span></th>
+            <th style="text-align:center;cursor:default">פעולות</th>
           </tr>
         </thead>
         <tbody id="buyBody"></tbody>
@@ -3132,6 +3237,11 @@ function getSortedBuyData() {
       const ea = getPriceEntry(a.pb), eb = getPriceEntry(b.pb);
       va = ea ? toILS(ea.p * a.totalQty, ea.currency || 'USD') : -1;
       vb = eb ? toILS(eb.p * b.totalQty, eb.currency || 'USD') : -1;
+    } else if (col === 'mass') {
+      const ra = rawMatData[a.pb] ? getRawMatCost(a.pb) : null;
+      const rb = rawMatData[b.pb] ? getRawMatCost(b.pb) : null;
+      va = ra ? ra.mass * a.totalQty : -1;
+      vb = rb ? rb.mass * b.totalQty : -1;
     } else {
       va = a[col] ?? ''; vb = b[col] ?? '';
     }
@@ -3147,6 +3257,7 @@ function renderBuyTable(data) {
   tbody.innerHTML = '';
 
   let grandTotalILS = 0;
+  let grandTotalMassKg = 0;
   let pricedCount = 0;
 
   data.forEach(item => {
@@ -3286,6 +3397,42 @@ function renderBuyTable(data) {
     tdNotes.appendChild(detBtn);
     tr.appendChild(tdNotes);
 
+    // ── Weight cell (only for raw material items) ──────────
+    const tdWt = document.createElement('td');
+    tdWt.style.cssText = 'text-align:right;font-size:11px';
+    const rmRes = rawMatData[item.pb] ? getRawMatCost(item.pb) : null;
+    if (rmRes && rmRes.mass > 0) {
+      const totalMassKg = rmRes.mass * item.totalQty;
+      const unitMassG   = rmRes.mass * 1000;
+      tdWt.innerHTML =
+        '<span title="'+unitMassG.toFixed(1)+' ג׳/יח" style="color:#68d391;font-weight:600">' +
+        (totalMassKg >= 1 ? totalMassKg.toFixed(2) + ' kg' : (totalMassKg*1000).toFixed(0) + ' g') +
+        '</span><br><span style="font-size:10px;color:var(--text3)">' + unitMassG.toFixed(1) + ' g/יח</span>';
+      grandTotalMassKg += totalMassKg;
+    }
+    tr.appendChild(tdWt);
+
+    // ── Actions cell (🤖 AI price search + 🧱 raw material) ─
+    const tdAct = document.createElement('td');
+    tdAct.style.cssText = 'text-align:center;white-space:nowrap;padding:2px 4px';
+    const aiBtnB = document.createElement('button');
+    aiBtnB.className = 'proc-btn';
+    aiBtnB.title = 'חיפוש מחיר ב-AI';
+    aiBtnB.textContent = '🤖';
+    aiBtnB.style.cssText = 'font-size:11px;margin-left:2px';
+    aiBtnB.addEventListener('click', () => openAIPriceSearch(item.pb, item.desc, item.cat||''));
+    const rmBtnB = document.createElement('button');
+    rmBtnB.className = 'proc-btn' + (rawMatData[item.pb] ? ' proc-has' : '');
+    rmBtnB.title = rawMatData[item.pb] ? 'חומר גלם מוגדר — לחץ לעריכה' : 'הגדר כחומר גלם';
+    rmBtnB.textContent = '🧱';
+    rmBtnB.style.cssText = 'font-size:11px;margin-left:2px';
+    rmBtnB.addEventListener('click', () => {
+      openRawMatEditor(item.pb, item.desc, item.totalQty);
+    });
+    tdAct.appendChild(aiBtnB);
+    tdAct.appendChild(rmBtnB);
+    tr.appendChild(tdAct);
+
     tbody.appendChild(tr);
   });
 
@@ -3298,6 +3445,8 @@ function renderBuyTable(data) {
     '<td></td>' +
     '<td></td>' +
     '<td style="text-align:right;font-family:monospace;font-weight:700;color:var(--accent2);font-size:14px">' + fmtC(grandTotalILS) + '</td>' +
+    '<td></td>' +
+    '<td style="text-align:right;font-family:monospace;font-weight:700;color:#68d391;font-size:13px">' + (grandTotalMassKg > 0 ? grandTotalMassKg.toFixed(1) + ' kg' : '') + '</td>' +
     '<td></td>';
   tfoot.appendChild(tftr);
 }
