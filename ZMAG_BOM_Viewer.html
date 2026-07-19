@@ -547,7 +547,7 @@ function currencySym(currency) {
   if (currency === 'EUR') return '€';
   return '$';
 }
-const BUILD_VER = 'v20260719.1700';
+const BUILD_VER = 'v20260719.1800';
 let rows = [];
 let selIdx = -1;
 let curSort = {col:null,asc:true};
@@ -1941,22 +1941,38 @@ const IL_SUPPLIERS = [
   {name:'ברמיל',         domain:'barmil.co.il'},
 ];
 
-// Extract a meaningful search term from desc/cat — never use internal PN
+// Extract a meaningful search term — use technical designation when available
 function _extractSearchTerm(pb, desc, cat) {
-  // If cat looks like a standard catalog number (ISO/DIN/M-thread/ASTM etc.), use it
-  if (cat && cat.trim() && /^(ISO|DIN|EN |ASTM|GB|BS |M\d|[A-Z]{2,6}\d{2,})/i.test(cat.trim())) {
-    return cat.trim().slice(0, 50);
+  const pbT = (pb || '').trim();
+  const catT = (cat || '').trim();
+
+  // Case 1: pb IS a standard technical designation (ISO/DIN/EN/ASTM + specs)
+  // e.g. "ISO10642-M6X25-10.9-A5D", "DIN934-M8-8", "M6X25"
+  if (/^(ISO|DIN|EN|ASTM|GB|BS|NF|JIS|UNI)\d/i.test(pbT) || /^M\d+[Xx×\-]/i.test(pbT)) {
+    return pbT.slice(0, 70);
   }
-  // Use description: replace commas → spaces, keep technical tokens, skip generic words
-  if (desc && desc.trim()) {
-    return desc
-      .replace(/,/g, ' ')
-      .replace(/\b(STANDARD|COMMERCIAL|GENERIC|ASSEMBLY|PART|ITEM|COMPONENT|NON-LOCKIN|CO\b)\b/gi, '')
-      .replace(/\s{2,}/g, ' ')
-      .trim()
-      .slice(0, 60);
+
+  // Case 2: pb looks like a raw material spec (contains grade + dims, not pure sequential)
+  // e.g. "TR S235JRH 100X50X3.5MM" — has useful technical info
+  if (/[Xx×]\d/.test(pbT) && !/^\d+[\.\-]\d+[\.\-]\d+/.test(pbT)) {
+    return pbT.slice(0, 60);
   }
-  return pb;
+
+  // Case 3: pb is internal sequential number → use description
+  // e.g. "14020.080.001", "6910M280-001/C", "400224323"
+  // Clean description: commas→spaces, strip filler words
+  const cleanDesc = (desc || '')
+    .replace(/,/g, ' ')
+    .replace(/\b(STANDARD|COMMERCIAL|GENERIC|ASSEMBLY|PART|ITEM|COMPONENT|NON-LOCKIN|LOCKIN|CO\b)\b/gi, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+
+  // Prepend cat if it adds technical info (e.g. "ISO10642" without the full spec)
+  if (catT && /^(ISO|DIN|EN|ASTM|M\d)/i.test(catT) && !cleanDesc.toLowerCase().includes(catT.toLowerCase().slice(0,4))) {
+    return (catT + ' ' + cleanDesc).slice(0, 70);
+  }
+
+  return cleanDesc.slice(0, 70) || pbT;
 }
 
 function _buildSupplierLinks(pb, desc, cat) {
