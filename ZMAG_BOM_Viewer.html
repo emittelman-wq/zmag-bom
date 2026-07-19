@@ -547,7 +547,7 @@ function currencySym(currency) {
   if (currency === 'EUR') return '€';
   return '$';
 }
-const BUILD_VER = 'v20260719.2100';
+const BUILD_VER = 'v20260719.2200';
 let rows = [];
 let selIdx = -1;
 let curSort = {col:null,asc:true};
@@ -793,8 +793,9 @@ function getItemUnitCost(item) {
   if (item.type === 'Buy') {
     const pb = item.pb || item.pn;
     // Raw material cost takes priority over price DB
+    // Normalise to BOM unit (M→per meter, M2→per m², AR/EA→per piece)
     if (rawMatData[pb]) {
-      const rm = getRawMatCost(pb);
+      const rm = getRawMatCostPerUnit(pb, item.uom || '');
       return rm ? rm.cost : 0;
     }
     const e = getPriceEntry(pb);
@@ -1730,6 +1731,38 @@ function getRawMatCost(pb) {
   return {cost, mass, vol};
 }
 
+// getRawMatCost normalised to the BOM UOM so that cost×tq and mass×tq are correct:
+//   'M'  → cost & mass per METER   (overrides dims.L → 1000 mm)
+//   'M2' → cost & mass per M²      (overrides dims.L=1000, dims.W=1000 mm)
+//   'AR' / 'EA' / other → as-is   (per the stored dims — one piece / one blank)
+function getRawMatCostPerUnit(pb, uom) {
+  const rm = rawMatData[pb];
+  if (!rm) return null;
+  const dens = parseFloat(rm.density) || (MATERIAL_DB[rm.family]||{}).density || 1000;
+  const uc   = parseFloat(rm.unitCost) || 0;
+
+  if (uom === 'M') {
+    // Normalise to 1 m reference — ignore whatever the user stored in dims.L
+    const nd  = Object.assign({}, rm.dims||{}, {L:'1000'});
+    const vol  = calcRawMatVolume(rm.form||'bar_round', nd);   // m³ for 1 m
+    const mass = vol * dens;                                   // kg/m
+    const cost = (rm.costUnit === 'm') ? uc : mass * uc;       // ₪/m
+    return {cost, mass, vol};
+  }
+
+  if (uom === 'M2') {
+    // Normalise to 1 m² reference
+    const nd  = Object.assign({}, rm.dims||{}, {L:'1000', W:'1000'});
+    const vol  = calcRawMatVolume('sheet', nd);                // m³ for 1 m²
+    const mass = vol * dens;                                   // kg/m²
+    const cost = (rm.costUnit === 'm2') ? uc : mass * uc;      // ₪/m²
+    return {cost, mass, vol};
+  }
+
+  // AR, EA, PAC, FT, etc. — use dims as stored
+  return getRawMatCost(pb);
+}
+
 // ─── AR (As Required) estimation helpers ─────────────────────────────────────
 function isARUnit(uom) {
   return /^a[\/\\]?r$/i.test((uom||'').trim());
@@ -1778,16 +1811,28 @@ function getBBoxFromMeshData(meshData) {
 }
 
 // Estimate required raw material dims (mm) from part bbox + form (+10% margin)
+// For SHEET: bbox gives [long, mid, depth].
+//   Flat blank = (long + 2×depth) × (mid + 2×depth) — accounts for folded flanges.
+//   If depth < ~5mm (thin flat plate, no bends) the term is negligible anyway.
 function estimateARDims(form, bbox) {
   if(!bbox) return null;
   const s=[bbox.dx,bbox.dy,bbox.dz].sort(function(a,b){return b-a;});
-  const long=s[0], mid=s[1];
+  const long=s[0], mid=s[1], depth=s[2];
   const M=1.10; // cutting margin
+
   if(form==='sheet'){
-    const L=Math.ceil(long*M), W=Math.ceil(mid*M);
-    return {L, W, unit:'M²',
-      note:long.toFixed(0)+'×'+mid.toFixed(0)+' +10% → '+L+'×'+W+' mm = '+((L/1000)*(W/1000)).toFixed(4)+' M²'};
+    // flat blank: add fold depth to each plan dimension (both sides)
+    const Lraw = long + 2*depth;
+    const Wraw = mid  + 2*depth;
+    const L=Math.ceil(Lraw*M), W=Math.ceil(Wraw*M);
+    const note =
+      long.toFixed(0)+'+'+'2×'+depth.toFixed(0)+'='+Lraw.toFixed(0)+
+      ' × '+
+      mid.toFixed(0)+'+'+'2×'+depth.toFixed(0)+'='+Wraw.toFixed(0)+
+      ' +10% → '+L+'×'+W+' mm = '+((L/1000)*(W/1000)).toFixed(4)+' M²';
+    return {L, W, unit:'M²', note};
   }
+  // Linear forms: longest bbox dimension (the profile runs along it)
   const L=Math.ceil(long*M);
   return {L, unit:'M', note:long.toFixed(0)+' mm +10% → '+L+' mm = '+(L/1000).toFixed(3)+' M'};
 }
@@ -3776,17 +3821,19 @@ function renderBuyTable(data) {
     tdNotes.appendChild(detBtn);
     tr.appendChild(tdNotes);
 
-    // ── Weight cell (only for raw material items) ──────────
+    // ── Weight cell — normalised per BOM unit (M→kg/m, M2→kg/m², AR/EA→kg/יח) ──
     const tdWt = document.createElement('td');
     tdWt.style.cssText = 'text-align:right;font-size:11px';
-    const rmRes = rawMatData[item.pb] ? getRawMatCost(item.pb) : null;
+    const _rmUom = item.uom || '';
+    const rmRes  = rawMatData[item.pb] ? getRawMatCostPerUnit(item.pb, _rmUom) : null;
     if (rmRes && rmRes.mass > 0) {
       const totalMassKg = rmRes.mass * item.totalQty;
-      const unitMassG   = rmRes.mass * 1000;
+      const perLabel = _rmUom === 'M' ? 'kg/m' : _rmUom === 'M2' ? 'kg/m²' : 'kg/יח';
       tdWt.innerHTML =
-        '<span title="'+unitMassG.toFixed(1)+' ג׳/יח" style="color:#68d391;font-weight:600">' +
+        '<span style="color:#68d391;font-weight:600">' +
         (totalMassKg >= 1 ? totalMassKg.toFixed(2) + ' kg' : (totalMassKg*1000).toFixed(0) + ' g') +
-        '</span><br><span style="font-size:10px;color:var(--text3)">' + unitMassG.toFixed(1) + ' g/יח</span>';
+        '</span><br><span style="font-size:10px;color:var(--text3)">' +
+        rmRes.mass.toFixed(3) + ' ' + perLabel + '</span>';
       grandTotalMassKg += totalMassKg;
     }
     tr.appendChild(tdWt);
