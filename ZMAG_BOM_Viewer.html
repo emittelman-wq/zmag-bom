@@ -547,7 +547,7 @@ function currencySym(currency) {
   if (currency === 'EUR') return '€';
   return '$';
 }
-const BUILD_VER = 'v20260719.1500';
+const BUILD_VER = 'v20260719.1600';
 let rows = [];
 let selIdx = -1;
 let curSort = {col:null,asc:true};
@@ -2028,17 +2028,17 @@ async function runAIPriceSearch(pb, desc, cat) {
   // Prompt: Israeli suppliers first, search URLs only (never direct product pages)
   const ilSupplierNames = IL_SUPPLIERS.map(function(s){return s.name;}).join(', ');
   const prompt =
-    'אתה מהנדס רכש ישראלי. הצע מחירי ייחוס לפריט. עדיפות מוחלטת לספקים ישראלים.\n'+
-    'ספקים ישראלים ידועים (השתמש רק בהם, לא תמציא שמות אחרים): '+ilSupplierNames+'.\n'+
-    'ספקי חוץ (רק אם אין מקור ישראלי): McMaster-Carr, Aliexpress, TME.\n\n'+
-    'כלל קריטי: אל תמציא URL מוצר — השאר את שדה searchUrl ריק (null) אם לא בטוח.\n'+
-    'ענה JSON בלבד, 2-4 ספקים (ישראלים קודם), מחיר ביחידה בודדת:\n'+
-    '[{"supplier":"שם מדויק","price":0.00,"currency":"ILS","searchUrl":null,"note":"הסבר קצר: סוג, תקן, הערה"}]\n\n'+
-    'פריט: PN='+pb+', תיאור='+desc+(cat?', קטלוג='+cat:'')+'\n'+
-    'אם קשיחים/ברגים/אמים — העדף: ברסיס, גלבורג, אום ובורגג, ברמיל.\n'+
-    'אם מיסבים — העדף: בית המיסב.\n'+
-    'אם חומר גלם — העדף: ברמיל, 4project, סקופ.\n'+
-    'אם פריק/כלים — העדף: טלמיר, מיברג, TSC.';
+    'אתה מסייע לרכש הנדסי. כלל ברזל: אל תמציא מחיר. אל תעריך. אל תשער.\n'+
+    'החזר תוצאה רק אם יש לך ידע ממשי ואמין על מחיר אמיתי של הפריט הזה.\n'+
+    'אם אין לך מחיר ממשי ממקור ידוע — החזר מערך ריק: []\n\n'+
+    'אם יש לך מחיר ממשי, ציין:\n'+
+    '- שם הספק (רק מהרשימה: '+ilSupplierNames+', McMaster-Carr, Aliexpress, TME)\n'+
+    '- המחיר המדויק שאתה יודע\n'+
+    '- note: מקור הידע (ידוע מקטלוג / אתר / תקן)\n'+
+    '- searchUrl: null תמיד (אל תמציא URL)\n\n'+
+    'פורמט JSON בלבד:\n'+
+    '[{"supplier":"שם","price":0.00,"currency":"ILS","searchUrl":null,"note":"מקור הידע"}]\n\n'+
+    'פריט: PN='+pb+', תיאור='+desc+(cat?', קטלוג='+cat:'');
 
   try {
     const resp = await fetch('https://api.anthropic.com/v1/messages', {
@@ -2051,23 +2051,30 @@ async function runAIPriceSearch(pb, desc, cat) {
     const text = data.content&&data.content[0]?data.content[0].text:'';
     const jm = text.match(/\[[\s\S]*\]/);
     if (!jm) throw new Error('תשובה לא תקינה');
-    const results = JSON.parse(jm[0]);
-    const isIL = function(s){ return /מגה|סרקו|RS ישר|kasel|כלי ברזל/.test(s.supplier||''); };
+    const results = JSON.parse(jm[0]).filter(function(r){ return r.price && r.price > 0; });
+    const ilNames = IL_SUPPLIERS.map(function(s){return s.name;});
+    const isIL = function(r){ return ilNames.some(function(n){ return (r.supplier||'').includes(n); }); };
+    if (!results.length) {
+      resEl.innerHTML =
+        '<div style="background:rgba(237,137,54,.08);border:1px solid rgba(237,137,54,.3);border-radius:5px;padding:10px 12px;font-size:12px;color:var(--text2)">'+
+        '📭 אין מידע מחיר אמין לפריט זה.<br>'+
+        '<span style="font-size:11px;color:var(--text3)">השתמש בקישורי החיפוש מעל לבדיקה ישירה מול הספקים, ואז הזן מחיר ידנית.</span>'+
+        '</div>';
+      return;
+    }
     resEl.innerHTML =
-      '<div style="font-size:10px;color:var(--text3);margin-bottom:6px">⚠ קישורים = דפי חיפוש (ולא עמוד מוצר ישיר) — מחיר הוא הערכה, אמת מול האתר</div>'+
+      '<div style="font-size:10px;color:var(--text3);margin-bottom:6px">מחירים ממקורות ידועים — אמת מול הספק לפני שמירה. לחץ על כרטיס להעתקה.</div>'+
       results.map(function(r){
-        const searchUrl = r.searchUrl || r.url || '';
-        const ilBadge = isIL(r) ? '<span style="font-size:9px;background:rgba(56,161,105,.2);color:#68d391;border-radius:3px;padding:1px 4px;margin-right:4px">🇮🇱 ישראל</span>' : '';
-        return '<div style="border:1px solid var(--border);border-radius:5px;padding:8px 10px;margin-bottom:6px;background:var(--surface2);cursor:pointer;'+(isIL(r)?'border-color:rgba(56,161,105,.4)':'')+'" '+
-          'onclick="applyAIPrice('+r.price+',\''+r.currency+'\',\''+encodeURIComponent(searchUrl)+'\')">'+
+        const il = isIL(r);
+        const sym = r.currency==='ILS'?'₪':r.currency==='USD'?'$':'€';
+        const ilBadge = il ? '<span style="font-size:9px;background:rgba(56,161,105,.2);color:#68d391;border-radius:3px;padding:1px 4px;margin-left:4px">🇮🇱</span>' : '';
+        return '<div style="border:1px solid '+(il?'rgba(56,161,105,.4)':'var(--border)')+';border-radius:5px;padding:8px 10px;margin-bottom:6px;background:var(--surface2);cursor:pointer" '+
+          'onclick="applyAIPrice('+r.price+',\''+r.currency+'\',\'\')">'+
           '<div style="display:flex;align-items:center;justify-content:space-between">'+
-            '<span style="font-weight:600;font-size:12px">'+ilBadge+r.supplier+'</span>'+
-            (searchUrl?'<a href="'+searchUrl+'" target="_blank" style="color:var(--accent);font-size:11px;white-space:nowrap" onclick="event.stopPropagation()">🔍 חפש באתר</a>':'')+
+            '<span style="font-weight:600;font-size:12px">'+r.supplier+ilBadge+'</span>'+
+            '<span style="font-size:13px;font-weight:700;color:var(--accent2)">'+sym+r.price+'</span>'+
           '</div>'+
-          '<div style="font-size:13px;font-weight:700;color:var(--accent2);margin:2px 0">'+
-            (r.currency==='ILS'?'₪':r.currency==='USD'?'$':'€')+r.price+
-          '</div>'+
-          (r.note?'<div style="font-size:11px;color:var(--text3)">'+r.note+'</div>':'')+
+          (r.note?'<div style="font-size:11px;color:var(--text3);margin-top:2px">'+r.note+'</div>':'')+
         '</div>';
       }).join('');
   } catch(e) {
