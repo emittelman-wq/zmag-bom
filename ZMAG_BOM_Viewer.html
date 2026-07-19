@@ -547,7 +547,7 @@ function currencySym(currency) {
   if (currency === 'EUR') return '€';
   return '$';
 }
-const BUILD_VER = 'v20260719.1900';
+const BUILD_VER = 'v20260719.2000';
 let rows = [];
 let selIdx = -1;
 let curSort = {col:null,asc:true};
@@ -1941,8 +1941,53 @@ const IL_SUPPLIERS = [
   {name:'ברמיל',         domain:'barmil.co.il'},
 ];
 
+// ── Standard equivalents (ISO ↔ DIN) ──────────────────────────────────────────
+const STD_EQUIV = {
+  'ISO10642':'DIN7991',  'DIN7991':'ISO10642',  // countersunk hex socket
+  'ISO4762' :'DIN912',   'DIN912' :'ISO4762',   // hex socket cap screw
+  'ISO4014' :'DIN931',   'DIN931' :'ISO4014',   // hex bolt partial thread
+  'ISO4017' :'DIN933',   'DIN933' :'ISO4017',   // hex bolt full thread
+  'ISO4032' :'DIN934',   'DIN934' :'ISO4032',   // hex nut
+  'ISO7380' :'DIN7380',  'DIN7380':'ISO7380',   // button head
+  'ISO7089' :'DIN125',   'DIN125' :'ISO7089',   // flat washer
+  'ISO7090' :'DIN125A',                          // flat washer chamfered
+  'ISO7092' :'DIN433',   'DIN433' :'ISO7092',   // small washer
+  'ISO7093' :'DIN9021',  'DIN9021':'ISO7093',   // large washer
+  'ISO4026' :'DIN913',   'DIN913' :'ISO4026',   // grub flat tip
+  'ISO4027' :'DIN914',   'DIN914' :'ISO4027',   // grub cone tip
+  'ISO4028' :'DIN915',   'DIN915' :'ISO4028',   // grub dog tip
+  'ISO4029' :'DIN916',   'DIN916' :'ISO4029',   // grub cup tip
+  'ISO7045' :'DIN7985',  'DIN7985':'ISO7045',   // pan head cross
+  'ISO1207' :'DIN84',    'DIN84'  :'ISO1207',   // slotted cheese head
+  'ISO4026' :'DIN913',
+  'ISO10644':'DIN6912',  'DIN6912':'ISO10644',  // low head cap screw
+  'ISO4161' :'DIN6923',  'DIN6923':'ISO4161',   // flange nut
+  'ISO6922' :'DIN7991',  // (rare alias)
+};
+// A2=304, A4=316, A5=316 high-Mo (ISO 3506 material codes)
+const MAT_GRADE_EXPAND = {'A2':'304','A4':'316','A5':'316'};
+
+// Append SS grade after A2/A4/A5 so Google finds it
+function _expandMatGrade(term) {
+  return term.replace(/\b(A[245])\b/gi, function(m) {
+    const g = MAT_GRADE_EXPAND[m.toUpperCase()];
+    return g ? m + ' ' + g : m;
+  });
+}
+
+// Return equivalent standard designation (same size/grade, different org)
+// e.g. "ISO10642 M6X25 10.9 A5" → "DIN7991 M6X25 10.9 A5"
+function _getStdEquiv(simplifiedTerm) {
+  const m = simplifiedTerm.match(/^([A-Z]+\d+)/i);
+  if (!m) return '';
+  const stdNum = m[1].toUpperCase();
+  const eq = STD_EQUIV[stdNum];
+  if (!eq) return '';
+  return eq + simplifiedTerm.slice(stdNum.length);  // swap prefix, keep rest
+}
+
 // Simplify ISO/DIN designation for Google: keep standard + size, drop surface codes
-// ISO10642-M6X25-10.9-A5D → "ISO10642 M6X25 10.9"
+// ISO10642-M6X25-10.9-A5D → "ISO10642 M6X25 10.9 A5"
 function _simplifyStd(term) {
   if (!/^(ISO|DIN|EN|ASTM|GB|BS|NF|JIS|UNI)\d/i.test(term)) return term;
   const parts = term.split(/[-\s]+/);
@@ -1993,15 +2038,24 @@ function _extractSearchTerm(pb, desc, cat) {
 
 function _buildSupplierLinks(pb, desc, cat) {
   const fullTerm  = _extractSearchTerm(pb, desc, cat);
-  const simpTerm  = _simplifyStd(fullTerm);   // simpler for site: searches
+  const simpTerm  = _expandMatGrade(_simplifyStd(fullTerm));  // ISO10642 M6X25 10.9 A5 316
+  const equivTerm = _getStdEquiv(simpTerm);                   // DIN7991 M6X25 10.9 A5 316 (or '')
+
   const tFull  = encodeURIComponent(fullTerm);
   const tSimp  = encodeURIComponent(simpTerm);
+  const tEquiv = equivTerm ? encodeURIComponent(equivTerm) : '';
+  const tPrice = encodeURIComponent(simpTerm + ' price');     // with PRICE suffix
 
   const links = [];
 
   // ── Tier 1: Israeli ─────────────────────────────────────
   links.push({group:'🇮🇱 ישראל', label:'גוגל ישראל', il:true,
-    href:'https://www.google.com/search?q='+tSimp+'+site%3Aco.il'});
+    href:'https://www.google.com/search?q='+tPrice+'+site%3Aco.il'});
+  // Equivalent standard — Google IL
+  if (equivTerm) {
+    links.push({group:null, label:'גוגל ישראל ('+equivTerm.split(' ')[0]+')', il:true,
+      href:'https://www.google.com/search?q='+encodeURIComponent(equivTerm+' price')+'+site%3Aco.il'});
+  }
   IL_SUPPLIERS.forEach(function(s){
     links.push({group:null, label:'🇮🇱 '+s.name, il:true,
       href:'https://www.google.com/search?q='+tSimp+'+site%3A'+encodeURIComponent(s.domain)});
@@ -2010,6 +2064,10 @@ function _buildSupplierLinks(pb, desc, cat) {
   // ── Tier 2: International fallback ──────────────────────
   links.push({group:'🌍 חו"ל (אם לא נמצא בישראל)', label:'RS Components', il:false,
     href:'https://il.rs-online.com/web/c/?searchTerm='+tFull});
+  if (equivTerm) {
+    links.push({group:null, label:'RS ('+equivTerm.split(' ')[0]+')', il:false,
+      href:'https://il.rs-online.com/web/c/?searchTerm='+tEquiv});
+  }
   links.push({group:null, label:'TME (EU)', il:false,
     href:'https://www.tme.eu/il/en/katalog/?search='+tFull});
   links.push({group:null, label:'McMaster', il:false,
@@ -2017,7 +2075,7 @@ function _buildSupplierLinks(pb, desc, cat) {
   links.push({group:null, label:'Aliexpress', il:false,
     href:'https://www.aliexpress.com/wholesale?SearchText='+tFull});
   links.push({group:null, label:'גוגל כללי', il:false,
-    href:'https://www.google.com/search?q='+tFull+'+buy+price'});
+    href:'https://www.google.com/search?q='+tPrice+'+buy'});
 
   return links;
 }
@@ -2029,7 +2087,10 @@ function openAIPriceSearch(pb, desc, cat) {
   if (!m) { m=document.createElement('div'); m.id='aiPriceModal'; m.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:3500;display:none;align-items:center;justify-content:center'; document.body.appendChild(m); }
   const apiKey = localStorage.getItem(ANOM_API_KEY)||'';
 
-  const searchTerm = _extractSearchTerm(pb, desc, cat);
+  const _rawST   = _extractSearchTerm(pb, desc, cat);
+  const _simpST  = _expandMatGrade(_simplifyStd(_rawST));
+  const _equivST = _getStdEquiv(_simpST);
+  const searchTerm = _simpST + (_equivST ? ' / '+_equivST : '');  // displayed in header
   const links = _buildSupplierLinks(pb, desc, cat);
   // Build two-tier links HTML: Israeli tier first, then international
   const ilLinks  = links.filter(function(l){ return l.il; });
@@ -2100,8 +2161,12 @@ async function runAIPriceSearch(pb, desc, cat) {
   const resEl = document.getElementById('aiPriceResult');
   resEl.innerHTML = '<span class="anom-ai-spinner">⟳</span> מחפש מחיר…';
 
-  // Prompt: Israeli suppliers first, search URLs only (never direct product pages)
-  const searchTerm2 = _extractSearchTerm(pb, desc, cat);
+  // Build enriched search term: simplified + material grade expansion + equivalent standard
+  const rawTerm    = _extractSearchTerm(pb, desc, cat);
+  const simpTerm   = _expandMatGrade(_simplifyStd(rawTerm)); // ISO10642 M6X25 10.9 A5 316
+  const equivTerm  = _getStdEquiv(simpTerm);                 // DIN7991 M6X25 10.9 A5 316
+  const searchTerm2 = simpTerm + (equivTerm ? ' / '+equivTerm : '');
+
   const ilSupplierNames = IL_SUPPLIERS.map(function(s){return s.name;}).join(', ');
   const prompt =
     'אתה מסייע לרכש הנדסי. כלל ברזל: אל תמציא מחיר. אל תעריך. אל תשער.\n'+
@@ -2112,6 +2177,7 @@ async function runAIPriceSearch(pb, desc, cat) {
     'פורמט JSON בלבד:\n'+
     '[{"supplier":"שם","price":0.00,"currency":"ILS","searchUrl":null,"note":"מקור הידע"}]\n\n'+
     'מה מחפשים: '+searchTerm2+'\n'+
+    (equivTerm ? '(תקן מקביל: '+simpTerm.split(' ')[0]+' = '+equivTerm.split(' ')[0]+' — חפש שניהם)\n' : '')+
     '(מק"ט פנימי '+pb+' — לא רלוונטי לחיפוש, אל תשתמש בו)';
 
   try {
