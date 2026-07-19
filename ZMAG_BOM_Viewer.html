@@ -547,7 +547,7 @@ function currencySym(currency) {
   if (currency === 'EUR') return '€';
   return '$';
 }
-const BUILD_VER = 'v20260719.2000';
+const BUILD_VER = 'v20260719.2100';
 let rows = [];
 let selIdx = -1;
 let curSort = {col:null,asc:true};
@@ -1730,6 +1730,68 @@ function getRawMatCost(pb) {
   return {cost, mass, vol};
 }
 
+// ─── AR (As Required) estimation helpers ─────────────────────────────────────
+function isARUnit(uom) {
+  return /^a[\/\\]?r$/i.test((uom||'').trim());
+}
+
+// Find UOM and parent STEP files from BOM for a given PB
+function getBOMInfoForPb(pb) {
+  const pbLower = (pb||'').toLowerCase();
+  const uomSet = new Set();
+  const parentSteps = [];
+  const seenStp = new Set();
+  for (let i = 0; i < BOM.length; i++) {
+    const it = BOM[i];
+    if (((it.pb||it.pn||'')).toLowerCase() !== pbLower) continue;
+    if (it.uom) uomSet.add(it.uom);
+    // Find parent: first preceding row with lower level
+    for (let j = i - 1; j >= 0; j--) {
+      if (BOM[j].lv < it.lv) {
+        (BOM[j].cads||[]).forEach(function(c){
+          if (/\.stp$|\.step$/i.test(c) && !seenStp.has(c)) {
+            seenStp.add(c);
+            parentSteps.push({parentDesc:(BOM[j].desc||BOM[j].pn||'').slice(0,40), stpPath:c});
+          }
+        });
+        break;
+      }
+    }
+  }
+  const uoms = [...uomSet];
+  return { uom:uoms[0]||'', isAR:uoms.some(isARUnit), parentSteps };
+}
+
+// Bounding box from parsed mesh vertex positions (from _geomCache)
+function getBBoxFromMeshData(meshData) {
+  let x0=Infinity,y0=Infinity,z0=Infinity,x1=-Infinity,y1=-Infinity,z1=-Infinity;
+  for (let mi=0;mi<meshData.length;mi++){
+    const p=meshData[mi].pos;
+    for (let i=0;i<p.length;i+=3){
+      if(p[i]<x0)x0=p[i]; if(p[i]>x1)x1=p[i];
+      if(p[i+1]<y0)y0=p[i+1]; if(p[i+1]>y1)y1=p[i+1];
+      if(p[i+2]<z0)z0=p[i+2]; if(p[i+2]>z1)z1=p[i+2];
+    }
+  }
+  if(x0===Infinity) return null;
+  return {dx:x1-x0, dy:y1-y0, dz:z1-z0};
+}
+
+// Estimate required raw material dims (mm) from part bbox + form (+10% margin)
+function estimateARDims(form, bbox) {
+  if(!bbox) return null;
+  const s=[bbox.dx,bbox.dy,bbox.dz].sort(function(a,b){return b-a;});
+  const long=s[0], mid=s[1];
+  const M=1.10; // cutting margin
+  if(form==='sheet'){
+    const L=Math.ceil(long*M), W=Math.ceil(mid*M);
+    return {L, W, unit:'M²',
+      note:long.toFixed(0)+'×'+mid.toFixed(0)+' +10% → '+L+'×'+W+' mm = '+((L/1000)*(W/1000)).toFixed(4)+' M²'};
+  }
+  const L=Math.ceil(long*M);
+  return {L, unit:'M', note:long.toFixed(0)+' mm +10% → '+L+' mm = '+(L/1000).toFixed(3)+' M'};
+}
+
 // ─── Raw Material Editor ─────────────────────────────────
 function openRawMatEditor(pb, desc, tq) {
   const existing = rawMatData[pb] || {};
@@ -1761,6 +1823,27 @@ function openRawMatEditor(pb, desc, tq) {
     ? '<div style="background:rgba(56,161,105,.12);border:1px solid rgba(56,161,105,.35);border-radius:5px;padding:6px 10px;font-size:11px;color:#38a169;margin-bottom:10px">'+
         '🔍 זוהה אוטומטית: '+detectedLabels.join(' · ')+'<br><span style="font-size:10px;opacity:.8">אשר או תקן לפני שמירה</span></div>'
     : '';
+
+  // AR estimation banner
+  const bomInfo = getBOMInfoForPb(pb);
+  const arBanner = bomInfo.isAR ? (function(){
+    const hasSteps = bomInfo.parentSteps.length > 0;
+    const stepOpts = bomInfo.parentSteps.map(function(s){
+      return '<option value="'+s.stpPath+'">'+s.parentDesc+'</option>';
+    }).join('');
+    return '<div style="background:rgba(237,137,54,.1);border:1px solid rgba(237,137,54,.4);border-radius:6px;padding:8px 10px">'+
+      '<div style="font-size:11px;font-weight:700;color:#ed8936;margin-bottom:6px">📐 AR — As Required</div>'+
+      (hasSteps
+        ? '<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:5px">'+
+            '<select id="arStpSelect" style="flex:1;min-width:200px;padding:4px 6px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:11px">'+stepOpts+'</select>'+
+            '<button id="arEstBtn" onclick="runARStepEstimate(\''+safePb+'\')" '+
+              'style="padding:4px 12px;background:#ed8936;color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:11px;white-space:nowrap">📐 הערך מ-STEP</button>'+
+          '</div>'+
+          '<div id="arEstResult" style="font-size:10px;color:var(--text3)">'+
+            'הערך אורך (M) לצינורות/מוטות, שטח (M²) ללוחות — +10% שיפצוף אוטומטי</div>'
+        : '<div style="font-size:10px;color:var(--text3)">⚠ אין STEP לפריט האב — הזן מידות ידנית</div>')+
+    '</div>';
+  })() : '';
 
   function famOpts() {
     return Object.entries(MATERIAL_DB).map(function(e){
@@ -1798,6 +1881,7 @@ function openRawMatEditor(pb, desc, tq) {
         '<button onclick="document.getElementById(\'rawMatModal\').style.display=\'none\'" style="padding:4px 10px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;cursor:pointer">✕</button>'+
       '</div>'+
       '<div style="overflow:auto;flex:1;padding:14px;display:flex;flex-direction:column;gap:12px">'+
+        arBanner+
         detectedBanner+
         // Family + grade
         '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">'+
@@ -1841,6 +1925,64 @@ function openRawMatEditor(pb, desc, tq) {
   m.style.display='flex';
   m.dataset.tq = tq || 1;
   setTimeout(rmUpdateCalc, 50);
+}
+
+// ─── AR: estimate dims from parent STEP file ─────────────────────────────────
+async function runARStepEstimate(pb) {
+  const btnEl    = document.getElementById('arEstBtn');
+  const resultEl = document.getElementById('arEstResult');
+  if (!btnEl || !resultEl) return;
+
+  const stpPath = (document.getElementById('arStpSelect')||{}).value || '';
+  if (!stpPath) { resultEl.innerHTML='<span style="color:#fc8181">⚠ בחר קובץ STEP</span>'; return; }
+
+  const origTxt = btnEl.textContent;
+  btnEl.disabled = true;
+  btnEl.textContent = '⟳ טוען…';
+  resultEl.innerHTML = '';
+
+  try {
+    if (!rootDirHandle && !(_graphMode && _msalAcct)) {
+      throw new Error('נדרשת כניסה ל-SharePoint כדי לטעון STEP');
+    }
+
+    // Load & parse (reuse cache if available)
+    let meshData = _geomCache.get(stpPath);
+    if (!meshData) {
+      resultEl.textContent = '⬇ מוריד STEP…';
+      const buf = await getFileBuffer(stpPath);
+      resultEl.textContent = '⚙️ מנתח גאומטריה…';
+      meshData = await parseStepInWorker(buf);
+      if (!meshData || !meshData.length) throw new Error('לא נמצאה גאומטריה ב-STEP');
+      _geomCache.set(stpPath, meshData);
+    }
+
+    const bbox = getBBoxFromMeshData(meshData);
+    if (!bbox) throw new Error('לא ניתן לחשב תיבה כוללת');
+
+    const formSel = document.getElementById('rmForm');
+    const form = formSel ? formSel.value : 'sheet';
+    const est  = estimateARDims(form, bbox);
+    if (!est) throw new Error('צורה לא נתמכת');
+
+    // Fill dimension fields
+    const setDim = function(key, val) {
+      const inp = document.querySelector('.rm-dim[data-key="'+key+'"]');
+      if (inp) { inp.value = val; inp.dispatchEvent(new Event('input')); }
+    };
+    setDim('L', est.L);
+    if (form === 'sheet' && est.W) setDim('W', est.W);
+
+    resultEl.innerHTML =
+      '<span style="color:#68d391">✓ '+est.note+'</span>';
+
+    if (typeof rmUpdateCalc === 'function') rmUpdateCalc();
+  } catch(e) {
+    resultEl.innerHTML = '<span style="color:#fc8181">⚠ '+e.message+'</span>';
+  } finally {
+    btnEl.disabled  = false;
+    btnEl.textContent = origTxt;
+  }
 }
 
 function rmFamilyChanged() {
@@ -3505,16 +3647,42 @@ function renderBuyTable(data) {
     tdMf.textContent = item.mf;
     tr.appendChild(tdMf);
 
-    // UOM
+    // UOM — orange badge for AR items
     const tdUom = document.createElement('td');
-    tdUom.style.cssText = 'text-align:center;color:var(--text3)';
-    tdUom.textContent = item.uom;
+    tdUom.style.cssText = 'text-align:center';
+    const isAR = isARUnit(item.uom);
+    if (isAR) {
+      tdUom.innerHTML = '<span style="background:rgba(237,137,54,.2);border:1px solid rgba(237,137,54,.5);color:#ed8936;border-radius:3px;padding:1px 5px;font-size:10px;font-weight:700">AR</span>';
+    } else {
+      tdUom.style.color = 'var(--text3)';
+      tdUom.textContent = item.uom;
+    }
     tr.appendChild(tdUom);
 
-    // Total Qty
+    // Total Qty — for AR, show estimated length/area from rawMatData
     const tdQty = document.createElement('td');
-    tdQty.style.cssText = 'text-align:right;font-weight:700;color:var(--accent2)';
-    tdQty.textContent = item.totalQty.toLocaleString();
+    tdQty.style.cssText = 'text-align:right;font-weight:700';
+    if (isAR) {
+      const rmAR = rawMatData[item.pb];
+      const rmDims = rmAR && rmAR.dims;
+      const rmForm = rmAR && rmAR.form;
+      if (rmDims && rmDims.L) {
+        const Lm = parseFloat(rmDims.L) / 1000;
+        if (rmForm === 'sheet' && rmDims.W) {
+          const Wm = parseFloat(rmDims.W) / 1000;
+          const area = (Lm * Wm * item.totalQty).toFixed(3);
+          tdQty.innerHTML = '<span style="color:#ed8936" title="'+item.totalQty+'× '+Lm.toFixed(3)+'×'+Wm.toFixed(3)+' M²">~'+area+' M²</span>';
+        } else {
+          const len = (Lm * item.totalQty).toFixed(2);
+          tdQty.innerHTML = '<span style="color:#ed8936" title="'+item.totalQty+'× '+Lm.toFixed(3)+' M">~'+len+' M</span>';
+        }
+      } else {
+        tdQty.innerHTML = '<span style="color:#ed8936;opacity:.6" title="פתח עורך ח&quot;ג להערכת כמות">? AR</span>';
+      }
+    } else {
+      tdQty.style.color = 'var(--accent2)';
+      tdQty.textContent = item.totalQty.toLocaleString();
+    }
     tr.appendChild(tdQty);
 
     // Unit Price
