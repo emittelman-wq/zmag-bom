@@ -547,7 +547,7 @@ function currencySym(currency) {
   if (currency === 'EUR') return '€';
   return '$';
 }
-const BUILD_VER = 'v20260719.1600';
+const BUILD_VER = 'v20260719.1700';
 let rows = [];
 let selIdx = -1;
 let curSort = {col:null,asc:true};
@@ -1941,12 +1941,31 @@ const IL_SUPPLIERS = [
   {name:'ברמיל',         domain:'barmil.co.il'},
 ];
 
+// Extract a meaningful search term from desc/cat — never use internal PN
+function _extractSearchTerm(pb, desc, cat) {
+  // If cat looks like a standard catalog number (ISO/DIN/M-thread/ASTM etc.), use it
+  if (cat && cat.trim() && /^(ISO|DIN|EN |ASTM|GB|BS |M\d|[A-Z]{2,6}\d{2,})/i.test(cat.trim())) {
+    return cat.trim().slice(0, 50);
+  }
+  // Use description: replace commas → spaces, keep technical tokens, skip generic words
+  if (desc && desc.trim()) {
+    return desc
+      .replace(/,/g, ' ')
+      .replace(/\b(STANDARD|COMMERCIAL|GENERIC|ASSEMBLY|PART|ITEM|COMPONENT|NON-LOCKIN|CO\b)\b/gi, '')
+      .replace(/\s{2,}/g, ' ')
+      .trim()
+      .slice(0, 60);
+  }
+  return pb;
+}
+
 function _buildSupplierLinks(pb, desc, cat) {
-  const term = encodeURIComponent((cat||pb).slice(0,40));
+  const searchTerm = _extractSearchTerm(pb, desc, cat);
+  const term = encodeURIComponent(searchTerm);
   // General Israeli Google search
   const links = [{
     label:'🔍 גוגל ישראל',
-    href:'https://www.google.com/search?q='+encodeURIComponent(pb+' '+(cat||desc).slice(0,35))+'+site%3Aco.il',
+    href:'https://www.google.com/search?q='+term+'+site%3Aco.il',
     il:true
   }];
   // One Google site: search per supplier — always valid
@@ -1970,6 +1989,7 @@ function openAIPriceSearch(pb, desc, cat) {
   if (!m) { m=document.createElement('div'); m.id='aiPriceModal'; m.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:3500;display:none;align-items:center;justify-content:center'; document.body.appendChild(m); }
   const apiKey = localStorage.getItem(ANOM_API_KEY)||'';
 
+  const searchTerm = _extractSearchTerm(pb, desc, cat);
   const links = _buildSupplierLinks(pb, desc, cat);
   const linkBtns = links.map(function(l){
     return '<a href="'+l.href+'" target="_blank" class="btn" style="font-size:10px;text-decoration:none;'+(l.il?'border-color:rgba(56,161,105,.5);color:#68d391':'')+'">'+l.label+'</a>';
@@ -1980,7 +2000,9 @@ function openAIPriceSearch(pb, desc, cat) {
       '<div style="padding:12px 16px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">'+
         '<div><div style="font-weight:700;font-size:13px">🤖 חיפוש מחיר ב-AI</div>'+
           '<div style="font-size:11px;color:var(--text2);font-family:monospace">'+pb+'</div>'+
-          '<div style="font-size:11px;color:var(--text2)">'+desc+'</div></div>'+
+          '<div style="font-size:11px;color:var(--text2)">'+desc+'</div>'+
+          '<div style="margin-top:4px;font-size:10px;color:var(--text3)">🔍 מחפש לפי: <span style="color:var(--accent2);font-weight:600">'+searchTerm+'</span></div>'+
+        '</div>'+
         '<button onclick="document.getElementById(\'aiPriceModal\').style.display=\'none\'" style="padding:4px 10px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;cursor:pointer">✕</button>'+
       '</div>'+
       '<div style="padding:12px 16px;display:flex;flex-direction:column;gap:10px;overflow-y:auto;flex:1">'+
@@ -2026,19 +2048,18 @@ async function runAIPriceSearch(pb, desc, cat) {
   resEl.innerHTML = '<span class="anom-ai-spinner">⟳</span> מחפש מחיר…';
 
   // Prompt: Israeli suppliers first, search URLs only (never direct product pages)
+  const searchTerm2 = _extractSearchTerm(pb, desc, cat);
   const ilSupplierNames = IL_SUPPLIERS.map(function(s){return s.name;}).join(', ');
   const prompt =
     'אתה מסייע לרכש הנדסי. כלל ברזל: אל תמציא מחיר. אל תעריך. אל תשער.\n'+
-    'החזר תוצאה רק אם יש לך ידע ממשי ואמין על מחיר אמיתי של הפריט הזה.\n'+
-    'אם אין לך מחיר ממשי ממקור ידוע — החזר מערך ריק: []\n\n'+
-    'אם יש לך מחיר ממשי, ציין:\n'+
-    '- שם הספק (רק מהרשימה: '+ilSupplierNames+', McMaster-Carr, Aliexpress, TME)\n'+
-    '- המחיר המדויק שאתה יודע\n'+
-    '- note: מקור הידע (ידוע מקטלוג / אתר / תקן)\n'+
-    '- searchUrl: null תמיד (אל תמציא URL)\n\n'+
+    'החזר תוצאה רק אם יש לך ידע ממשי ואמין על מחיר אמיתי של הפריט.\n'+
+    'אם אין לך מחיר ממשי ממקור ידוע — החזר מערך ריק בלבד: []\n\n'+
+    'אם יש מחיר ממשי, ציין ספק מהרשימה בלבד: '+ilSupplierNames+', McMaster-Carr, Aliexpress, TME.\n'+
+    'searchUrl: null תמיד. אל תמציא URL.\n\n'+
     'פורמט JSON בלבד:\n'+
     '[{"supplier":"שם","price":0.00,"currency":"ILS","searchUrl":null,"note":"מקור הידע"}]\n\n'+
-    'פריט: PN='+pb+', תיאור='+desc+(cat?', קטלוג='+cat:'');
+    'מה מחפשים: '+searchTerm2+'\n'+
+    '(מק"ט פנימי '+pb+' — לא רלוונטי לחיפוש, אל תשתמש בו)';
 
   try {
     const resp = await fetch('https://api.anthropic.com/v1/messages', {
