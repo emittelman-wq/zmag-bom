@@ -443,6 +443,7 @@ tr.row-disabled .badge,tr.row-disabled .proc-btn{opacity:.5}
   <button class="btn" id="mfgBtn" onclick="openMfgModal()" title="Manufacturing processes summary">⚙ Manufacturing</button>
   <button class="btn" id="rfqBtn" onclick="openRFQModal()" title="Subcontractor RFQ list">🔧 RFQ</button>
   <button class="btn" id="anomalyBtn" onclick="openAnomalyPanel()" title="בדיקת אנומליות בהערכות שעות">🔍 אנומליות<span class="anom-counter" id="anomalyBadge" style="display:none">0</span></button>
+  <button class="btn" id="rmExcelBtn" onclick="exportRawMaterials()" title="ייצוא חומרי גלם לExcel לפי משפחות">🧱 ח"ג Excel</button>
   <button class="btn" id="xlsxBtn" onclick="exportBomExcel()" title="ייצוא BOM לקובץ Excel עם היררכיה וקיבוץ">📊 Excel</button>
   <button class="btn" id="adminFolderBtn" onclick="adminGetFolderItemId()" title="Admin: Get SharePoint Folder Item ID for hardcoding" style="display:none;font-size:10px;opacity:.6">🔧 Get Folder ID</button>
   <button class="btn" id="themeBtn" onclick="toggleTheme()" title="Toggle light/dark mode">☀️</button>
@@ -546,7 +547,7 @@ function currencySym(currency) {
   if (currency === 'EUR') return '€';
   return '$';
 }
-const BUILD_VER = 'v20260713.1300';
+const BUILD_VER = 'v20260719.1000';
 let rows = [];
 let selIdx = -1;
 let curSort = {col:null,asc:true};
@@ -646,6 +647,9 @@ let cumCycleH = [];     // tree-cumulative cycle hours (no setup)
 let projectQty = 1;
 let buyNotes = {};
 let subData = {};
+let rawMatData = {};   // {pb: {family,grade,form,dims,density,unitCost,costUnit}}
+const RM_STORAGE_KEY = 'zmag_rawmat';
+try { rawMatData = JSON.parse(localStorage.getItem(RM_STORAGE_KEY)||'{}'); } catch(e) {}
 let anomalies = [];
 let dismissedAnomalies = {};
 const ANOMALY_DISMISS_KEY = 'zmag_anom_dismissed';
@@ -787,7 +791,13 @@ function applyColWidths(){
 // ─── Cost computation ────────────────────────────────────
 function getItemUnitCost(item) {
   if (item.type === 'Buy') {
-    const e = getPriceEntry(item.pb || item.pn);
+    const pb = item.pb || item.pn;
+    // Raw material cost takes priority over price DB
+    if (rawMatData[pb]) {
+      const rm = getRawMatCost(pb);
+      return rm ? rm.cost : 0;
+    }
+    const e = getPriceEntry(pb);
     return e ? toILS(e.p, e.currency || 'USD') : 0;  // always returns ILS
   }
   if (item.type === 'ELTDesign') {
@@ -920,6 +930,22 @@ function buildTable(){
       notesBtn.textContent = hasnotes ? '📝' : '✎';
       notesBtn.addEventListener('click', ev => { ev.stopPropagation(); openBuyNotesEditor(pb, item.desc); });
       tdP.appendChild(notesBtn);
+      // AI price search button
+      const aiPriceBtn = document.createElement('button');
+      aiPriceBtn.className = 'proc-btn';
+      aiPriceBtn.title = 'חיפוש מחיר ב-AI';
+      aiPriceBtn.textContent = '🤖';
+      aiPriceBtn.style.cssText = 'font-size:11px;margin-right:2px';
+      aiPriceBtn.addEventListener('click', ev => { ev.stopPropagation(); openAIPriceSearch(pb, item.desc, item.cat||''); });
+      tdP.appendChild(aiPriceBtn);
+      // Raw material button
+      const rmBtn = document.createElement('button');
+      rmBtn.className = 'proc-btn' + (rawMatData[pb] ? ' proc-has' : '');
+      rmBtn.title = rawMatData[pb] ? 'חומר גלם מוגדר — לחץ לעריכה' : 'הגדר כחומר גלם';
+      rmBtn.textContent = '🧱';
+      rmBtn.style.cssText = 'font-size:11px;margin-right:2px';
+      rmBtn.addEventListener('click', ev => { ev.stopPropagation(); openRawMatEditor(pb, item.desc, item.tq||1); });
+      tdP.appendChild(rmBtn);
     }
     tr.appendChild(tdP);
 
@@ -1560,6 +1586,434 @@ async function runAIForItem(evt, anomKey) {
     alert('❌ ' + e.message);
     renderAnomalyList();
   }
+}
+
+// ════════════════════════════════════════════════════════
+// ─── RAW MATERIALS ENGINE ────────────────────────────────
+// ════════════════════════════════════════════════════════
+const MATERIAL_DB = {
+  aluminum:     {label:'אלומיניום',  density:2700, color:'#4299e1',
+    grades:[{id:'6061-T6',label:'6061-T6',density:2700},{id:'7075-T6',label:'7075-T6',density:2810},
+            {id:'5052-H32',label:'5052-H32',density:2680},{id:'2024-T3',label:'2024-T3',density:2780},{id:'generic',label:'כללי',density:2700}]},
+  steel:        {label:'פלדה',        density:7850, color:'#718096',
+    grades:[{id:'A36',label:'A36/S235',density:7850},{id:'4140',label:'4140/42CrMo4',density:7850},{id:'generic',label:'כללי',density:7850}]},
+  stainless:    {label:'אל-חלד',     density:7900, color:'#a0aec0',
+    grades:[{id:'304',label:'304',density:7900},{id:'316',label:'316L',density:7990},{id:'generic',label:'כללי',density:7900}]},
+  copper:       {label:'נחושת',       density:8900, color:'#ed8936',
+    grades:[{id:'generic',label:'כללי',density:8900}]},
+  brass:        {label:'פליז',         density:8500, color:'#d69e2e',
+    grades:[{id:'360',label:'360 (ניתן לעיבוד)',density:8500},{id:'generic',label:'כללי',density:8500}]},
+  plastic_abs:  {label:'ABS',          density:1050, color:'#9f7aea', grades:[{id:'generic',label:'כללי',density:1050}]},
+  plastic_pom:  {label:'POM/דלרין',    density:1410, color:'#9f7aea', grades:[{id:'generic',label:'כללי',density:1410}]},
+  plastic_uhmw: {label:'UHMW-PE',      density:930,  color:'#9f7aea', grades:[{id:'generic',label:'כללי',density:930}]},
+  rubber:       {label:'גומי',          density:1200, color:'#48bb78', grades:[{id:'generic',label:'כללי',density:1200}]},
+};
+const MATERIAL_FORMS = [
+  {id:'sheet',      label:'פח / לוח',           dims:[{k:'L',u:'mm',ph:'אורך'},{k:'W',u:'mm',ph:'רוחב'},{k:'T',u:'mm',ph:'עובי'}]},
+  {id:'bar_round',  label:'מוט עגול',            dims:[{k:'L',u:'mm',ph:'אורך'},{k:'D',u:'mm',ph:'קוטר'}]},
+  {id:'bar_square', label:'מוט מרובע/שטוח',      dims:[{k:'L',u:'mm',ph:'אורך'},{k:'S',u:'mm',ph:'רוחב'},{k:'S2',u:'mm',ph:'גובה'}]},
+  {id:'tube_round', label:'צינור עגול',           dims:[{k:'L',u:'mm',ph:'אורך'},{k:'D',u:'mm',ph:'⌀ חיצוני'},{k:'d',u:'mm',ph:'⌀ פנימי'}]},
+  {id:'tube_square',label:'צינור מרובע',          dims:[{k:'L',u:'mm',ph:'אורך'},{k:'S',u:'mm',ph:'צלע'},{k:'t',u:'mm',ph:'עובי דופן'}]},
+  {id:'angle',      label:'זווית (L)',             dims:[{k:'L',u:'mm',ph:'אורך'},{k:'W',u:'mm',ph:'רגל 1'},{k:'W2',u:'mm',ph:'רגל 2'},{k:'T',u:'mm',ph:'עובי'}]},
+  {id:'profile',    label:'פרופיל (שטח חתך)',     dims:[{k:'L',u:'mm',ph:'אורך'},{k:'A',u:'mm²',ph:'שטח חתך'}]},
+];
+
+function calcRawMatVolume(form, dims) {
+  const m = function(k){ return (parseFloat(dims[k])||0)/1000; };
+  switch(form) {
+    case 'sheet':       return m('L')*m('W')*m('T');
+    case 'bar_round':   return Math.PI*Math.pow(m('D')/2,2)*m('L');
+    case 'bar_square':  return m('L')*m('S')*(parseFloat(dims.S2)||parseFloat(dims.S)||0)/1000;
+    case 'tube_round':  return Math.PI*(Math.pow(m('D')/2,2)-Math.pow(m('d')/2,2))*m('L');
+    case 'tube_square': { const o=Math.pow(m('S'),2), i=Math.pow(Math.max(0,m('S')-2*m('t')),2); return (o-i)*m('L'); }
+    case 'angle': {
+      const t=m('T'), l1=m('W')*t, l2=(m('W2')||m('W')-t)*t;
+      return (l1+l2)*m('L');
+    }
+    case 'profile':     return ((parseFloat(dims.A)||0)*(parseFloat(dims.L)||0))/1e9;
+    default:            return 0;
+  }
+}
+
+function getRawMatCost(pb) {
+  const rm = rawMatData[pb];
+  if (!rm) return null;
+  const vol = calcRawMatVolume(rm.form||'bar_round', rm.dims||{});
+  const density = parseFloat(rm.density) || (MATERIAL_DB[rm.family]||{}).density || 1000;
+  const mass = vol * density;
+  const uc = parseFloat(rm.unitCost)||0;
+  const dims = rm.dims || {};
+  let cost = 0;
+  switch(rm.costUnit) {
+    case 'kg': cost = mass * uc; break;
+    case 'm':  cost = (parseFloat(dims.L)||0)/1000 * uc; break;
+    case 'm2': cost = ((parseFloat(dims.L)||0)/1000)*((parseFloat(dims.W)||0)/1000)*uc; break;
+    default:   cost = mass * uc;
+  }
+  return {cost, mass, vol};
+}
+
+// ─── Raw Material Editor ─────────────────────────────────
+function openRawMatEditor(pb, desc, tq) {
+  const existing = rawMatData[pb] || {};
+  const safePb = pb.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+  let m = document.getElementById('rawMatModal');
+  if (!m) { m=document.createElement('div'); m.id='rawMatModal'; m.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:3500;display:none;align-items:center;justify-content:center'; document.body.appendChild(m); }
+
+  const fam = existing.family || 'aluminum';
+  const famData = MATERIAL_DB[fam] || MATERIAL_DB.aluminum;
+  const formId  = existing.form || 'sheet';
+  const formData = MATERIAL_FORMS.find(function(f){return f.id===formId;})||MATERIAL_FORMS[0];
+  const curDens = existing.density || famData.density;
+  const curCostUnit = existing.costUnit || 'kg';
+
+  function famOpts() {
+    return Object.entries(MATERIAL_DB).map(function(e){
+      return '<option value="'+e[0]+'"'+(fam===e[0]?' selected':'')+'>'+ e[1].label+'</option>';
+    }).join('');
+  }
+  function gradeOpts(fd) {
+    return (fd.grades||[]).map(function(g){
+      return '<option value="'+g.id+'"'+(existing.grade===g.id?' selected':'')+'>'+ g.label+'</option>';
+    }).join('');
+  }
+  function formOpts() {
+    return MATERIAL_FORMS.map(function(f){
+      return '<option value="'+f.id+'"'+(formId===f.id?' selected':'')+'>'+f.label+'</option>';
+    }).join('');
+  }
+  function dimFields(fd) {
+    return fd.dims.map(function(d){
+      return '<div style="display:flex;flex-direction:column;gap:2px">'+
+        '<label style="font-size:10px;color:var(--text2)">'+d.ph+' ('+d.u+')</label>'+
+        '<input class="rm-dim" data-key="'+d.k+'" type="number" min="0" step="0.1" value="'+(existing.dims&&existing.dims[d.k]||'')+'" placeholder="0"'+
+        ' style="width:70px;padding:3px 5px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px"'+
+        ' oninput="rmUpdateCalc()"></div>';
+    }).join('');
+  }
+
+  m.innerHTML =
+    '<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;width:580px;max-height:90vh;display:flex;flex-direction:column;overflow:hidden">'+
+      '<div style="padding:12px 16px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">'+
+        '<div><div style="font-weight:700;font-size:13px">🧱 חומר גלם</div>'+
+          '<div style="font-size:11px;color:var(--text2);font-family:monospace">'+pb+'</div>'+
+          '<div style="font-size:11px;color:var(--text2)">'+desc+'</div></div>'+
+        '<button onclick="document.getElementById(\'rawMatModal\').style.display=\'none\'" style="padding:4px 10px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;cursor:pointer">✕</button>'+
+      '</div>'+
+      '<div style="overflow:auto;flex:1;padding:14px;display:flex;flex-direction:column;gap:12px">'+
+        // Family + grade
+        '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">'+
+          '<div><label style="font-size:11px;font-weight:600;color:var(--text2);display:block;margin-bottom:4px">משפחת חומר</label>'+
+            '<select id="rmFamily" onchange="rmFamilyChanged()" style="width:100%;padding:5px 6px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:13px">'+famOpts()+'</select></div>'+
+          '<div><label style="font-size:11px;font-weight:600;color:var(--text2);display:block;margin-bottom:4px">סגסוגת / סוג</label>'+
+            '<select id="rmGrade" onchange="rmGradeChanged()" style="width:100%;padding:5px 6px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:13px">'+gradeOpts(famData)+'</select></div>'+
+        '</div>'+
+        // Form + density
+        '<div style="display:grid;grid-template-columns:2fr 1fr;gap:10px">'+
+          '<div><label style="font-size:11px;font-weight:600;color:var(--text2);display:block;margin-bottom:4px">צורת חתך</label>'+
+            '<select id="rmForm" onchange="rmFormChanged()" style="width:100%;padding:5px 6px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:13px">'+formOpts()+'</select></div>'+
+          '<div><label style="font-size:11px;font-weight:600;color:var(--text2);display:block;margin-bottom:4px">צפיפות (kg/m³)</label>'+
+            '<input id="rmDensity" type="number" min="100" step="10" value="'+curDens+'" oninput="rmUpdateCalc()" style="width:100%;padding:5px 6px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:13px"></div>'+
+        '</div>'+
+        // Dimension fields (dynamic)
+        '<div><label style="font-size:11px;font-weight:600;color:var(--text2);display:block;margin-bottom:6px">מידות</label>'+
+          '<div id="rmDimFields" style="display:flex;flex-wrap:wrap;gap:8px">'+dimFields(formData)+'</div></div>'+
+        // Cost unit + unit cost
+        '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">'+
+          '<div><label style="font-size:11px;font-weight:600;color:var(--text2);display:block;margin-bottom:4px">יחידת מחיר</label>'+
+            '<select id="rmCostUnit" onchange="rmUpdateCalc()" style="width:100%;padding:5px 6px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:13px">'+
+              '<option value="kg"'+(curCostUnit==='kg'?' selected':'')+'>₪ / ק"ג</option>'+
+              '<option value="m"'+(curCostUnit==='m'?' selected':'')+'>₪ / מ"ר (Running)</option>'+
+              '<option value="m2"'+(curCostUnit==='m2'?' selected':'')+'>₪ / מ"ר (שטח)</option>'+
+            '</select></div>'+
+          '<div><label style="font-size:11px;font-weight:600;color:var(--text2);display:block;margin-bottom:4px">עלות ליחידה (₪)</label>'+
+            '<input id="rmUnitCost" type="number" min="0" step="0.1" value="'+(existing.unitCost||'')+'" placeholder="₪" oninput="rmUpdateCalc()" style="width:100%;padding:5px 6px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:13px"></div>'+
+        '</div>'+
+        // Live calculation
+        '<div id="rmCalcResult" style="background:rgba(79,142,247,.08);border:1px solid rgba(79,142,247,.2);border-radius:6px;padding:10px;font-size:12px;min-height:52px"></div>'+
+      '</div>'+
+      '<div style="padding:10px 14px;border-top:1px solid var(--border);display:flex;justify-content:space-between;gap:8px">'+
+        '<button onclick="deleteRawMat(\''+safePb+'\')" style="padding:5px 12px;background:rgba(229,62,62,.1);border:1px solid rgba(229,62,62,.4);color:#e53e3e;border-radius:4px;cursor:pointer;font-size:12px">🗑 הסר</button>'+
+        '<div style="display:flex;gap:8px">'+
+          '<button onclick="saveRawMat(\''+safePb+'\')" style="padding:5px 16px;background:var(--accent);color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:12px">💾 שמור</button>'+
+          '<button onclick="document.getElementById(\'rawMatModal\').style.display=\'none\'" style="padding:5px 12px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;cursor:pointer;font-size:12px">ביטול</button>'+
+        '</div>'+
+      '</div>'+
+    '</div>';
+  m.style.display='flex';
+  m.dataset.tq = tq || 1;
+  setTimeout(rmUpdateCalc, 50);
+}
+
+function rmFamilyChanged() {
+  const fam = document.getElementById('rmFamily').value;
+  const fd = MATERIAL_DB[fam]||MATERIAL_DB.aluminum;
+  const grSel = document.getElementById('rmGrade');
+  grSel.innerHTML = fd.grades.map(function(g){ return '<option value="'+g.id+'">'+g.label+'</option>'; }).join('');
+  document.getElementById('rmDensity').value = fd.density;
+  rmUpdateCalc();
+}
+function rmGradeChanged() {
+  const fam = document.getElementById('rmFamily').value;
+  const gid = document.getElementById('rmGrade').value;
+  const fd  = MATERIAL_DB[fam]||MATERIAL_DB.aluminum;
+  const gr  = (fd.grades||[]).find(function(g){return g.id===gid;});
+  if (gr) document.getElementById('rmDensity').value = gr.density;
+  rmUpdateCalc();
+}
+function rmFormChanged() {
+  const formId = document.getElementById('rmForm').value;
+  const formData = MATERIAL_FORMS.find(function(f){return f.id===formId;})||MATERIAL_FORMS[0];
+  const container = document.getElementById('rmDimFields');
+  container.innerHTML = formData.dims.map(function(d){
+    return '<div style="display:flex;flex-direction:column;gap:2px">'+
+      '<label style="font-size:10px;color:var(--text2)">'+d.ph+' ('+d.u+')</label>'+
+      '<input class="rm-dim" data-key="'+d.k+'" type="number" min="0" step="0.1" value="" placeholder="0"'+
+      ' style="width:70px;padding:3px 5px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px"'+
+      ' oninput="rmUpdateCalc()"></div>';
+  }).join('');
+  rmUpdateCalc();
+}
+function rmGetDims() {
+  const dims = {};
+  document.querySelectorAll('#rmDimFields .rm-dim').forEach(function(inp){ dims[inp.dataset.key]=inp.value; });
+  return dims;
+}
+function rmUpdateCalc() {
+  const form = document.getElementById('rmForm')?.value||'sheet';
+  const density = parseFloat(document.getElementById('rmDensity')?.value)||1000;
+  const dims = rmGetDims();
+  const vol = calcRawMatVolume(form, dims);
+  const mass = vol * density;
+  const uc = parseFloat(document.getElementById('rmUnitCost')?.value)||0;
+  const costUnit = document.getElementById('rmCostUnit')?.value||'kg';
+  const tq = parseInt(document.getElementById('rawMatModal')?.dataset.tq)||1;
+
+  let costPer = 0;
+  switch(costUnit) {
+    case 'kg': costPer = mass*uc; break;
+    case 'm':  costPer = (parseFloat(dims.L)||0)/1000*uc; break;
+    case 'm2': costPer = ((parseFloat(dims.L)||0)/1000)*((parseFloat(dims.W)||0)/1000)*uc; break;
+  }
+  const resEl = document.getElementById('rmCalcResult');
+  if (!resEl) return;
+  resEl.innerHTML =
+    '<div style="display:flex;gap:20px;flex-wrap:wrap">'+
+    '<div><span style="color:var(--text2)">נפח: </span><strong>'+( vol*1e6).toFixed(2)+' cm³</strong></div>'+
+    '<div><span style="color:var(--text2)">משקל/יחידה: </span><strong>'+(mass*1000).toFixed(1)+' ג'+'</strong></div>'+
+    '<div><span style="color:var(--text2)">עלות/יחידה: </span><strong>'+fmtC(costPer)+'</strong></div>'+
+    '<div><span style="color:var(--text2)">סה"כ TQ='+tq+': </span><strong style="color:var(--accent2)">'+fmtC(costPer*tq)+'</strong></div>'+
+    '</div>';
+}
+
+function saveRawMat(pb) {
+  const family = document.getElementById('rmFamily').value;
+  const grade  = document.getElementById('rmGrade').value;
+  const form   = document.getElementById('rmForm').value;
+  const density= parseFloat(document.getElementById('rmDensity').value)||2700;
+  const dims   = rmGetDims();
+  const costUnit=document.getElementById('rmCostUnit').value;
+  const unitCost=parseFloat(document.getElementById('rmUnitCost').value)||0;
+  rawMatData[pb] = {family,grade,form,dims,density,costUnit,unitCost};
+  localStorage.setItem(RM_STORAGE_KEY, JSON.stringify(rawMatData));
+  document.getElementById('rawMatModal').style.display='none';
+  computeTreeCosts(); refreshCostCells();
+  buildTable(); applyFilters();
+}
+function deleteRawMat(pb) {
+  delete rawMatData[pb];
+  localStorage.setItem(RM_STORAGE_KEY, JSON.stringify(rawMatData));
+  document.getElementById('rawMatModal').style.display='none';
+  computeTreeCosts(); refreshCostCells();
+  buildTable(); applyFilters();
+}
+
+// ─── AI Price Search ─────────────────────────────────────
+function openAIPriceSearch(pb, desc, cat) {
+  const safePb = pb.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+  let m = document.getElementById('aiPriceModal');
+  if (!m) { m=document.createElement('div'); m.id='aiPriceModal'; m.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:3500;display:none;align-items:center;justify-content:center'; document.body.appendChild(m); }
+  const apiKey = localStorage.getItem(ANOM_API_KEY)||'';
+  m.innerHTML =
+    '<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;width:560px;max-height:85vh;display:flex;flex-direction:column;overflow:hidden">'+
+      '<div style="padding:12px 16px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">'+
+        '<div><div style="font-weight:700;font-size:13px">🤖 חיפוש מחיר ב-AI</div>'+
+          '<div style="font-size:11px;color:var(--text2);font-family:monospace">'+pb+'</div>'+
+          '<div style="font-size:11px;color:var(--text2)">'+desc+'</div></div>'+
+        '<button onclick="document.getElementById(\'aiPriceModal\').style.display=\'none\'" style="padding:4px 10px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;cursor:pointer">✕</button>'+
+      '</div>'+
+      '<div style="padding:12px 16px;display:flex;flex-direction:column;gap:10px;overflow-y:auto;flex:1">'+
+        '<div style="display:flex;gap:8px;align-items:center">'+
+          '<span style="font-size:11px;color:var(--text2);flex-shrink:0">🔑 API Key:</span>'+
+          '<input type="password" id="aiPriceKey" value="'+apiKey+'" placeholder="sk-ant-api03-…"'+
+          ' style="flex:1;padding:4px 8px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:11px;font-family:monospace">'+
+          '<button onclick="runAIPriceSearch(\''+safePb+'\',\''+desc.replace(/'/g,"\\'").slice(0,60)+'\',\''+cat+'\')" style="padding:4px 12px;background:var(--accent);color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:12px">🔍 חפש</button>'+
+        '</div>'+
+        '<div style="display:flex;gap:6px;flex-wrap:wrap">'+
+          '<a href="https://www.google.com/search?q=buy+'+encodeURIComponent(pb+' '+desc)+'" target="_blank" class="btn" style="font-size:10px;text-decoration:none">🔍 Google</a>'+
+          '<a href="https://il.rs-online.com/web/c/?searchTerm='+encodeURIComponent(cat||desc)+'" target="_blank" class="btn" style="font-size:10px;text-decoration:none">RS Components</a>'+
+          '<a href="https://www.mouser.co.il/Search/Refine?Keyword='+encodeURIComponent(cat||pb)+'" target="_blank" class="btn" style="font-size:10px;text-decoration:none">Mouser</a>'+
+          '<a href="https://www.digikey.co.il/en/products/result?keywords='+encodeURIComponent(cat||pb)+'" target="_blank" class="btn" style="font-size:10px;text-decoration:none">DigiKey</a>'+
+        '</div>'+
+        '<div id="aiPriceResult" style="min-height:60px"></div>'+
+        '<div style="border-top:1px solid var(--border);padding-top:10px">'+
+          '<div style="font-size:11px;font-weight:600;color:var(--text2);margin-bottom:6px">הזן מחיר ידנית:</div>'+
+          '<div style="display:grid;grid-template-columns:80px 1fr 2fr;gap:8px">'+
+            '<select id="aiPriceCur" style="padding:4px 6px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px">'+
+              '<option value="USD">$ USD</option><option value="EUR">€ EUR</option><option value="ILS">₪ ILS</option>'+
+            '</select>'+
+            '<input id="aiPriceVal" type="number" min="0" step="0.01" placeholder="מחיר" style="padding:4px 6px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px">'+
+            '<input id="aiPriceUrl" type="url" placeholder="https://…" style="padding:4px 6px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px">'+
+          '</div>'+
+        '</div>'+
+      '</div>'+
+      '<div style="padding:10px 14px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:8px">'+
+        '<button onclick="saveAIPrice(\''+safePb+'\')" style="padding:5px 16px;background:var(--accent);color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:12px">💾 שמור מחיר</button>'+
+        '<button onclick="document.getElementById(\'aiPriceModal\').style.display=\'none\'" style="padding:5px 12px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;cursor:pointer;font-size:12px">ביטול</button>'+
+      '</div>'+
+    '</div>';
+  m.style.display='flex';
+}
+
+async function runAIPriceSearch(pb, desc, cat) {
+  const key = document.getElementById('aiPriceKey').value.trim();
+  if (!key) { alert('נא להזין API Key'); return; }
+  localStorage.setItem(ANOM_API_KEY, key);
+  const resEl = document.getElementById('aiPriceResult');
+  resEl.innerHTML = '<span class="anom-ai-spinner">⟳</span> מחפש מחיר…';
+  const prompt = 'הנדסן רוכש. הצע מחירי ייחוס לפריט הנדסי זה. ענה JSON בלבד:\n'+
+    '[{"supplier":"שם ספק","price":0.00,"currency":"USD","url":"https://...","note":"הסבר קצר"}]\n'+
+    'הצע 2-3 ספקים. פריט: PN='+pb+', תיאור='+desc+(cat?', קטלוג='+cat:'')+'\n'+
+    'ספקים נפוצים: RS Components, Mouser, DigiKey, McMaster-Carr, Aliexpress, Amazon.';
+  try {
+    const resp = await fetch('https://api.anthropic.com/v1/messages', {
+      method:'POST',
+      headers:{'Content-Type':'application/json','x-api-key':key,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
+      body:JSON.stringify({model:'claude-haiku-4-5-20251001',max_tokens:600,messages:[{role:'user',content:prompt}]})
+    });
+    if (!resp.ok) { const e=await resp.json().catch(function(){return{};}); throw new Error(e.error&&e.error.message||resp.status); }
+    const data = await resp.json();
+    const text = data.content&&data.content[0]?data.content[0].text:'';
+    const jm = text.match(/\[[\s\S]*\]/);
+    if (!jm) throw new Error('תשובה לא תקינה');
+    const results = JSON.parse(jm[0]);
+    resEl.innerHTML = results.map(function(r){
+      return '<div style="border:1px solid var(--border);border-radius:5px;padding:8px 10px;margin-bottom:6px;background:var(--surface2);cursor:pointer" '+
+        'onclick="applyAIPrice('+r.price+',\''+r.currency+'\',\''+encodeURIComponent(r.url||'')+'\')">'+
+        '<div style="font-weight:600;font-size:12px">'+r.supplier+'</div>'+
+        '<div style="display:flex;gap:12px;font-size:12px;color:var(--accent2)">'+
+          '<span>'+r.price+' '+r.currency+'</span>'+
+          (r.url?'<a href="'+r.url+'" target="_blank" style="color:var(--accent);font-size:11px" onclick="event.stopPropagation()">🔗 מקור</a>':'')+
+        '</div>'+
+        (r.note?'<div style="font-size:11px;color:var(--text3)">'+r.note+'</div>':'')+
+      '</div>';
+    }).join('');
+  } catch(e) {
+    resEl.innerHTML = '<span style="color:var(--warn)">❌ '+e.message+'</span>';
+  }
+}
+
+function applyAIPrice(price, currency, urlEnc) {
+  document.getElementById('aiPriceVal').value = price;
+  const cur = document.getElementById('aiPriceCur');
+  if (cur) cur.value = currency;
+  try { document.getElementById('aiPriceUrl').value = decodeURIComponent(urlEnc); } catch(e){}
+}
+
+function saveAIPrice(pb) {
+  const price    = parseFloat(document.getElementById('aiPriceVal').value);
+  const currency = document.getElementById('aiPriceCur').value||'USD';
+  const url      = (document.getElementById('aiPriceUrl').value||'').trim();
+  if (!price || isNaN(price)) { alert('נא להזין מחיר תקין'); return; }
+  // Save to buyNotes
+  const existing = buyNotes[pb] || {};
+  buyNotes[pb] = Object.assign({}, existing, {price, currency, url: url||existing.url||''});
+  localStorage.setItem('px_'+pb, JSON.stringify({p:price, src:url, currency}));
+  document.getElementById('aiPriceModal').style.display='none';
+  saveProcToFile();
+  computeTreeCosts(); refreshCostCells();
+  buildTable(); applyFilters();
+}
+
+// ─── Raw Materials Excel Export ───────────────────────────
+async function exportRawMaterials() {
+  const items = [];
+  BOM.forEach(function(item, idx) {
+    if (item.type !== 'Buy') return;
+    const pb = item.pb || item.pn;
+    const rm = rawMatData[pb];
+    if (!rm) return;
+    const famData = MATERIAL_DB[rm.family]||{label:rm.family};
+    const res = getRawMatCost(pb);
+    const tq = item.tq || item.qty || 1;
+    items.push({
+      pb, desc: item.desc, family: famData.label, grade: rm.grade||'',
+      form: (MATERIAL_FORMS.find(function(f){return f.id===rm.form;})||{}).label||rm.form,
+      dims: rm.dims||{}, density: rm.density, costUnit: rm.costUnit,
+      unitCost: rm.unitCost, tq,
+      massPerUnit: res?res.mass:0, volPerUnit: res?res.vol:0,
+      costPerUnit: res?res.cost:0, totalCost: res?res.cost*tq:0, totalMass: res?res.mass*tq:0,
+    });
+  });
+
+  if (!items.length) { alert('אין חומרי גלם מוגדרים בBOM'); return; }
+
+  if (typeof ExcelJS === 'undefined') { alert('ExcelJS לא זמין'); return; }
+  const wb = new ExcelJS.Workbook();
+  wb.views = [{rightToLeft:true}];
+
+  // Summary sheet
+  const hdrStyle = {font:{bold:true,color:{argb:'FFFFFFFF'}},fill:{type:'pattern',pattern:'solid',fgColor:{argb:'FF2D4A8A'}},alignment:{horizontal:'center'}};
+  const addSheet = function(name, sheetItems) {
+    const ws = wb.addWorksheet(name, {views:[{rightToLeft:true}]});
+    ws.columns = [
+      {header:'מק"ט',      key:'pb',         width:22},
+      {header:'תיאור',     key:'desc',        width:30},
+      {header:'משפחה',     key:'family',      width:14},
+      {header:'סגסוגת',   key:'grade',       width:12},
+      {header:'צורה',      key:'form',        width:16},
+      {header:'אורך (mm)', key:'L',           width:10},
+      {header:'רוחב (mm)', key:'W',           width:10},
+      {header:'עובי (mm)', key:'T',           width:10},
+      {header:'ⓓ חיצוני', key:'D',           width:10},
+      {header:'TQ',        key:'tq',          width:6},
+      {header:'משקל/יח (kg)', key:'massPerUnit', width:14},
+      {header:'משקל סה"כ (kg)',key:'totalMass',  width:14},
+      {header:'יח"מ',     key:'costUnit',    width:8},
+      {header:'עלות/יח ₪', key:'unitCost',   width:12},
+      {header:'עלות ₪ סה"כ',key:'totalCost', width:14},
+    ];
+    ws.getRow(1).eachCell(function(cell){ Object.assign(cell, hdrStyle); });
+    ws.getRow(1).height = 20;
+    sheetItems.forEach(function(it) {
+      ws.addRow({
+        pb: it.pb, desc: it.desc, family: it.family, grade: it.grade, form: it.form,
+        L: it.dims.L||'', W: it.dims.W||'', T: it.dims.T||'', D: it.dims.D||it.dims.S||'',
+        tq: it.tq,
+        massPerUnit: Math.round(it.massPerUnit*1000)/1000,
+        totalMass:   Math.round(it.totalMass*1000)/1000,
+        costUnit: it.costUnit, unitCost: it.unitCost,
+        totalCost: Math.round(it.totalCost),
+      });
+    });
+    // Total row
+    const last = ws.lastRow.number+1;
+    const totalRow = ws.addRow({pb:'סה"כ',totalMass:{formula:'SUM(L2:L'+last+')'},totalCost:{formula:'SUM(O2:O'+last+')'}});
+    totalRow.font={bold:true};
+    return ws;
+  };
+
+  // Group by family
+  const families = {};
+  items.forEach(function(it){ if (!families[it.family]) families[it.family]=[]; families[it.family].push(it); });
+  // All items summary
+  addSheet('סיכום', items);
+  Object.entries(families).forEach(function(e){ addSheet(e[0], e[1]); });
+
+  const buf = await wb.xlsx.writeBuffer();
+  const blob = new Blob([buf], {type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
+  const a = document.createElement('a'); a.href=URL.createObjectURL(blob);
+  a.download = 'RawMaterials_ZMAG.xlsx'; a.click();
 }
 
 function updateWHCells() {
@@ -3468,7 +3922,8 @@ async function _spWriteFile() {
     lastSaved: new Date().toISOString(),
     customProcTypes: PROC_TYPES,
     processes: procData,
-    procMeta: procMeta
+    procMeta: procMeta,
+    rawMaterials: rawMatData
   }, null, 2);
   const r = await fetch(_spUploadUrl(), {
     method: 'POST',
@@ -3568,7 +4023,8 @@ async function _graphWriteProcFile() {
     procMeta: procMeta,
     flaggedRows: Array.from(flaggedRows),
     subcontractors: subData,
-    buyNotes: buyNotes
+    buyNotes: buyNotes,
+    rawMaterials: rawMatData
   }, null, 2);
   const r = await fetch(url, {
     method: 'PUT',
@@ -3636,6 +4092,10 @@ async function loadProcFromGraph() {
         }
       });
     }
+    if (obj.rawMaterials && typeof obj.rawMaterials === 'object') {
+      rawMatData = obj.rawMaterials;
+      localStorage.setItem(RM_STORAGE_KEY, JSON.stringify(rawMatData));
+    }
     {
       // MERGE flags: server + local → union (preserves all users' flags)
       const preLocal = new Set([...flaggedRows]);
@@ -3671,7 +4131,8 @@ async function _writeProcFile() {
     lastSaved: new Date().toISOString(),
     customProcTypes: PROC_TYPES,
     processes: procData,
-    procMeta: procMeta
+    procMeta: procMeta,
+    rawMaterials: rawMatData
   }, null, 2);
   const w = await _procFileHandle.createWritable();
   await w.write(payload); await w.close();
