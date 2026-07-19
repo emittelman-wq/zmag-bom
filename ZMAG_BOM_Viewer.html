@@ -547,7 +547,7 @@ function currencySym(currency) {
   if (currency === 'EUR') return '€';
   return '$';
 }
-const BUILD_VER = 'v20260719.1300';
+const BUILD_VER = 'v20260719.1400';
 let rows = [];
 let selIdx = -1;
 let curSort = {col:null,asc:true};
@@ -1927,13 +1927,40 @@ function deleteRawMat(pb) {
 }
 
 // ─── AI Price Search ─────────────────────────────────────
+// Israeli supplier search URLs (search page, always valid)
+const IL_SUPPLIERS = [
+  {name:'מגה בסיס',    url:'https://www.megabasis.co.il/search?q=',         flag:'🇮🇱'},
+  {name:'סרקו',        url:'https://www.sarco.co.il/search?q=',              flag:'🇮🇱'},
+  {name:'RS ישראל',    url:'https://il.rs-online.com/web/c/?searchTerm=',    flag:'🇮🇱'},
+  {name:'TME',         url:'https://www.tme.eu/il/en/katalog/?search=',       flag:'🇪🇺'},
+  {name:'Mouser',      url:'https://www.mouser.co.il/Search/Refine?Keyword=', flag:'🌐'},
+  {name:'McMaster',    url:'https://www.mcmaster.com/#',                      flag:'🇺🇸'},
+  {name:'Aliexpress',  url:'https://www.aliexpress.com/wholesale?SearchText=',flag:'🌐'},
+];
+
+function _buildSupplierLinks(pb, desc, cat) {
+  const q = encodeURIComponent((cat||pb)+' '+(cat?'':desc).slice(0,30));
+  const qHeb = encodeURIComponent(pb+' '+desc.slice(0,30));
+  return [
+    {label:'🔍 גוגל ישראל',  href:'https://www.google.com/search?q='+encodeURIComponent(pb+' '+desc.slice(0,40))+'+site:co.il+OR+site:il', il:true},
+    ...IL_SUPPLIERS.map(function(s){ return {label:s.flag+' '+s.name, href:s.url+q, il:s.flag==='🇮🇱'}; }),
+  ];
+}
+
 function openAIPriceSearch(pb, desc, cat) {
   const safePb = pb.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+  const safeDesc = desc.replace(/'/g,"\\'").slice(0,60);
   let m = document.getElementById('aiPriceModal');
   if (!m) { m=document.createElement('div'); m.id='aiPriceModal'; m.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:3500;display:none;align-items:center;justify-content:center'; document.body.appendChild(m); }
   const apiKey = localStorage.getItem(ANOM_API_KEY)||'';
+
+  const links = _buildSupplierLinks(pb, desc, cat);
+  const linkBtns = links.map(function(l){
+    return '<a href="'+l.href+'" target="_blank" class="btn" style="font-size:10px;text-decoration:none;'+(l.il?'border-color:rgba(56,161,105,.5);color:#68d391':'')+'">'+l.label+'</a>';
+  }).join('');
+
   m.innerHTML =
-    '<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;width:560px;max-height:85vh;display:flex;flex-direction:column;overflow:hidden">'+
+    '<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;width:600px;max-height:88vh;display:flex;flex-direction:column;overflow:hidden">'+
       '<div style="padding:12px 16px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">'+
         '<div><div style="font-weight:700;font-size:13px">🤖 חיפוש מחיר ב-AI</div>'+
           '<div style="font-size:11px;color:var(--text2);font-family:monospace">'+pb+'</div>'+
@@ -1941,27 +1968,29 @@ function openAIPriceSearch(pb, desc, cat) {
         '<button onclick="document.getElementById(\'aiPriceModal\').style.display=\'none\'" style="padding:4px 10px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;cursor:pointer">✕</button>'+
       '</div>'+
       '<div style="padding:12px 16px;display:flex;flex-direction:column;gap:10px;overflow-y:auto;flex:1">'+
+        // API Key + search button
         '<div style="display:flex;gap:8px;align-items:center">'+
           '<span style="font-size:11px;color:var(--text2);flex-shrink:0">🔑 API Key:</span>'+
           '<input type="password" id="aiPriceKey" value="'+apiKey+'" placeholder="sk-ant-api03-…"'+
           ' style="flex:1;padding:4px 8px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:11px;font-family:monospace">'+
-          '<button onclick="runAIPriceSearch(\''+safePb+'\',\''+desc.replace(/'/g,"\\'").slice(0,60)+'\',\''+cat+'\')" style="padding:4px 12px;background:var(--accent);color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:12px">🔍 חפש</button>'+
+          '<button onclick="runAIPriceSearch(\''+safePb+'\',\''+safeDesc+'\',\''+cat+'\')" style="padding:4px 14px;background:var(--accent);color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:12px;white-space:nowrap">🔍 חפש AI</button>'+
         '</div>'+
-        '<div style="display:flex;gap:6px;flex-wrap:wrap">'+
-          '<a href="https://www.google.com/search?q=buy+'+encodeURIComponent(pb+' '+desc)+'" target="_blank" class="btn" style="font-size:10px;text-decoration:none">🔍 Google</a>'+
-          '<a href="https://il.rs-online.com/web/c/?searchTerm='+encodeURIComponent(cat||desc)+'" target="_blank" class="btn" style="font-size:10px;text-decoration:none">RS Components</a>'+
-          '<a href="https://www.mouser.co.il/Search/Refine?Keyword='+encodeURIComponent(cat||pb)+'" target="_blank" class="btn" style="font-size:10px;text-decoration:none">Mouser</a>'+
-          '<a href="https://www.digikey.co.il/en/products/result?keywords='+encodeURIComponent(cat||pb)+'" target="_blank" class="btn" style="font-size:10px;text-decoration:none">DigiKey</a>'+
+        // Quick-links (Israeli first, highlighted)
+        '<div>'+
+          '<div style="font-size:10px;color:var(--text3);margin-bottom:4px">🇮🇱 ספקים ישראלים תחילה — קישורים לדף חיפוש (תמיד עובדים):</div>'+
+          '<div style="display:flex;gap:5px;flex-wrap:wrap">'+linkBtns+'</div>'+
         '</div>'+
+        // AI results
         '<div id="aiPriceResult" style="min-height:60px"></div>'+
+        // Manual entry
         '<div style="border-top:1px solid var(--border);padding-top:10px">'+
-          '<div style="font-size:11px;font-weight:600;color:var(--text2);margin-bottom:6px">הזן מחיר ידנית:</div>'+
-          '<div style="display:grid;grid-template-columns:80px 1fr 2fr;gap:8px">'+
+          '<div style="font-size:11px;font-weight:600;color:var(--text2);margin-bottom:6px">הזן מחיר ידנית (לאחר אימות):</div>'+
+          '<div style="display:grid;grid-template-columns:70px 100px 1fr;gap:8px">'+
             '<select id="aiPriceCur" style="padding:4px 6px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px">'+
-              '<option value="USD">$ USD</option><option value="EUR">€ EUR</option><option value="ILS">₪ ILS</option>'+
+              '<option value="ILS">₪ ILS</option><option value="USD">$ USD</option><option value="EUR">€ EUR</option>'+
             '</select>'+
             '<input id="aiPriceVal" type="number" min="0" step="0.01" placeholder="מחיר" style="padding:4px 6px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px">'+
-            '<input id="aiPriceUrl" type="url" placeholder="https://…" style="padding:4px 6px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px">'+
+            '<input id="aiPriceUrl" type="text" placeholder="קישור לעמוד מוצר / חיפוש" style="padding:4px 6px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px">'+
           '</div>'+
         '</div>'+
       '</div>'+
@@ -1979,15 +2008,31 @@ async function runAIPriceSearch(pb, desc, cat) {
   localStorage.setItem(ANOM_API_KEY, key);
   const resEl = document.getElementById('aiPriceResult');
   resEl.innerHTML = '<span class="anom-ai-spinner">⟳</span> מחפש מחיר…';
-  const prompt = 'הנדסן רוכש. הצע מחירי ייחוס לפריט הנדסי זה. ענה JSON בלבד:\n'+
-    '[{"supplier":"שם ספק","price":0.00,"currency":"USD","url":"https://...","note":"הסבר קצר"}]\n'+
-    'הצע 2-3 ספקים. פריט: PN='+pb+', תיאור='+desc+(cat?', קטלוג='+cat:'')+'\n'+
-    'ספקים נפוצים: RS Components, Mouser, DigiKey, McMaster-Carr, Aliexpress, Amazon.';
+
+  // Prompt: Israeli suppliers first, search URLs only (never direct product pages)
+  const prompt =
+    'אתה מהנדס רכש ישראלי. הצע מחירי ייחוס לפריט. עדיפות מוחלטת לספקים ישראלים.\n'+
+    'כלל חשוב: אל תמציא קישורי מוצר — תן רק URL של דף חיפוש באתר הספק (תמיד עובד).\n'+
+    'פורמט חיפוש לפי אתר:\n'+
+    '  מגה בסיס: https://www.megabasis.co.il/search?q=TERM\n'+
+    '  סרקו: https://www.sarco.co.il/search?q=TERM\n'+
+    '  RS ישראל: https://il.rs-online.com/web/c/?searchTerm=TERM\n'+
+    '  TME: https://www.tme.eu/il/en/katalog/?search=TERM\n'+
+    '  Mouser: https://www.mouser.co.il/Search/Refine?Keyword=TERM\n'+
+    '  McMaster: https://www.mcmaster.com/#TERM\n'+
+    '  Aliexpress: https://www.aliexpress.com/wholesale?SearchText=TERM\n\n'+
+    'ענה JSON בלבד, 3-4 ספקים (ישראלים קודם), מחיר ביחידה בודדת:\n'+
+    '[{"supplier":"שם","price":0.00,"currency":"ILS","searchUrl":"https://...","note":"הסבר: סוג, תקן, זמינות"}]\n\n'+
+    'פריט: PN='+pb+', תיאור='+desc+(cat?', קטלוג='+cat:'')+'\n'+
+    'אם הפריט הוא קשיח/ברגים/אם/צלחות — עדיפות: מגה בסיס, סרקו, RS ישראל.\n'+
+    'אם חומר גלם מתכת — עדיפות: ספקי מתכות ישראלים, RS ישראל, TME.\n'+
+    'ספקי חוץ רק אם אין מקור ישראלי אמין.';
+
   try {
     const resp = await fetch('https://api.anthropic.com/v1/messages', {
       method:'POST',
       headers:{'Content-Type':'application/json','x-api-key':key,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
-      body:JSON.stringify({model:'claude-haiku-4-5-20251001',max_tokens:600,messages:[{role:'user',content:prompt}]})
+      body:JSON.stringify({model:'claude-haiku-4-5-20251001',max_tokens:700,messages:[{role:'user',content:prompt}]})
     });
     if (!resp.ok) { const e=await resp.json().catch(function(){return{};}); throw new Error(e.error&&e.error.message||resp.status); }
     const data = await resp.json();
@@ -1995,17 +2040,24 @@ async function runAIPriceSearch(pb, desc, cat) {
     const jm = text.match(/\[[\s\S]*\]/);
     if (!jm) throw new Error('תשובה לא תקינה');
     const results = JSON.parse(jm[0]);
-    resEl.innerHTML = results.map(function(r){
-      return '<div style="border:1px solid var(--border);border-radius:5px;padding:8px 10px;margin-bottom:6px;background:var(--surface2);cursor:pointer" '+
-        'onclick="applyAIPrice('+r.price+',\''+r.currency+'\',\''+encodeURIComponent(r.url||'')+'\')">'+
-        '<div style="font-weight:600;font-size:12px">'+r.supplier+'</div>'+
-        '<div style="display:flex;gap:12px;font-size:12px;color:var(--accent2)">'+
-          '<span>'+r.price+' '+r.currency+'</span>'+
-          (r.url?'<a href="'+r.url+'" target="_blank" style="color:var(--accent);font-size:11px" onclick="event.stopPropagation()">🔗 מקור</a>':'')+
-        '</div>'+
-        (r.note?'<div style="font-size:11px;color:var(--text3)">'+r.note+'</div>':'')+
-      '</div>';
-    }).join('');
+    const isIL = function(s){ return /מגה|סרקו|RS ישר|kasel|כלי ברזל/.test(s.supplier||''); };
+    resEl.innerHTML =
+      '<div style="font-size:10px;color:var(--text3);margin-bottom:6px">⚠ קישורים = דפי חיפוש (ולא עמוד מוצר ישיר) — מחיר הוא הערכה, אמת מול האתר</div>'+
+      results.map(function(r){
+        const searchUrl = r.searchUrl || r.url || '';
+        const ilBadge = isIL(r) ? '<span style="font-size:9px;background:rgba(56,161,105,.2);color:#68d391;border-radius:3px;padding:1px 4px;margin-right:4px">🇮🇱 ישראל</span>' : '';
+        return '<div style="border:1px solid var(--border);border-radius:5px;padding:8px 10px;margin-bottom:6px;background:var(--surface2);cursor:pointer;'+(isIL(r)?'border-color:rgba(56,161,105,.4)':'')+'" '+
+          'onclick="applyAIPrice('+r.price+',\''+r.currency+'\',\''+encodeURIComponent(searchUrl)+'\')">'+
+          '<div style="display:flex;align-items:center;justify-content:space-between">'+
+            '<span style="font-weight:600;font-size:12px">'+ilBadge+r.supplier+'</span>'+
+            (searchUrl?'<a href="'+searchUrl+'" target="_blank" style="color:var(--accent);font-size:11px;white-space:nowrap" onclick="event.stopPropagation()">🔍 חפש באתר</a>':'')+
+          '</div>'+
+          '<div style="font-size:13px;font-weight:700;color:var(--accent2);margin:2px 0">'+
+            (r.currency==='ILS'?'₪':r.currency==='USD'?'$':'€')+r.price+
+          '</div>'+
+          (r.note?'<div style="font-size:11px;color:var(--text3)">'+r.note+'</div>':'')+
+        '</div>';
+      }).join('');
   } catch(e) {
     resEl.innerHTML = '<span style="color:var(--warn)">❌ '+e.message+'</span>';
   }
