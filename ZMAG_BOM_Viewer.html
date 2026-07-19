@@ -547,7 +547,7 @@ function currencySym(currency) {
   if (currency === 'EUR') return '€';
   return '$';
 }
-const BUILD_VER = 'v20260719.1400';
+const BUILD_VER = 'v20260719.1500';
 let rows = [];
 let selIdx = -1;
 let curSort = {col:null,asc:true};
@@ -1927,24 +1927,40 @@ function deleteRawMat(pb) {
 }
 
 // ─── AI Price Search ─────────────────────────────────────
-// Israeli supplier search URLs (search page, always valid)
+// Israeli suppliers — Google site-search links (always reliable, no invented URLs)
 const IL_SUPPLIERS = [
-  {name:'מגה בסיס',    url:'https://www.megabasis.co.il/search?q=',         flag:'🇮🇱'},
-  {name:'סרקו',        url:'https://www.sarco.co.il/search?q=',              flag:'🇮🇱'},
-  {name:'RS ישראל',    url:'https://il.rs-online.com/web/c/?searchTerm=',    flag:'🇮🇱'},
-  {name:'TME',         url:'https://www.tme.eu/il/en/katalog/?search=',       flag:'🇪🇺'},
-  {name:'Mouser',      url:'https://www.mouser.co.il/Search/Refine?Keyword=', flag:'🌐'},
-  {name:'McMaster',    url:'https://www.mcmaster.com/#',                      flag:'🇺🇸'},
-  {name:'Aliexpress',  url:'https://www.aliexpress.com/wholesale?SearchText=',flag:'🌐'},
+  {name:'גלבורג',        domain:'galborg.co.il'},
+  {name:'בית המיסב',     domain:'hmisab.co.il'},
+  {name:'ברסיס',         domain:'brasis.co.il'},
+  {name:'טלמיר',         domain:'talmir.co.il'},
+  {name:'4project',      domain:'4project.co.il'},
+  {name:'מיברג',         domain:'miberg.co.il'},
+  {name:'TSC',           domain:'tsc.co.il'},
+  {name:'אום ובורגג',    domain:'om-burgag.co.il'},
+  {name:'סקופ',          domain:'scoop.co.il'},
+  {name:'ברמיל',         domain:'barmil.co.il'},
 ];
 
 function _buildSupplierLinks(pb, desc, cat) {
-  const q = encodeURIComponent((cat||pb)+' '+(cat?'':desc).slice(0,30));
-  const qHeb = encodeURIComponent(pb+' '+desc.slice(0,30));
-  return [
-    {label:'🔍 גוגל ישראל',  href:'https://www.google.com/search?q='+encodeURIComponent(pb+' '+desc.slice(0,40))+'+site:co.il+OR+site:il', il:true},
-    ...IL_SUPPLIERS.map(function(s){ return {label:s.flag+' '+s.name, href:s.url+q, il:s.flag==='🇮🇱'}; }),
-  ];
+  const term = encodeURIComponent((cat||pb).slice(0,40));
+  // General Israeli Google search
+  const links = [{
+    label:'🔍 גוגל ישראל',
+    href:'https://www.google.com/search?q='+encodeURIComponent(pb+' '+(cat||desc).slice(0,35))+'+site%3Aco.il',
+    il:true
+  }];
+  // One Google site: search per supplier — always valid
+  IL_SUPPLIERS.forEach(function(s){
+    links.push({
+      label:'🇮🇱 '+s.name,
+      href:'https://www.google.com/search?q='+term+'+site%3A'+encodeURIComponent(s.domain),
+      il:true
+    });
+  });
+  // International fallbacks
+  links.push({label:'🇺🇸 McMaster', href:'https://www.mcmaster.com/#'+term, il:false});
+  links.push({label:'🌐 Aliexpress', href:'https://www.aliexpress.com/wholesale?SearchText='+term, il:false});
+  return links;
 }
 
 function openAIPriceSearch(pb, desc, cat) {
@@ -2010,23 +2026,19 @@ async function runAIPriceSearch(pb, desc, cat) {
   resEl.innerHTML = '<span class="anom-ai-spinner">⟳</span> מחפש מחיר…';
 
   // Prompt: Israeli suppliers first, search URLs only (never direct product pages)
+  const ilSupplierNames = IL_SUPPLIERS.map(function(s){return s.name;}).join(', ');
   const prompt =
     'אתה מהנדס רכש ישראלי. הצע מחירי ייחוס לפריט. עדיפות מוחלטת לספקים ישראלים.\n'+
-    'כלל חשוב: אל תמציא קישורי מוצר — תן רק URL של דף חיפוש באתר הספק (תמיד עובד).\n'+
-    'פורמט חיפוש לפי אתר:\n'+
-    '  מגה בסיס: https://www.megabasis.co.il/search?q=TERM\n'+
-    '  סרקו: https://www.sarco.co.il/search?q=TERM\n'+
-    '  RS ישראל: https://il.rs-online.com/web/c/?searchTerm=TERM\n'+
-    '  TME: https://www.tme.eu/il/en/katalog/?search=TERM\n'+
-    '  Mouser: https://www.mouser.co.il/Search/Refine?Keyword=TERM\n'+
-    '  McMaster: https://www.mcmaster.com/#TERM\n'+
-    '  Aliexpress: https://www.aliexpress.com/wholesale?SearchText=TERM\n\n'+
-    'ענה JSON בלבד, 3-4 ספקים (ישראלים קודם), מחיר ביחידה בודדת:\n'+
-    '[{"supplier":"שם","price":0.00,"currency":"ILS","searchUrl":"https://...","note":"הסבר: סוג, תקן, זמינות"}]\n\n'+
+    'ספקים ישראלים ידועים (השתמש רק בהם, לא תמציא שמות אחרים): '+ilSupplierNames+'.\n'+
+    'ספקי חוץ (רק אם אין מקור ישראלי): McMaster-Carr, Aliexpress, TME.\n\n'+
+    'כלל קריטי: אל תמציא URL מוצר — השאר את שדה searchUrl ריק (null) אם לא בטוח.\n'+
+    'ענה JSON בלבד, 2-4 ספקים (ישראלים קודם), מחיר ביחידה בודדת:\n'+
+    '[{"supplier":"שם מדויק","price":0.00,"currency":"ILS","searchUrl":null,"note":"הסבר קצר: סוג, תקן, הערה"}]\n\n'+
     'פריט: PN='+pb+', תיאור='+desc+(cat?', קטלוג='+cat:'')+'\n'+
-    'אם הפריט הוא קשיח/ברגים/אם/צלחות — עדיפות: מגה בסיס, סרקו, RS ישראל.\n'+
-    'אם חומר גלם מתכת — עדיפות: ספקי מתכות ישראלים, RS ישראל, TME.\n'+
-    'ספקי חוץ רק אם אין מקור ישראלי אמין.';
+    'אם קשיחים/ברגים/אמים — העדף: ברסיס, גלבורג, אום ובורגג, ברמיל.\n'+
+    'אם מיסבים — העדף: בית המיסב.\n'+
+    'אם חומר גלם — העדף: ברמיל, 4project, סקופ.\n'+
+    'אם פריק/כלים — העדף: טלמיר, מיברג, TSC.';
 
   try {
     const resp = await fetch('https://api.anthropic.com/v1/messages', {
