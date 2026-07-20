@@ -1097,7 +1097,11 @@ function buildTable(){
     tbody.appendChild(tr);
     rows.push(tr);
   });
-  computeTreeCosts();
+  try {
+    computeTreeCosts();
+  } catch(e) {
+    console.error('[computeTreeCosts]', e);
+  }
   updateStats();
 }
 
