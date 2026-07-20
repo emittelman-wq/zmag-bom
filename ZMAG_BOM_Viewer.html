@@ -392,7 +392,7 @@ tr.row-disabled .badge,tr.row-disabled .proc-btn{opacity:.5}
 <div class="topbar">
   <div>
     <div class="topbar-title">ZMAG BOM Viewer</div>
-    <div class="topbar-sub">6910W021-001 Rev B &nbsp;<span id="verBadge" style="font-size:9px;opacity:0.45;font-family:monospace">v20260720.1500</span></div>
+    <div class="topbar-sub">6910W021-001 Rev B &nbsp;<span id="verBadge" style="font-size:9px;opacity:0.45;font-family:monospace">v20260720.1600</span></div>
   </div>
   <div class="sep"></div>
 
@@ -436,6 +436,7 @@ tr.row-disabled .badge,tr.row-disabled .proc-btn{opacity:.5}
 
   <button class="auth-btn signed-out" id="loginBtn" onclick="msalLogin()" title="התחבר עם חשבון Microsoft לסנכרון JSON ב-SharePoint">🔑 התחבר</button>
   <span class="auth-status" id="authStatus"></span>
+  <button class="btn" id="graphBaseBtn" onclick="editGraphBase()" title="OneDrive base folder path — used to locate part files (PDFs/STEP) via Microsoft Graph" style="display:none;font-size:11px">⚙ OneDrive path</button>
   <button class="btn" id="folderBtn" onclick="grantAccess()" title="פתח תיקיית הפרויקט — נדרש לטעינת STP ולשמירת תהליכי ייצור לקובץ JSON">📁 Select Folder</button>
   <button class="btn" id="syncBtn" onclick="syncProcFromFile()" title="סנכרן נתוני ייצור מהקובץ — לשימוש מרובה משתמשים" style="display:none">🔄 Sync</button>
   <span id="fileSyncStatus" style="font-size:11px;color:var(--accent2);opacity:0;transition:opacity .5s;margin-right:4px"></span>
@@ -5579,12 +5580,37 @@ var _msalAcct  = null;
 
 const _msalConfig = {
   auth: {
-    clientId: 'fe62b5b2-7236-4149-9d44-038ae6f98545', // Replace with Azure AD app client ID
+    clientId: 'fe62b5b2-7236-4149-9d44-038ae6f98545',
     authority: 'https://login.microsoftonline.com/fff493cd-fb80-4d62-b826-547a443f23de',
     redirectUri: window.location.origin + window.location.pathname
   },
   cache: { cacheLocation: 'localStorage', storeAuthStateInCookie: false }
 };
+
+// ── OneDrive base folder path ─────────────────────────────
+// Part files (PDFs, STEP) are stored relative to this folder on OneDrive.
+// Path is relative to the drive root (e.g. "Documents/PROJECTS/ZMAG/...").
+// Override via the ⚙ OneDrive button in the UI, stored in localStorage.
+var GRAPH_FILES_BASE = (function() {
+  const saved = localStorage.getItem('zmag_graph_files_base');
+  if (saved !== null) return saved;
+  // Default: derive from the known Windows sync path
+  // C:\Users\erezm\OneDrive - SEI Technologies\Documents - SEI\PROJECTS\HAARGAZ\ZMAG\Zmag\Zmag לחברת הארגז\ZMAG PRODUCTE FILE 10.03.26\ZMAG PRODUCTE FILE FOR FTS 10.03.26
+  return 'Documents - SEI/PROJECTS/HAARGAZ/ZMAG/Zmag/Zmag לחברת הארגז/ZMAG PRODUCTE FILE 10.03.26/ZMAG PRODUCTE FILE FOR FTS 10.03.26';
+})();
+
+function editGraphBase() {
+  const newPath = prompt(
+    'OneDrive base folder path (relative to drive root).\n' +
+    'Part files (PDFs/STEP) are looked up as: <base>/<partfile>\n\n' +
+    'Example: Documents - SEI/PROJECTS/HAARGAZ/ZMAG/.../ZMAG PRODUCTE FILE FOR FTS 10.03.26\n',
+    GRAPH_FILES_BASE
+  );
+  if (newPath === null) return;
+  GRAPH_FILES_BASE = newPath.trim().replace(/\/+$/, '');
+  localStorage.setItem('zmag_graph_files_base', GRAPH_FILES_BASE);
+  alert('✓ נשמר: ' + (GRAPH_FILES_BASE || '(root)'));
+}
 
 async function _loadMSAL() {
   if (window.msal) return;
@@ -5611,13 +5637,17 @@ async function _graphFileUrl() {
   return 'https://graph.microsoft.com/v1.0/me/drive/root:/' + encodeURIComponent(PROC_JSON_FILENAME) + ':/content';
 }
 
-// Download any file from OneDrive via Graph API and return a blob URL
-// path = relative path within the drive (e.g. "ZMAG/parts/6910M120-001.stp")
+// Download any file from OneDrive via Graph API and return a blob URL.
+// path = relative path within the project folder (e.g. "6910W021-001REVB/part.stp")
+// The full OneDrive path is: GRAPH_FILES_BASE + '/' + path
 async function _graphDownloadUrl(path) {
   const token = await _graphToken();
   if (!token) throw new Error('לא מחובר – יש להתחבר עם Microsoft תחילה');
-  // First try: get pre-authenticated download URL (no auth headers needed on the returned URL)
-  const apiPath = path.split('/').map(encodeURIComponent).join('/');
+  // Prepend configured base folder so paths resolve from OneDrive root
+  const base = (GRAPH_FILES_BASE || '').replace(/\/+$/, '');
+  const fullPath = base ? base + '/' + path : path;
+  const apiPath = fullPath.split('/').map(encodeURIComponent).join('/');
+  // First try: get pre-authenticated download URL (avoids re-attaching auth on blob fetch)
   const metaUrl = 'https://graph.microsoft.com/v1.0/me/drive/root:/' + apiPath +
     '?$select=@microsoft.graph.downloadUrl,name';
   try {
@@ -5627,11 +5657,11 @@ async function _graphDownloadUrl(path) {
       const dlUrl = meta['@microsoft.graph.downloadUrl'];
       if (dlUrl) return dlUrl;
     }
-  } catch(e) { /* fall through */ }
-  // Fallback: stream content and create a local blob URL
+  } catch(e) { /* fall through to blob download */ }
+  // Fallback: stream content and wrap in a local blob URL
   const contentUrl = 'https://graph.microsoft.com/v1.0/me/drive/root:/' + apiPath + ':/content';
   const r = await fetch(contentUrl, { headers: { Authorization: 'Bearer ' + token } });
-  if (!r.ok) throw new Error('Graph ' + r.status + ' – ' + path);
+  if (!r.ok) throw new Error('Graph ' + r.status + ' – ' + fullPath);
   return URL.createObjectURL(await r.blob());
 }
 
@@ -5654,6 +5684,8 @@ async function msalLogin() {
     _graphMode = true;
     const btn = document.getElementById('loginBtn');
     if (btn) { btn.className='auth-btn signed-in'; btn.textContent='✓ '+(_msalAcct.name||_msalAcct.username||'Logged in'); }
+    const gbBtn = document.getElementById('graphBaseBtn');
+    if (gbBtn) gbBtn.style.display = '';
     setFileSyncStatus('✓ מחובר כ-'+(_msalAcct.name||_msalAcct.username||''), 'ok');
     loadProcData();
     await loadProcFromGraph();
