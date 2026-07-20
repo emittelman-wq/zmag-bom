@@ -392,7 +392,7 @@ tr.row-disabled .badge,tr.row-disabled .proc-btn{opacity:.5}
 <div class="topbar">
   <div>
     <div class="topbar-title">ZMAG BOM Viewer</div>
-    <div class="topbar-sub">6910W021-001 Rev B &nbsp;<span id="verBadge" style="font-size:9px;opacity:0.45;font-family:monospace">v20260720.1600</span></div>
+    <div class="topbar-sub">6910W021-001 Rev B &nbsp;<span id="verBadge" style="font-size:9px;opacity:0.45;font-family:monospace">v20260720.1700</span></div>
   </div>
   <div class="sep"></div>
 
@@ -5637,32 +5637,107 @@ async function _graphFileUrl() {
   return 'https://graph.microsoft.com/v1.0/me/drive/root:/' + encodeURIComponent(PROC_JSON_FILENAME) + ':/content';
 }
 
-// Download any file from OneDrive via Graph API and return a blob URL.
-// path = relative path within the project folder (e.g. "6910W021-001REVB/part.stp")
-// The full OneDrive path is: GRAPH_FILES_BASE + '/' + path
+// ── Graph file download — with drive auto-detection ──────────────────────────
+// path = BOM-relative path, e.g. "6910W021-001REVB/part.stp"
+// On first 404: searches across all drives (SharePoint libraries included),
+// then saves the correct drive endpoint + base path for all future calls.
+const _graphUrlCache = new Map();
+
 async function _graphDownloadUrl(path) {
+  if (_graphUrlCache.has(path)) return _graphUrlCache.get(path);
+
   const token = await _graphToken();
   if (!token) throw new Error('לא מחובר – יש להתחבר עם Microsoft תחילה');
-  // Prepend configured base folder so paths resolve from OneDrive root
+  const H = { Authorization: 'Bearer ' + token };
+
+  // Helper: fetch item metadata from a drive endpoint + absolute path
+  async function _itemMeta(driveEp, absPath) {
+    const ap = absPath.split('/').map(encodeURIComponent).join('/');
+    const r = await fetch(driveEp + '/root:/' + ap +
+      '?$select=id,@microsoft.graph.downloadUrl', { headers: H });
+    if (!r.ok) return null;
+    return r.json().catch(() => null);
+  }
+
+  // Helper: stream item content → blob URL
+  async function _blobUrl(driveEp, itemId) {
+    const r = await fetch(driveEp + '/items/' + itemId + '/content', { headers: H });
+    if (!r.ok) return null;
+    return URL.createObjectURL(await r.blob());
+  }
+
+  // Helper: resolve metadata → URL
+  async function _metaToUrl(driveEp, meta) {
+    if (!meta) return null;
+    if (meta['@microsoft.graph.downloadUrl']) return meta['@microsoft.graph.downloadUrl'];
+    if (meta.id) return _blobUrl(driveEp, meta.id);
+    return null;
+  }
+
+  // ── Attempt 1: saved drive endpoint + saved base path ─────────────────────
+  const savedDriveEp = localStorage.getItem('zmag_graph_drive_ep') ||
+    'https://graph.microsoft.com/v1.0/me/drive';
   const base = (GRAPH_FILES_BASE || '').replace(/\/+$/, '');
   const fullPath = base ? base + '/' + path : path;
-  const apiPath = fullPath.split('/').map(encodeURIComponent).join('/');
-  // First try: get pre-authenticated download URL (avoids re-attaching auth on blob fetch)
-  const metaUrl = 'https://graph.microsoft.com/v1.0/me/drive/root:/' + apiPath +
-    '?$select=@microsoft.graph.downloadUrl,name';
+
+  let url = await _metaToUrl(savedDriveEp, await _itemMeta(savedDriveEp, fullPath).catch(() => null));
+  if (url) { _graphUrlCache.set(path, url); return url; }
+
+  // ── Attempt 2: try personal drive root without the base prefix ─────────────
+  // (handles case where Documents is literally the drive root)
+  const personalEp = 'https://graph.microsoft.com/v1.0/me/drive';
+  url = await _metaToUrl(personalEp, await _itemMeta(personalEp, path).catch(() => null));
+  if (url) { _graphUrlCache.set(path, url); return url; }
+
+  // ── Attempt 3: Graph API search → auto-detect drive & base path ───────────
+  // "Documents - SEI" on Windows is typically a synced SharePoint library,
+  // which lives in a separate drive (not /me/drive). Search finds it.
+  const fname = path.split('/').pop();
+  const parentDir = path.split('/').slice(-2, -1)[0] || '';
   try {
-    const metaR = await fetch(metaUrl, { headers: { Authorization: 'Bearer ' + token } });
-    if (metaR.ok) {
-      const meta = await metaR.json();
-      const dlUrl = meta['@microsoft.graph.downloadUrl'];
-      if (dlUrl) return dlUrl;
+    const sr = await fetch(
+      'https://graph.microsoft.com/v1.0/me/drive/root/search(q=\'' +
+      encodeURIComponent(fname) +
+      '\')&$select=id,name,parentReference,@microsoft.graph.downloadUrl',
+      { headers: H });
+    if (sr.ok) {
+      const items = (await sr.json()).value || [];
+      // Prefer file whose immediate parent folder name matches expected
+      let hit = items.find(i => i.name === fname &&
+        (i.parentReference?.path || '').includes(parentDir));
+      if (!hit) hit = items.find(i => i.name === fname);
+      if (hit) {
+        const driveId = hit.parentReference?.driveId;
+        const pr = hit.parentReference?.path || '';   // /drives/xxx/root:/a/b/c
+        const rootIdx = pr.indexOf('root:');
+        if (driveId && rootIdx >= 0) {
+          // Extract absolute folder path inside that drive
+          const folderInDrive = decodeURIComponent(pr.slice(rootIdx + 5).replace(/^\//, ''));
+          // base = folderInDrive minus relative parent dirs (all segments of path except filename)
+          const relParent = path.split('/').slice(0, -1).join('/');
+          let newBase = folderInDrive;
+          if (relParent && newBase.endsWith('/' + relParent)) {
+            newBase = newBase.slice(0, newBase.length - relParent.length - 1);
+          } else if (newBase === relParent) {
+            newBase = '';
+          }
+          const newEp = 'https://graph.microsoft.com/v1.0/drives/' + driveId;
+          localStorage.setItem('zmag_graph_drive_ep', newEp);
+          localStorage.setItem('zmag_graph_files_base', newBase);
+          GRAPH_FILES_BASE = newBase;
+          console.log('[Graph] Auto-detected drive:', newEp, '| base:', newBase);
+        }
+        const hitDriveEp = driveId
+          ? 'https://graph.microsoft.com/v1.0/drives/' + driveId
+          : personalEp;
+        url = hit['@microsoft.graph.downloadUrl'];
+        if (!url && hit.id) url = await _blobUrl(hitDriveEp, hit.id);
+        if (url) { _graphUrlCache.set(path, url); return url; }
+      }
     }
-  } catch(e) { /* fall through to blob download */ }
-  // Fallback: stream content and wrap in a local blob URL
-  const contentUrl = 'https://graph.microsoft.com/v1.0/me/drive/root:/' + apiPath + ':/content';
-  const r = await fetch(contentUrl, { headers: { Authorization: 'Bearer ' + token } });
-  if (!r.ok) throw new Error('Graph ' + r.status + ' – ' + fullPath);
-  return URL.createObjectURL(await r.blob());
+  } catch(e) { console.warn('[Graph search]', e); }
+
+  throw new Error('Graph 404 – ' + fullPath + '\n' + path);
 }
 
 async function msalLogin() {
