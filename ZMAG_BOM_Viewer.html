@@ -392,7 +392,7 @@ tr.row-disabled .badge,tr.row-disabled .proc-btn{opacity:.5}
 <div class="topbar">
   <div>
     <div class="topbar-title">ZMAG BOM Viewer</div>
-    <div class="topbar-sub">6910W021-001 Rev B &nbsp;<span id="verBadge" style="font-size:9px;opacity:0.45;font-family:monospace">v20260720.1400</span></div>
+    <div class="topbar-sub">6910W021-001 Rev B &nbsp;<span id="verBadge" style="font-size:9px;opacity:0.45;font-family:monospace">v20260720.1500</span></div>
   </div>
   <div class="sep"></div>
 
@@ -5609,6 +5609,30 @@ async function _graphToken() {
 
 async function _graphFileUrl() {
   return 'https://graph.microsoft.com/v1.0/me/drive/root:/' + encodeURIComponent(PROC_JSON_FILENAME) + ':/content';
+}
+
+// Download any file from OneDrive via Graph API and return a blob URL
+// path = relative path within the drive (e.g. "ZMAG/parts/6910M120-001.stp")
+async function _graphDownloadUrl(path) {
+  const token = await _graphToken();
+  if (!token) throw new Error('לא מחובר – יש להתחבר עם Microsoft תחילה');
+  // First try: get pre-authenticated download URL (no auth headers needed on the returned URL)
+  const apiPath = path.split('/').map(encodeURIComponent).join('/');
+  const metaUrl = 'https://graph.microsoft.com/v1.0/me/drive/root:/' + apiPath +
+    '?$select=@microsoft.graph.downloadUrl,name';
+  try {
+    const metaR = await fetch(metaUrl, { headers: { Authorization: 'Bearer ' + token } });
+    if (metaR.ok) {
+      const meta = await metaR.json();
+      const dlUrl = meta['@microsoft.graph.downloadUrl'];
+      if (dlUrl) return dlUrl;
+    }
+  } catch(e) { /* fall through */ }
+  // Fallback: stream content and create a local blob URL
+  const contentUrl = 'https://graph.microsoft.com/v1.0/me/drive/root:/' + apiPath + ':/content';
+  const r = await fetch(contentUrl, { headers: { Authorization: 'Bearer ' + token } });
+  if (!r.ok) throw new Error('Graph ' + r.status + ' – ' + path);
+  return URL.createObjectURL(await r.blob());
 }
 
 async function msalLogin() {
