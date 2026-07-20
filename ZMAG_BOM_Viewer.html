@@ -392,7 +392,7 @@ tr.row-disabled .badge,tr.row-disabled .proc-btn{opacity:.5}
 <div class="topbar">
   <div>
     <div class="topbar-title">ZMAG BOM Viewer</div>
-    <div class="topbar-sub">6910W021-001 Rev B &nbsp;<span id="verBadge" style="font-size:9px;opacity:0.45;font-family:monospace">v20260720.1800</span></div>
+    <div class="topbar-sub">6910W021-001 Rev B &nbsp;<span id="verBadge" style="font-size:9px;opacity:0.45;font-family:monospace">v20260720.2000</span></div>
   </div>
   <div class="sep"></div>
 
@@ -828,6 +828,30 @@ function getItemUnitCost(item, bomIdx) {
       const qty = normProcQty(p.qty, p.unit, t.costUnit);
       return sum + qty * t.cost;
     }, 0);
+  }
+  // ── Raw material items (S, T, SA, D, TR, TQ …) ────────────────────────────
+  // Material items aren't "Buy", but if rawMatData was configured for them,
+  // compute their cost the same way.
+  {
+    const pb = item.pb || item.pn;
+    if (rawMatData[pb]) {
+      const uom = item.uom || '';
+      if (isARUnit(uom)) {
+        const rm = rawMatData[pb];
+        const parentPb = getParentPbForBOMIndex(bomIdx);
+        const dims = getARDimsForParent(pb, parentPb);
+        if (!dims.L) return 0;
+        const density = parseFloat(rm.density) || (MATERIAL_DB[rm.family]||{}).density || 1000;
+        const uc = parseFloat(rm.unitCost) || 0;
+        const vol = calcRawMatVolume(rm.form, dims);
+        const mass = vol * density;
+        if (rm.costUnit === 'm2' && dims.W)
+          return (parseFloat(dims.L)/1000)*(parseFloat(dims.W)/1000)*uc;
+        return mass * uc;
+      }
+      const rm = getRawMatCostPerUnit(pb, uom);
+      return rm ? rm.cost : 0;
+    }
   }
   return 0;
 }
@@ -3052,10 +3076,13 @@ function updateStats(vis){
   const rootCost  = BOM.reduce((sum, item, i) => item.lv === 0 ? sum + (treeCosts[i]  || 0) : sum, 0);
   const rootCycleH = BOM.reduce((sum, item, i) => item.lv === 0 ? sum + (cumCycleH[i] || 0) : sum, 0);
   const rootSetupH = setupHours.reduce((a, b) => a + b, 0);
+  // Raw material subtotal (for breakdown display — already included in rootCost via getItemUnitCost)
+  const rawMatTotal = Object.keys(rawMatData).reduce((sum, pb) => sum + computeARAggregate(pb).cost, 0);
   const projCostStr  = rootCost   > 0 ? ' · 💰 ' + fmtC(rootCost * projectQty) : '';
+  const rawMatStr    = rawMatTotal > 0 ? ' · 🧱 ' + fmtC(rawMatTotal * projectQty) : '';
   const projHoursStr = rootCycleH > 0 ? ' · ⏱ ' + fmtTimeAuto(rootCycleH * projectQty * 60) : '';
   const setupStr     = rootSetupH > 0 ? ' · ⚙ ' + fmtTimeAuto(rootSetupH * 60) : '';
-  const projStr = (projectQty > 1 ? ` · ×${projectQty}` : '') + projCostStr + projHoursStr + setupStr;
+  const projStr = (projectQty > 1 ? ` · ×${projectQty}` : '') + projCostStr + rawMatStr + projHoursStr + setupStr;
   document.getElementById('statsBar').innerHTML=`${s.toLocaleString()}/${t.toLocaleString()} parts · ${p} drawings · ${c} CAD`+disStr+projStr+progressHtml;
   // Update cost columns
   refreshCostCells();
@@ -5577,6 +5604,22 @@ function exportMfgCSV() {
 var _graphMode = false;
 var _msalApp   = null;
 var _msalAcct  = null;
+var _procLoadedFromDrive = false; // prevents duplicate reloads after drive detection
+
+// Called whenever the correct SharePoint drive is auto-detected.
+// Re-loads proc data (manufacturing, buy notes, raw materials) from the newly
+// discovered drive, since _graphFileUrl() will now resolve to the right place.
+function _onDriveDetected(ep) {
+  const prev = localStorage.getItem('zmag_graph_drive_ep');
+  localStorage.setItem('zmag_graph_drive_ep', ep);
+  if (prev !== ep && !_procLoadedFromDrive && _graphMode && _msalAcct) {
+    _procLoadedFromDrive = true;
+    console.log('[Graph] Drive detected:', ep, '— re-loading proc data');
+    setTimeout(function() {
+      loadProcFromGraph().catch(function(e) { console.warn('[Graph proc reload]', e); });
+    }, 300);
+  }
+}
 
 const _msalConfig = {
   auth: {
@@ -5634,7 +5677,12 @@ async function _graphToken() {
 }
 
 async function _graphFileUrl() {
-  return 'https://graph.microsoft.com/v1.0/me/drive/root:/' + encodeURIComponent(PROC_JSON_FILENAME) + ':/content';
+  // Use the auto-detected drive endpoint + base path (same drive as part files)
+  const ep = localStorage.getItem('zmag_graph_drive_ep') || 'https://graph.microsoft.com/v1.0/me/drive';
+  const base = (GRAPH_FILES_BASE || '').replace(/\/+$/, '');
+  const filePath = (base ? base + '/' : '') + PROC_JSON_FILENAME;
+  const ap = filePath.split('/').map(encodeURIComponent).join('/');
+  return ep + '/root:/' + ap + ':/content';
 }
 
 // ── Graph file download — with multi-drive auto-detection ────────────────────
@@ -5700,15 +5748,8 @@ async function _graphDownloadUrl(path) {
           url = await _tryPath(ep, path);
         }
         if (url) {
-          // Auto-save working drive endpoint
-          localStorage.setItem('zmag_graph_drive_ep', ep);
-          // If found without base, clear the base
-          if (!url && base) {
-            GRAPH_FILES_BASE = '';
-            localStorage.setItem('zmag_graph_files_base', '');
-          }
+          _onDriveDetected(ep);
           _graphUrlCache.set(path, url);
-          console.log('[Graph] Auto-saved drive:', ep);
           return url;
         }
       }
@@ -5740,7 +5781,7 @@ async function _graphDownloadUrl(path) {
         const driveId = res.parentReference?.driveId;
         if (driveId) {
           const hitEp = 'https://graph.microsoft.com/v1.0/drives/' + driveId;
-          localStorage.setItem('zmag_graph_drive_ep', hitEp);
+          _onDriveDetected(hitEp);
           if (res.id) {
             const cr = await fetch(hitEp + '/items/' + res.id + '/content', { headers: H });
             if (cr.ok) {
@@ -5775,13 +5816,14 @@ async function msalLogin() {
       _msalAcct = result.account;
     }
     _graphMode = true;
+    _procLoadedFromDrive = false; // allow re-detection to trigger reload
     const btn = document.getElementById('loginBtn');
     if (btn) { btn.className='auth-btn signed-in'; btn.textContent='✓ '+(_msalAcct.name||_msalAcct.username||'Logged in'); }
     const gbBtn = document.getElementById('graphBaseBtn');
     if (gbBtn) gbBtn.style.display = '';
     setFileSyncStatus('✓ מחובר כ-'+(_msalAcct.name||_msalAcct.username||''), 'ok');
     loadProcData();
-    await loadProcFromGraph();
+    await loadProcFromGraph(); // first try (uses saved drive ep, may be correct already)
   } catch(e) {
     console.error('[msalLogin]', e);
     setFileSyncStatus('⚠ כשל בהתחברות: '+e.message, 'err');
