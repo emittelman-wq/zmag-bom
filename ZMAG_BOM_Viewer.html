@@ -392,7 +392,7 @@ tr.row-disabled .badge,tr.row-disabled .proc-btn{opacity:.5}
 <div class="topbar">
   <div>
     <div class="topbar-title">ZMAG BOM Viewer</div>
-    <div class="topbar-sub">6910W021-001 Rev B &nbsp;<span id="verBadge" style="font-size:9px;opacity:0.45;font-family:monospace">v20260720.0900</span></div>
+    <div class="topbar-sub">6910W021-001 Rev B &nbsp;<span id="verBadge" style="font-size:9px;opacity:0.45;font-family:monospace">v20260720.1200</span></div>
   </div>
   <div class="sep"></div>
 
@@ -5256,4 +5256,445 @@ function buildMfgData() {
     }
   });
 
-  Object.entries(procDa
+  Object.entries(procData).forEach(([pb, rows]) => {
+    if (!Array.isArray(rows)) return;
+    const bomTq = tqMap[pb] || 1;
+    const bomItem = BOM.find(i => (i.pb || i.pn) === pb);
+    const desc = bomItem ? (bomItem.desc || bomItem.pn || '') : pb;
+    rows.forEach(row => {
+      if (!row.type) return;
+      const unitQty = parseFloat(row.qty) || 0;
+      if (!unitQty) return;
+      const totalQty = unitQty * bomTq;
+      const setupH = parseFloat(row.setup) || 0;
+      const setupTotal = setupH * bomTq;
+      mfgData.push({procType:row.type, pb, desc, unit:row.unit||'',
+        unitQty, bomTq, totalQty, setupTotal, notes:row.notes||''});
+    });
+  });
+}
+
+function getSortedMfgData() {
+  const d = [...mfgData];
+  const col = mfgSort.col, asc = mfgSort.asc;
+  d.sort((a, b) => {
+    let va = a[col] ?? '', vb = b[col] ?? '';
+    if (typeof va === 'string') va = va.toLowerCase();
+    if (typeof vb === 'string') vb = vb.toLowerCase();
+    if (va < vb) return asc ? -1 : 1;
+    if (va > vb) return asc ? 1 : -1;
+    return 0;
+  });
+  return d;
+}
+
+function renderMfgTable(data) {
+  const tbody = document.getElementById('mfgBody');
+  const tfoot = document.getElementById('mfgFoot');
+  if (!tbody) return;
+  tbody.innerHTML = '';
+  let totalQtySum = 0, setupSum = 0;
+  (data || []).forEach(row => {
+    const procDef = PROC_TYPES.find(p => p.id === row.procType) || {};
+    const procLabel = procDef.he || procDef.en || row.procType;
+    const tr = document.createElement('tr');
+    tr.innerHTML =
+      '<td>' + procLabel + '</td>' +
+      '<td><span style="font-family:monospace;font-size:12px">' + row.pb + '</span></td>' +
+      '<td style="color:var(--text2)">' + (row.desc||'') + '</td>' +
+      '<td>' + (row.unit||'') + '</td>' +
+      '<td style="text-align:right">' + (row.unitQty%1===0?row.unitQty:row.unitQty.toFixed(3)) + '</td>' +
+      '<td style="text-align:right">' + row.bomTq + '</td>' +
+      '<td style="text-align:right;font-weight:600">' + (row.totalQty%1===0?row.totalQty:row.totalQty.toFixed(2)) + '</td>' +
+      '<td style="text-align:right">' + (row.setupTotal>0?row.setupTotal.toFixed(2):'') + '</td>';
+    tbody.appendChild(tr);
+    totalQtySum += row.totalQty;
+    setupSum += row.setupTotal;
+  });
+  if (tfoot) tfoot.innerHTML = '<tr style="font-weight:600;border-top:2px solid var(--border)">' +
+    '<td colspan="6" style="text-align:right;padding:5px 8px;color:var(--text3)">סה"כ:</td>' +
+    '<td style="text-align:right;padding:5px 8px">' + (totalQtySum%1===0?totalQtySum:totalQtySum.toFixed(2)) + '</td>' +
+    '<td style="text-align:right;padding:5px 8px">' + (setupSum>0?setupSum.toFixed(2):'') + '</td></tr>';
+}
+
+function filterMfgTable() {
+  const q = (document.getElementById('mfgSearch')||{value:''}).value.trim().toLowerCase();
+  const sorted = getSortedMfgData();
+  const rows = document.querySelectorAll('#mfgBody tr');
+  let vis = 0;
+  rows.forEach((tr, i) => {
+    const item = sorted[i];
+    if (!item) { tr.style.display = 'none'; return; }
+    const procDef = PROC_TYPES.find(p => p.id === item.procType) || {};
+    const label = (procDef.he || procDef.en || item.procType).toLowerCase();
+    const match = !q || label.includes(q) || item.pb.toLowerCase().includes(q) ||
+      (item.desc||'').toLowerCase().includes(q);
+    tr.style.display = match ? '' : 'none';
+    if (match) vis++;
+  });
+  const stats = document.getElementById('mmStats');
+  if (stats) stats.textContent = vis + ' / ' + sorted.length + ' rows';
+}
+
+function sortMfg(col) {
+  if (mfgSort.col === col) { mfgSort.asc = !mfgSort.asc; }
+  else { mfgSort.col = col; mfgSort.asc = false; }
+  const ths = document.querySelectorAll('#mfgTable thead th');
+  const colMap = ['procType','pb','desc','unit','unitQty','bomTq','totalQty','setupTotal'];
+  ths.forEach((th, i) => {
+    const si = th.querySelector('.sico');
+    if (!si) return;
+    if (colMap[i] === mfgSort.col) { si.textContent = mfgSort.asc ? '↑' : '↓'; th.classList.add('msorted'); }
+    else { si.textContent = '↕'; th.classList.remove('msorted'); }
+  });
+  renderMfgTable(getSortedMfgData());
+  filterMfgTable();
+}
+
+function renderMfgProcView() {
+  const tbody = document.getElementById('mfgProcBody');
+  if (!tbody) return;
+  const byType = {};
+  mfgData.forEach(row => {
+    if (!byType[row.procType]) byType[row.procType] = {count:0,totalQty:0,setupTotal:0};
+    byType[row.procType].count++;
+    byType[row.procType].totalQty += row.totalQty;
+    byType[row.procType].setupTotal += row.setupTotal;
+  });
+  tbody.innerHTML = '';
+  Object.entries(byType).sort((a,b)=>b[1].totalQty-a[1].totalQty).forEach(([typeId,agg]) => {
+    const procDef = PROC_TYPES.find(p => p.id === typeId) || {};
+    const label = procDef.he || procDef.en || typeId;
+    const cost = parseFloat(procDef.cost) || 0;
+    const totalCost = cost * agg.totalQty;
+    const tr = document.createElement('tr');
+    tr.innerHTML =
+      '<td>' + label + '</td>' +
+      '<td style="text-align:right">' + agg.count + '</td>' +
+      '<td style="text-align:right">' + (agg.totalQty%1===0?agg.totalQty:agg.totalQty.toFixed(2)) + '</td>' +
+      '<td style="text-align:right">' + (agg.setupTotal>0?agg.setupTotal.toFixed(2):'') + '</td>' +
+      '<td style="text-align:right">' + (cost>0?'₪'+cost.toFixed(2):'—') + '</td>' +
+      '<td style="text-align:right;font-weight:600">' + (totalCost>0?'₪'+totalCost.toFixed(0):'—') + '</td>';
+    tbody.appendChild(tr);
+  });
+}
+
+function setMfgView(view) {
+  const byPart = document.getElementById('mfgTable');
+  const byProc = document.getElementById('mfgProcTable');
+  const btnPart = document.getElementById('vtByPart');
+  const btnProc = document.getElementById('vtByProc');
+  if (view === 'part') {
+    if (byPart) byPart.style.display = '';
+    if (byProc) byProc.style.display = 'none';
+    if (btnPart) btnPart.classList.add('on');
+    if (btnProc) btnProc.classList.remove('on');
+    filterMfgTable();
+  } else {
+    if (byPart) byPart.style.display = 'none';
+    if (byProc) byProc.style.display = '';
+    if (btnPart) btnPart.classList.remove('on');
+    if (btnProc) btnProc.classList.add('on');
+    renderMfgProcView();
+  }
+}
+
+function openMfgModal() {
+  loadProcData();
+  document.getElementById('mfgModal').classList.remove('hidden');
+  buildMfgData();
+  renderMfgTable(getSortedMfgData());
+  filterMfgTable();
+  const partCount = Object.keys(procData).length;
+  const mmSub = document.getElementById('mmSub');
+  const mmStats = document.getElementById('mmStats');
+  if (mmSub) mmSub.textContent = partCount + ' ELTDesign parts · ' + mfgData.length + ' process entries';
+  if (mmStats) mmStats.textContent = mfgData.length + ' / ' + mfgData.length + ' rows';
+}
+
+function closeMfgModal() {
+  const el = document.getElementById('mfgModal');
+  if (el) el.classList.add('hidden');
+}
+
+document.addEventListener('keydown', function(e) {
+  const mm = document.getElementById('mfgModal');
+  if (e.key === 'Escape' && mm && !mm.classList.contains('hidden')) {
+    e.stopPropagation(); closeMfgModal();
+  }
+  const tm = document.getElementById('typesModal');
+  if (e.key === 'Escape' && tm && !tm.classList.contains('hidden')) {
+    e.stopPropagation(); closeTypesManager();
+  }
+});
+
+// ── Part Picker ───────────────────────────────────────────
+function openPartPicker() {
+  const wrap = document.getElementById('partPickerWrap');
+  if (!wrap) return;
+  wrap.style.display = '';
+  const inp = document.getElementById('partPickerInput');
+  if (inp) { inp.value = ''; inp.focus(); }
+  filterPartPicker();
+}
+function closePartPicker() {
+  const wrap = document.getElementById('partPickerWrap');
+  if (wrap) wrap.style.display = 'none';
+}
+function filterPartPicker() {
+  const inp = document.getElementById('partPickerInput');
+  const q = inp ? inp.value.trim().toLowerCase() : '';
+  const list = document.getElementById('partPickerList');
+  if (!list) return;
+  const seen = new Set();
+  const items = [];
+  BOM.forEach(item => {
+    if (item.type !== 'ELTDesign') return;
+    const pb = item.pb || item.pn;
+    if (seen.has(pb)) return;
+    seen.add(pb);
+    items.push({pb, desc: item.desc||'', tq: item.tq||1});
+  });
+  const matches = q ? items.filter(it => it.pb.toLowerCase().includes(q) || it.desc.toLowerCase().includes(q)) : items;
+  list.innerHTML = matches.slice(0,60).map(it => {
+    const hasproc = !!(procData[it.pb] && procData[it.pb].length);
+    const pbSafe = it.pb.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+    return '<div style="padding:5px 10px;cursor:pointer;border-bottom:1px solid var(--border);font-size:12px;display:flex;gap:8px;align-items:center"' +
+      ' onmouseenter="this.style.background=\'var(--hover)\'"' +
+      ' onmouseleave="this.style.background=\'\'"' +
+      ' onclick="selectPartPicker(\'' + pbSafe + '\',' + it.tq + ')">' +
+      '<span style="font-family:monospace;color:var(--accent)">' + it.pb + '</span>' +
+      '<span style="color:var(--text2);flex:1">' + (it.desc||'') + '</span>' +
+      (hasproc ? '<span style="color:var(--accent2,#38c9);font-size:10px">✓</span>' : '') + '</div>';
+  }).join('') || '<div style="padding:8px;color:var(--text3);font-size:12px;text-align:center">אין תוצאות</div>';
+}
+function selectPartPicker(pb, tq) {
+  closePartPicker();
+  const item = BOM.find(i => (i.pb||i.pn) === pb);
+  openProcEditor(pb, (item||{}).desc||pb, tq||1);
+}
+
+// ── Process Types Manager ─────────────────────────────────
+function openTypesManager() {
+  const el = document.getElementById('typesModal');
+  if (el) el.classList.remove('hidden');
+  renderTypesManager();
+}
+function closeTypesManager() {
+  const el = document.getElementById('typesModal');
+  if (el) el.classList.add('hidden');
+}
+function renderTypesManager() {
+  const tbody = document.getElementById('tmList');
+  if (!tbody) return;
+  tbody.innerHTML = '';
+  PROC_TYPES.forEach(function(pt, i) {
+    const tr = document.createElement('tr');
+    tr.style.borderBottom = '1px solid var(--border)';
+    const esc = s => (s||'').replace(/"/g,'&quot;');
+    tr.innerHTML =
+      '<td style="padding:5px 8px;color:var(--text3);font-size:12px">' + (i+1) + '</td>' +
+      '<td style="padding:4px 6px"><input style="width:100%;padding:3px 6px;border:1px solid var(--border);border-radius:4px;background:var(--surface2);color:var(--text1);font-size:12px"' +
+        ' value="' + esc(pt.he) + '" oninput="PROC_TYPES[' + i + '].he=this.value"></td>' +
+      '<td style="padding:4px 6px"><input style="width:100%;padding:3px 6px;border:1px solid var(--border);border-radius:4px;background:var(--surface2);color:var(--text1);font-size:12px"' +
+        ' value="' + esc(pt.en) + '" oninput="PROC_TYPES[' + i + '].en=this.value"></td>' +
+      '<td style="padding:5px 8px;color:var(--text3);font-size:11px;font-family:monospace">' + (pt.id||'') + '</td>' +
+      '<td style="padding:4px 6px"><input type="number" step="0.01" min="0"' +
+        ' style="width:70px;padding:3px 6px;border:1px solid var(--border);border-radius:4px;background:var(--surface2);color:var(--text1);font-size:12px"' +
+        ' value="' + (pt.cost||0) + '" oninput="PROC_TYPES[' + i + '].cost=parseFloat(this.value)||0"></td>' +
+      '<td style="padding:4px 6px"><input style="width:50px;padding:3px 6px;border:1px solid var(--border);border-radius:4px;background:var(--surface2);color:var(--text1);font-size:12px"' +
+        ' value="' + esc(pt.costUnit||'h') + '" oninput="PROC_TYPES[' + i + '].costUnit=this.value"></td>' +
+      '<td style="padding:4px 8px"><button onclick="tmDelRow(' + i + ')" style="background:none;border:none;color:var(--danger,#f66);cursor:pointer;font-size:16px;padding:0">✕</button></td>';
+    tbody.appendChild(tr);
+  });
+}
+function tmAddRow() {
+  PROC_TYPES.push({id:'custom_'+Date.now(), he:'', en:'', cost:0, costUnit:'h'});
+  renderTypesManager();
+  const tbody = document.getElementById('tmList');
+  if (tbody) { const r = tbody.querySelectorAll('tr'); if (r.length) r[r.length-1].scrollIntoView(); }
+}
+function tmDelRow(i) { PROC_TYPES.splice(i,1); renderTypesManager(); }
+function saveTypesManager() {
+  try { localStorage.setItem(TYPES_STORAGE_KEY, JSON.stringify(PROC_TYPES)); } catch(e) {}
+  const warn = document.getElementById('tmWarn');
+  if (warn) { warn.textContent = '✓ נשמר'; setTimeout(()=>{ warn.textContent=''; }, 1500); }
+  closeTypesManager();
+}
+
+// ── Export / Import ───────────────────────────────────────
+function exportProcJSON() {
+  const payload = {version:1, exportedAt:new Date().toISOString(), processes:procData, customProcTypes:PROC_TYPES};
+  const blob = new Blob([JSON.stringify(payload,null,2)], {type:'application/json'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = PROC_JSON_FILENAME;
+  a.click();
+}
+function importProcJSON(input) {
+  const file = input.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = function(e) {
+    try {
+      const obj = JSON.parse(e.target.result);
+      const loaded = obj.processes || obj;
+      if (typeof loaded === 'object' && loaded !== null) {
+        Object.assign(procData, loaded);
+        if (obj.customProcTypes && Array.isArray(obj.customProcTypes) && obj.customProcTypes.length)
+          PROC_TYPES = obj.customProcTypes;
+        saveProcData();
+        buildTable();
+        buildMfgData(); renderMfgTable(getSortedMfgData()); filterMfgTable();
+        const partCount = Object.keys(procData).length;
+        const mmSub = document.getElementById('mmSub');
+        if (mmSub) mmSub.textContent = partCount + ' ELTDesign parts · ' + mfgData.length + ' process entries';
+        alert('✓ ייובא: ' + Object.keys(loaded).length + ' פריטים');
+      }
+    } catch(err) { alert('שגיאה בייבוא: ' + err.message); }
+    input.value = '';
+  };
+  reader.readAsText(file);
+}
+function exportMfgCSV() {
+  const data = getSortedMfgData();
+  const rows = [['Process','Part Number','Description','Unit','Unit Qty','BOM Total','Total Qty','Setup (h)']];
+  data.forEach(function(row) {
+    const procDef = PROC_TYPES.find(function(p){ return p.id===row.procType; })||{};
+    rows.push([procDef.he||procDef.en||row.procType, row.pb, row.desc, row.unit,
+      row.unitQty, row.bomTq, row.totalQty, row.setupTotal>0?row.setupTotal.toFixed(2):'']);
+  });
+  const csv = rows.map(r=>r.map(v=>'"'+String(v||'').replace(/"/g,'""')+'"').join(',')).join('\n');
+  const blob = new Blob([csv],{type:'text/csv'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'ZMAG_Manufacturing_'+new Date().toISOString().slice(0,10)+'.csv';
+  a.click();
+}
+
+// ── MSAL / Microsoft Graph ────────────────────────────────
+var _graphMode = false;
+var _msalApp   = null;
+var _msalAcct  = null;
+
+const _msalConfig = {
+  auth: {
+    clientId: '00000000-0000-0000-0000-000000000000', // Replace with Azure AD app client ID
+    authority: 'https://login.microsoftonline.com/common',
+    redirectUri: window.location.origin + window.location.pathname
+  },
+  cache: { cacheLocation: 'localStorage', storeAuthStateInCookie: false }
+};
+
+async function _loadMSAL() {
+  if (window.msal) return;
+  await new Promise(function(resolve, reject) {
+    const s = document.createElement('script');
+    s.src = 'https://alcdn.msauth.net/browser/2.38.2/js/msal-browser.min.js';
+    s.crossOrigin = 'anonymous';
+    s.onload = resolve; s.onerror = reject;
+    document.head.appendChild(s);
+  });
+}
+
+async function _graphToken() {
+  if (!_msalApp || !_msalAcct) return null;
+  const req = {scopes:['https://graph.microsoft.com/Files.ReadWrite.All'], account:_msalAcct};
+  try { const r = await _msalApp.acquireTokenSilent(req); return r.accessToken; }
+  catch(e) {
+    try { const r = await _msalApp.acquireTokenPopup(req); _msalAcct=r.account; return r.accessToken; }
+    catch(e2) { return null; }
+  }
+}
+
+async function _graphFileUrl() {
+  return 'https://graph.microsoft.com/v1.0/me/drive/root:/' + encodeURIComponent(PROC_JSON_FILENAME) + ':/content';
+}
+
+async function msalLogin() {
+  try {
+    await _loadMSAL();
+    if (!_msalApp) {
+      _msalApp = new msal.PublicClientApplication(_msalConfig);
+      if (_msalApp.initialize) await _msalApp.initialize();
+    }
+    const accounts = _msalApp.getAllAccounts();
+    if (accounts.length > 0) {
+      _msalAcct = accounts[0];
+    } else {
+      const result = await _msalApp.loginPopup({
+        scopes: ['https://graph.microsoft.com/Files.ReadWrite.All','openid','profile']
+      });
+      _msalAcct = result.account;
+    }
+    _graphMode = true;
+    const btn = document.getElementById('loginBtn');
+    if (btn) { btn.className='auth-btn signed-in'; btn.textContent='✓ '+(_msalAcct.name||_msalAcct.username||'Logged in'); }
+    setFileSyncStatus('✓ מחובר כ-'+(_msalAcct.name||_msalAcct.username||''), 'ok');
+    loadProcData();
+    await loadProcFromGraph();
+  } catch(e) {
+    console.error('[msalLogin]', e);
+    setFileSyncStatus('⚠ כשל בהתחברות: '+e.message, 'err');
+  }
+}
+
+async function adminGetFolderItemId() {
+  if (!_graphMode || !_msalAcct) { alert('יש להתחבר עם Microsoft תחילה'); return; }
+  try {
+    const token = await _graphToken();
+    const r = await fetch('https://graph.microsoft.com/v1.0/me/drive/root', {
+      headers:{Authorization:'Bearer '+token}
+    });
+    const d = await r.json();
+    alert('Drive ID: '+(d.parentReference&&d.parentReference.driveId)+'\nRoot ID: '+d.id);
+  } catch(e) { alert('שגיאה: '+e.message); }
+}
+
+// ── BOM Excel Export ──────────────────────────────────────
+async function exportBomExcel() {
+  if (typeof ExcelJS === 'undefined') {
+    await new Promise(function(resolve, reject) {
+      const s = document.createElement('script');
+      s.src = 'https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.3.0/exceljs.min.js';
+      s.onload = resolve; s.onerror = reject;
+      document.head.appendChild(s);
+    });
+  }
+  const wb = new ExcelJS.Workbook();
+  wb.views = [{rightToLeft:true}];
+  const ws = wb.addWorksheet('BOM', {views:[{rightToLeft:true}]});
+  ws.columns = [
+    {header:'#',    key:'row',  width:5},
+    {header:'Level',key:'lv',   width:7},
+    {header:'PN',   key:'pn',   width:24},
+    {header:'PB',   key:'pb',   width:20},
+    {header:'Description',key:'desc',width:35},
+    {header:'Qty',  key:'qty',  width:8},
+    {header:'UOM',  key:'uom',  width:8},
+    {header:'TQ',   key:'tq',   width:8},
+    {header:'Type', key:'type', width:12},
+  ];
+  ws.getRow(1).eachCell(function(cell) {
+    cell.font={bold:true,color:{argb:'FFFFFFFF'}};
+    cell.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FF2D4A8A'}};
+    cell.alignment={horizontal:'center'};
+  });
+  BOM.forEach(function(item,idx) {
+    ws.addRow({row:idx+1,lv:item.lv,pn:item.pn,pb:item.pb||item.pn,
+      desc:item.desc,qty:item.qty,uom:item.uom,tq:item.tq,type:item.type});
+  });
+  ws.autoFilter={from:{row:1,column:1},to:{row:1,column:9}};
+  ws.views=[{state:'frozen',ySplit:1,rightToLeft:true}];
+  const buf = await wb.xlsx.writeBuffer();
+  const blob = new Blob([buf],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'ZMAG_BOM_'+new Date().toISOString().slice(0,10)+'.xlsx';
+  a.click();
+}
+
+// ── RFQ ──────────────────────────────────────────────────
+function openRFQModal() {
+  alert('RFQ feature — coming soon');
+}
