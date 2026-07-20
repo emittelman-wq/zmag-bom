@@ -392,7 +392,7 @@ tr.row-disabled .badge,tr.row-disabled .proc-btn{opacity:.5}
 <div class="topbar">
   <div>
     <div class="topbar-title">ZMAG BOM Viewer</div>
-    <div class="topbar-sub">6910W021-001 Rev B &nbsp;<span id="verBadge" style="font-size:9px;opacity:0.45;font-family:monospace">v20260702.1000</span></div>
+    <div class="topbar-sub">6910W021-001 Rev B &nbsp;<span id="verBadge" style="font-size:9px;opacity:0.45;font-family:monospace">v20260719.2300</span></div>
   </div>
   <div class="sep"></div>
 
@@ -789,13 +789,28 @@ function applyColWidths(){
 
 // ─── Build table ─────────────────────────────────────────
 // ─── Cost computation ────────────────────────────────────
-function getItemUnitCost(item) {
+function getItemUnitCost(item, bomIdx) {
   if (item.type === 'Buy') {
     const pb = item.pb || item.pn;
     // Raw material cost takes priority over price DB
     // Normalise to BOM unit (M→per meter, M2→per m², AR/EA→per piece)
     if (rawMatData[pb]) {
-      const rm = getRawMatCostPerUnit(pb, item.uom || '');
+      const uom = item.uom || '';
+      if (isARUnit(uom)) {
+        // Per-parent: each parent assembly may have different flat-blank geometry
+        const rm = rawMatData[pb];
+        const parentPb = getParentPbForBOMIndex(bomIdx);
+        const dims = getARDimsForParent(pb, parentPb);
+        if (!dims.L) return 0;
+        const density = parseFloat(rm.density) || (MATERIAL_DB[rm.family]||{}).density || 1000;
+        const uc = parseFloat(rm.unitCost) || 0;
+        const vol = calcRawMatVolume(rm.form, dims);
+        const mass = vol * density;
+        if (rm.costUnit === 'm2' && dims.W)
+          return (parseFloat(dims.L)/1000)*(parseFloat(dims.W)/1000)*uc;
+        return mass * uc;
+      }
+      const rm = getRawMatCostPerUnit(pb, uom);
       return rm ? rm.cost : 0;
     }
     const e = getPriceEntry(pb);
@@ -840,7 +855,7 @@ function computeTreeCosts() {
   itemSetupCost = new Array(n).fill(0);
   cumSetupCosts = new Array(n).fill(0);
   for (let i = 0; i < n; i++) {
-    unitCosts[i]    = getItemUnitCost(BOM[i]);
+    unitCosts[i]    = getItemUnitCost(BOM[i], i);
     itemSetupCost[i] = getItemSetupCost(BOM[i]);
   }
   // Bottom-up: tree cost = own extended cost + children tree costs
@@ -1768,6 +1783,85 @@ function isARUnit(uom) {
   return /^a[\/\\]?r$/i.test((uom||'').trim());
 }
 
+// ─── AR per-parent helpers ────────────────────────────────────────────────
+// Parent PB for BOM[idx] — first preceding row with strictly lower level
+function getParentPbForBOMIndex(idx) {
+  if (idx === undefined || idx < 0 || !BOM[idx]) return null;
+  const lv = BOM[idx].lv;
+  for (let j = idx - 1; j >= 0; j--) {
+    if (BOM[j].lv < lv) return BOM[j].pb || BOM[j].pn;
+  }
+  return null;
+}
+
+// Merge global dims (T, D, etc.) with per-parent dims (L, W) — perParent wins for L/W
+function getARDimsForParent(pb, parentPb) {
+  const rm = rawMatData[pb];
+  if (!rm) return {};
+  const base = Object.assign({}, rm.dims || {});
+  if (parentPb && rm.perParent && rm.perParent[parentPb] && rm.perParent[parentPb].dims) {
+    return Object.assign(base, rm.perParent[parentPb].dims);
+  }
+  return base;
+}
+
+// Collect unique parent PBs for an AR material, grouped with their total tq + STEP path
+function getParentsForARMaterial(pb) {
+  const map = new Map();
+  BOM.forEach(function(item, idx) {
+    if ((item.pb || item.pn) !== pb) return;
+    if (!isARUnit(item.uom)) return;
+    const tq = item.tq || 0;
+    for (let j = idx - 1; j >= 0; j--) {
+      if (BOM[j].lv < item.lv) {
+        const parentPb = BOM[j].pb || BOM[j].pn;
+        const stpFiles = (BOM[j].cads || []).filter(function(c){ return /\.stp$|\.step$/i.test(c); });
+        if (!map.has(parentPb)) {
+          map.set(parentPb, {
+            parentPb: parentPb,
+            parentDesc: (BOM[j].desc || BOM[j].pn || '').slice(0, 32),
+            tq: 0,
+            stpPath: stpFiles[0] || null
+          });
+        }
+        map.get(parentPb).tq += tq;
+        break;
+      }
+    }
+  });
+  return [...map.values()];
+}
+
+// Total mass & cost across ALL AR occurrences — each parent uses its own perParent dims
+function computeARAggregate(pb) {
+  const rm = rawMatData[pb];
+  if (!rm) return {mass:0, cost:0, area:0, hasAny:false};
+  const density = parseFloat(rm.density) || (MATERIAL_DB[rm.family]||{}).density || 1000;
+  const uc = parseFloat(rm.unitCost) || 0;
+  let totalMass = 0, totalArea = 0, count = 0;
+  BOM.forEach(function(item, idx) {
+    if ((item.pb || item.pn) !== pb) return;
+    if (!isARUnit(item.uom)) return;
+    const tq = item.tq || 0;
+    if (!tq) return;
+    const parentPb = getParentPbForBOMIndex(idx);
+    const dims = getARDimsForParent(pb, parentPb);
+    if (!dims.L) return;
+    count++;
+    const vol = calcRawMatVolume(rm.form, dims);
+    const mass = vol * density;
+    totalMass += mass * tq;
+    if (rm.form === 'sheet' && dims.W) {
+      totalArea += (parseFloat(dims.L)/1000) * (parseFloat(dims.W)/1000) * tq;
+    }
+  });
+  let totalCost = 0;
+  if (rm.costUnit === 'kg')  totalCost = totalMass * uc;
+  else if (rm.costUnit === 'm2') totalCost = totalArea * uc;
+  else totalCost = totalMass * uc;
+  return {mass:totalMass, cost:totalCost, area:totalArea, hasAny:count>0};
+}
+
 // Find UOM and parent STEP files from BOM for a given PB
 function getBOMInfoForPb(pb) {
   const pbLower = (pb||'').toLowerCase();
@@ -1869,24 +1963,59 @@ function openRawMatEditor(pb, desc, tq) {
         '🔍 זוהה אוטומטית: '+detectedLabels.join(' · ')+'<br><span style="font-size:10px;opacity:.8">אשר או תקן לפני שמירה</span></div>'
     : '';
 
-  // AR estimation banner
+  // AR estimation banner — per-parent table
   const bomInfo = getBOMInfoForPb(pb);
+  window._arParents = bomInfo.isAR ? getParentsForARMaterial(pb) : [];
+  const _arParents = window._arParents;
   const arBanner = bomInfo.isAR ? (function(){
-    const hasSteps = bomInfo.parentSteps.length > 0;
-    const stepOpts = bomInfo.parentSteps.map(function(s){
-      return '<option value="'+s.stpPath+'">'+s.parentDesc+'</option>';
+    const isSheet = (formId === 'sheet');
+    const existPP = (rawMatData[pb]||{}).perParent || {};
+    const rowsHTML = _arParents.map(function(p, i) {
+      const pp = p.parentPb;
+      const savedDims = (existPP[pp] && existPP[pp].dims) || {};
+      const Lval = savedDims.L || '';
+      const Wval = savedDims.W || '';
+      const safePP = pp.replace(/\\\\/g,'\\\\\\\\').replace(/'/g,"\\'").replace(/"/g,'&quot;');
+      const stpEsc = p.stpPath ? p.stpPath.replace(/"/g,'&quot;') : '';
+      const hasStep = !!p.stpPath;
+      return '<tr id="ar-prow-'+i+'" data-ppb="'+safePP+'" data-tq="'+p.tq+'">'+
+        '<td style="font-size:10px;color:var(--text2);max-width:110px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:2px 4px" title="'+p.parentPb+'">'+p.parentDesc+'</td>'+
+        '<td style="padding:1px 2px"><input class="ar-pdim" data-dim="L" data-ppb="'+safePP+'" data-row="'+i+'" value="'+Lval+'" placeholder="mm" type="number" min="0" step="1" '+
+          'style="width:60px;padding:2px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px;font-size:11px" '+
+          'oninput="arParentDimChanged(''+safePb+'',this,'+i+')"></td>'+
+        (isSheet
+          ? '<td style="padding:1px 2px"><input class="ar-pdim" data-dim="W" data-ppb="'+safePP+'" data-row="'+i+'" value="'+Wval+'" placeholder="mm" type="number" min="0" step="1" '+
+            'style="width:60px;padding:2px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px;font-size:11px" '+
+            'oninput="arParentDimChanged(''+safePb+'',this,'+i+')"></td>'
+          : '<td></td>')+
+        '<td id="ar-pmass-'+i+'" style="font-size:10px;color:var(--text3);text-align:right;padding:2px 4px"></td>'+
+        '<td style="font-size:10px;color:var(--text3);text-align:center;padding:2px 3px">×'+p.tq+'</td>'+
+        '<td id="ar-psub-'+i+'" style="font-size:10px;color:#68d391;text-align:right;padding:2px 4px;font-weight:600"></td>'+
+        '<td style="padding:1px 3px">'+
+          (hasStep
+            ? '<button onclick="runARStepEstimateForParent(''+safePb+'','+i+',this)" data-stp="'+stpEsc+'" '+
+              'style="padding:2px 6px;background:#ed8936;color:#fff;border:none;border-radius:3px;cursor:pointer;font-size:10px" title="'+stpEsc+'">📐</button>'
+            : '<span style="font-size:9px;color:var(--text3)">—</span>')+
+          '<span id="ar-presult-'+i+'" style="font-size:9px;margin-left:2px"></span>'+
+        '</td>'+
+      '</tr>';
     }).join('');
     return '<div style="background:rgba(237,137,54,.1);border:1px solid rgba(237,137,54,.4);border-radius:6px;padding:8px 10px">'+
-      '<div style="font-size:11px;font-weight:700;color:#ed8936;margin-bottom:6px">📐 AR — As Required</div>'+
-      (hasSteps
-        ? '<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:5px">'+
-            '<select id="arStpSelect" style="flex:1;min-width:200px;padding:4px 6px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:11px">'+stepOpts+'</select>'+
-            '<button id="arEstBtn" onclick="runARStepEstimate(\''+safePb+'\')" '+
-              'style="padding:4px 12px;background:#ed8936;color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:11px;white-space:nowrap">📐 הערך מ-STEP</button>'+
-          '</div>'+
-          '<div id="arEstResult" style="font-size:10px;color:var(--text3)">'+
-            'הערך אורך (M) לצינורות/מוטות, שטח (M²) ללוחות — +10% שיפצוף אוטומטי</div>'
-        : '<div style="font-size:10px;color:var(--text3)">⚠ אין STEP לפריט האב — הזן מידות ידנית</div>')+
+      '<div style="font-size:11px;font-weight:700;color:#ed8936;margin-bottom:5px">📐 AR — As Required · '+_arParents.length+' פריטי אב</div>'+
+      '<div style="max-height:190px;overflow-y:auto;border:1px solid var(--border);border-radius:4px">'+
+      '<table style="width:100%;border-collapse:collapse">'+
+      '<thead><tr style="background:var(--surface2);position:sticky;top:0;z-index:1">'+
+        '<th style="padding:3px 4px;text-align:right;font-size:10px;font-weight:600">פריט אב</th>'+
+        '<th style="padding:3px 4px;font-size:10px;font-weight:600">L (mm)</th>'+
+        (isSheet ? '<th style="padding:3px 4px;font-size:10px;font-weight:600">W (mm)</th>' : '<th></th>')+
+        '<th style="padding:3px 4px;font-size:10px;font-weight:600;text-align:right">g/blank</th>'+
+        '<th style="padding:3px 4px;font-size:10px;font-weight:600">כמות</th>'+
+        '<th style="padding:3px 4px;font-size:10px;font-weight:600;text-align:right">kg</th>'+
+        '<th style="padding:3px 4px;font-size:10px;font-weight:600">STEP</th>'+
+      '</tr></thead>'+
+      '<tbody>'+rowsHTML+'</tbody>'+
+      '</table></div>'+
+      '<div id="arAggRow" style="margin-top:6px;font-size:11px;color:var(--text2)">מחשב…</div>'+
     '</div>';
   })() : '';
 
@@ -1969,7 +2098,11 @@ function openRawMatEditor(pb, desc, tq) {
     '</div>';
   m.style.display='flex';
   m.dataset.tq = tq || 1;
-  setTimeout(rmUpdateCalc, 50);
+  m.dataset.arPb = bomInfo.isAR ? pb : '';
+  setTimeout(function(){
+    rmUpdateCalc();
+    if (bomInfo.isAR) arInitRowDisplays(pb);
+  }, 50);
 }
 
 // ─── AR: estimate dims from parent STEP file ─────────────────────────────────
@@ -2030,6 +2163,131 @@ async function runARStepEstimate(pb) {
   }
 }
 
+// ─── AR per-parent editor helpers ────────────────────────────────────────────
+function arParentDimChanged(pb, inp, rowIdx) {
+  const parentPb = inp.dataset.ppb;
+  const dimKey   = inp.dataset.dim;
+  const val      = inp.value;
+  if (!rawMatData[pb]) return;
+  if (!rawMatData[pb].perParent) rawMatData[pb].perParent = {};
+  if (!rawMatData[pb].perParent[parentPb]) rawMatData[pb].perParent[parentPb] = {dims:{}};
+  if (!rawMatData[pb].perParent[parentPb].dims) rawMatData[pb].perParent[parentPb].dims = {};
+  rawMatData[pb].perParent[parentPb].dims[dimKey] = val;
+  arRefreshRow(pb, rowIdx);
+  arRefreshAggregate(pb);
+}
+
+function arRefreshRow(pb, rowIdx) {
+  const massTd = document.getElementById('ar-pmass-'+rowIdx);
+  const subTd  = document.getElementById('ar-psub-'+rowIdx);
+  if (!massTd) return;
+  const rm = rawMatData[pb];
+  if (!rm) return;
+  const row = document.getElementById('ar-prow-'+rowIdx);
+  if (!row) return;
+  const parentPb = row.dataset.ppb;
+  const tq = parseInt(row.dataset.tq) || 1;
+  const form    = document.getElementById('rmForm')?.value || rm.form || 'sheet';
+  const density = parseFloat(document.getElementById('rmDensity')?.value) || parseFloat(rm.density) || 2700;
+  const dims = getARDimsForParent(pb, parentPb);
+  if (!dims.L) { massTd.textContent = ''; subTd.textContent = ''; return; }
+  const vol  = calcRawMatVolume(form, dims);
+  const mass = vol * density;
+  massTd.textContent = mass >= 0.001 ? (mass*1000).toFixed(0)+' g' : (mass*1e6).toFixed(0)+' mg';
+  subTd.textContent  = (mass*tq >= 0.001 ? (mass*tq).toFixed(3) : '<0.001')+' kg';
+}
+
+function arRefreshAggregate(pb) {
+  const aggEl = document.getElementById('arAggRow');
+  if (!aggEl) return;
+  const rm = rawMatData[pb];
+  if (!rm) { aggEl.textContent = ''; return; }
+  localStorage.setItem(RM_STORAGE_KEY, JSON.stringify(rawMatData));
+  const density  = parseFloat(document.getElementById('rmDensity')?.value) || parseFloat(rm.density) || 2700;
+  const form     = document.getElementById('rmForm')?.value || rm.form || 'sheet';
+  const uc       = parseFloat(document.getElementById('rmUnitCost')?.value) || parseFloat(rm.unitCost) || 0;
+  const costUnit = document.getElementById('rmCostUnit')?.value || rm.costUnit || 'kg';
+  let totalMass = 0, totalArea = 0, counted = 0;
+  BOM.forEach(function(item, idx) {
+    if ((item.pb || item.pn) !== pb) return;
+    if (!isARUnit(item.uom)) return;
+    const tq = item.tq || 0; if (!tq) return;
+    const parentPb = getParentPbForBOMIndex(idx);
+    const dims = getARDimsForParent(pb, parentPb);
+    if (!dims.L) return;
+    counted++;
+    const vol = calcRawMatVolume(form, dims);
+    totalMass += vol * density * tq;
+    if (form === 'sheet' && dims.W)
+      totalArea += (parseFloat(dims.L)/1000)*(parseFloat(dims.W)/1000)*tq;
+  });
+  let totalCost = 0;
+  if (costUnit==='kg') totalCost = totalMass * uc;
+  else if (costUnit==='m2') totalCost = totalArea * uc;
+  else totalCost = totalMass * uc;
+  const total = window._arParents ? window._arParents.length : '?';
+  if (counted > 0) {
+    aggEl.innerHTML =
+      '<strong style="color:#68d391">סה"כ: '+totalMass.toFixed(2)+' kg</strong>'+
+      (totalArea>0 ? ' <span style="color:var(--text3);font-size:10px">('+totalArea.toFixed(3)+' M²)</span>' : '')+
+      (uc ? ' · <strong style="color:var(--accent2)">'+fmtC(totalCost)+'</strong>' : '')+
+      ' <span style="color:var(--text3);font-size:10px">מ-'+counted+'/'+total+' פריטים</span>';
+  } else {
+    aggEl.textContent = 'הזן L ו-W בטבלה כדי לחשב';
+  }
+}
+
+function arInitRowDisplays(pb) {
+  let i = 0;
+  while (document.getElementById('ar-prow-'+i)) { arRefreshRow(pb, i); i++; }
+  arRefreshAggregate(pb);
+}
+
+async function runARStepEstimateForParent(pb, rowIdx, btn) {
+  const stpPath = btn.dataset.stp || '';
+  const row = document.getElementById('ar-prow-'+rowIdx);
+  if (!row || !stpPath) return;
+  const parentPb = row.dataset.ppb;
+  const resultEl = document.getElementById('ar-presult-'+rowIdx);
+  const origTxt  = btn.textContent;
+  btn.disabled   = true;
+  btn.textContent = '⟳';
+  if (resultEl) resultEl.textContent = '';
+  try {
+    if (!rootDirHandle && !(_graphMode && _msalAcct))
+      throw new Error('נדרשת כניסה לטעינת STEP');
+    let meshData = _geomCache.get(stpPath);
+    if (!meshData) {
+      const buf = await getFileBuffer(stpPath);
+      meshData  = await parseStepInWorker(buf);
+      if (!meshData || !meshData.length) throw new Error('אין גאומטריה ב-STEP');
+      _geomCache.set(stpPath, meshData);
+    }
+    const bbox = getBBoxFromMeshData(meshData);
+    if (!bbox) throw new Error('אין bounding box');
+    const form = document.getElementById('rmForm')?.value || (rawMatData[pb]||{}).form || 'sheet';
+    const est  = estimateARDims(form, bbox);
+    if (!est) throw new Error('צורה לא נתמכת');
+    if (!rawMatData[pb]) return;
+    if (!rawMatData[pb].perParent) rawMatData[pb].perParent = {};
+    if (!rawMatData[pb].perParent[parentPb]) rawMatData[pb].perParent[parentPb] = {dims:{}};
+    rawMatData[pb].perParent[parentPb].dims.L = String(est.L);
+    if (est.W) rawMatData[pb].perParent[parentPb].dims.W = String(est.W);
+    row.querySelectorAll('.ar-pdim').forEach(function(inp) {
+      if (inp.dataset.dim === 'L') inp.value = est.L;
+      if (inp.dataset.dim === 'W' && est.W) inp.value = est.W;
+    });
+    arRefreshRow(pb, rowIdx);
+    arRefreshAggregate(pb);
+    if (resultEl) resultEl.innerHTML = '<span style="color:#68d391;cursor:help" title="'+est.note.replace(/"/g,\'&quot;\')+'">✓</span>';
+  } catch(e) {
+    if (resultEl) resultEl.innerHTML = '<span style="color:#fc8181;cursor:help" title="'+e.message+'">⚠</span>';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = origTxt;
+  }
+}
+
 function rmFamilyChanged() {
   const fam = document.getElementById('rmFamily').value;
   const fd = MATERIAL_DB[fam]||MATERIAL_DB.aluminum;
@@ -2082,13 +2340,21 @@ function rmUpdateCalc() {
   }
   const resEl = document.getElementById('rmCalcResult');
   if (!resEl) return;
+  const _arPb = document.getElementById('rawMatModal')?.dataset.arPb || '';
   resEl.innerHTML =
     '<div style="display:flex;gap:20px;flex-wrap:wrap">'+
     '<div><span style="color:var(--text2)">נפח: </span><strong>'+( vol*1e6).toFixed(2)+' cm³</strong></div>'+
     '<div><span style="color:var(--text2)">משקל/יחידה: </span><strong>'+(mass*1000).toFixed(1)+' ג'+'</strong></div>'+
     '<div><span style="color:var(--text2)">עלות/יחידה: </span><strong>'+fmtC(costPer)+'</strong></div>'+
-    '<div><span style="color:var(--text2)">סה"כ TQ='+tq+': </span><strong style="color:var(--accent2)">'+fmtC(costPer*tq)+'</strong></div>'+
+    (_arPb
+      ? '<div style="color:var(--text3);font-size:10px">סה"כ AR — ראה טבלת פריטי אב ↑</div>'
+      : '<div><span style="color:var(--text2)">סה"כ TQ='+tq+': </span><strong style="color:var(--accent2)">'+fmtC(costPer*tq)+'</strong></div>')+
     '</div>';
+  if (_arPb) {
+    let _ri = 0;
+    while (document.getElementById('ar-prow-'+_ri)) { arRefreshRow(_arPb, _ri); _ri++; }
+    arRefreshAggregate(_arPb);
+  }
 }
 
 function saveRawMat(pb) {
@@ -2099,7 +2365,8 @@ function saveRawMat(pb) {
   const dims   = rmGetDims();
   const costUnit=document.getElementById('rmCostUnit').value;
   const unitCost=parseFloat(document.getElementById('rmUnitCost').value)||0;
-  rawMatData[pb] = {family,grade,form,dims,density,costUnit,unitCost};
+  const _existRM = rawMatData[pb] || {};
+  rawMatData[pb] = {family,grade,form,dims,density,costUnit,unitCost,perParent:_existRM.perParent||{}};
   localStorage.setItem(RM_STORAGE_KEY, JSON.stringify(rawMatData));
   document.getElementById('rawMatModal').style.display='none';
   computeTreeCosts(); refreshCostCells();
@@ -3708,21 +3975,16 @@ function renderBuyTable(data) {
     const tdQty = document.createElement('td');
     tdQty.style.cssText = 'text-align:right;font-weight:700';
     if (isAR) {
-      const rmAR = rawMatData[item.pb];
-      const rmDims = rmAR && rmAR.dims;
-      const rmForm = rmAR && rmAR.form;
-      if (rmDims && rmDims.L) {
-        const Lm = parseFloat(rmDims.L) / 1000;
-        if (rmForm === 'sheet' && rmDims.W) {
-          const Wm = parseFloat(rmDims.W) / 1000;
-          const area = (Lm * Wm * item.totalQty).toFixed(3);
-          tdQty.innerHTML = '<span style="color:#ed8936" title="'+item.totalQty+'× '+Lm.toFixed(3)+'×'+Wm.toFixed(3)+' M²">~'+area+' M²</span>';
+      const agg = rawMatData[item.pb] ? computeARAggregate(item.pb) : null;
+      if (agg && agg.hasAny) {
+        const _rmForm = (rawMatData[item.pb]||{}).form || '';
+        if (_rmForm === 'sheet' && agg.area > 0) {
+          tdQty.innerHTML = '<span style="color:#ed8936" title="'+item.totalQty+' פריטי אב, מידות שונות לכל אחד">~'+agg.area.toFixed(3)+' M²</span>';
         } else {
-          const len = (Lm * item.totalQty).toFixed(2);
-          tdQty.innerHTML = '<span style="color:#ed8936" title="'+item.totalQty+'× '+Lm.toFixed(3)+' M">~'+len+' M</span>';
+          tdQty.innerHTML = '<span style="color:#ed8936" title="'+item.totalQty+' פריטי אב">~'+agg.mass.toFixed(2)+' kg</span>';
         }
       } else {
-        tdQty.innerHTML = '<span style="color:#ed8936;opacity:.6" title="פתח עורך ח&quot;ג להערכת כמות">? AR</span>';
+        tdQty.innerHTML = '<span style="color:#ed8936;opacity:.6" title="פתח 🧱 להערכת כמות AR">? AR ('+item.totalQty+')</span>';
       }
     } else {
       tdQty.style.color = 'var(--accent2)';
@@ -3825,16 +4087,30 @@ function renderBuyTable(data) {
     const tdWt = document.createElement('td');
     tdWt.style.cssText = 'text-align:right;font-size:11px';
     const _rmUom = item.uom || '';
-    const rmRes  = rawMatData[item.pb] ? getRawMatCostPerUnit(item.pb, _rmUom) : null;
-    if (rmRes && rmRes.mass > 0) {
-      const totalMassKg = rmRes.mass * item.totalQty;
-      const perLabel = _rmUom === 'M' ? 'kg/m' : _rmUom === 'M2' ? 'kg/m²' : 'kg/יח';
-      tdWt.innerHTML =
-        '<span style="color:#68d391;font-weight:600">' +
-        (totalMassKg >= 1 ? totalMassKg.toFixed(2) + ' kg' : (totalMassKg*1000).toFixed(0) + ' g') +
-        '</span><br><span style="font-size:10px;color:var(--text3)">' +
-        rmRes.mass.toFixed(3) + ' ' + perLabel + '</span>';
-      grandTotalMassKg += totalMassKg;
+    if (rawMatData[item.pb]) {
+      if (isARUnit(_rmUom)) {
+        const agg = computeARAggregate(item.pb);
+        if (agg.hasAny && agg.mass > 0) {
+          tdWt.innerHTML =
+            '<span style="color:#68d391;font-weight:600">' +
+            (agg.mass >= 1 ? agg.mass.toFixed(2) + ' kg' : (agg.mass*1000).toFixed(0) + ' g') +
+            '</span>' +
+            (agg.area > 0 ? '<br><span style="font-size:10px;color:var(--text3)">'+agg.area.toFixed(3)+' M²</span>' : '');
+          grandTotalMassKg += agg.mass;
+        }
+      } else {
+        const rmRes = getRawMatCostPerUnit(item.pb, _rmUom);
+        if (rmRes && rmRes.mass > 0) {
+          const totalMassKg = rmRes.mass * item.totalQty;
+          const perLabel = _rmUom === 'M' ? 'kg/m' : _rmUom === 'M2' ? 'kg/m²' : 'kg/יח';
+          tdWt.innerHTML =
+            '<span style="color:#68d391;font-weight:600">' +
+            (totalMassKg >= 1 ? totalMassKg.toFixed(2) + ' kg' : (totalMassKg*1000).toFixed(0) + ' g') +
+            '</span><br><span style="font-size:10px;color:var(--text3)">' +
+            rmRes.mass.toFixed(3) + ' ' + perLabel + '</span>';
+          grandTotalMassKg += totalMassKg;
+        }
+      }
     }
     tr.appendChild(tdWt);
 
@@ -5047,1227 +5323,4 @@ function renderMfgTable(data) {
       '<td style="color:var(--text2)" title="' + item.desc.replace(/"/g,'&quot;') + '">' + item.desc.substring(0, 45) + '</td>' +
       '<td style="color:var(--text3);text-align:center">' + item.unit + '</td>' +
       '<td style="text-align:right;color:var(--text2)">' + uqFmt + '</td>' +
-      '<td style="text-align:right;color:var(--text3)">' + item.bomTq.toLocaleString() + '</td>' +
-      '<td style="text-align:right;font-weight:700;color:var(--accent2)">' + tqFmt + '</td>' +
-      '<td style="text-align:right;color:var(--text3)">' + stFmt + '</td>';
-    tr.addEventListener('click', function() { openProcEditor(item.pb, item.desc, item.bomTq); });
-    tbody.appendChild(tr);
-
-    const tkey = item.procType + '|' + item.unit;
-    if (!totals[tkey]) totals[tkey] = {label: item.procLabel, unit: item.unit, qty: 0, setup: 0};
-    totals[tkey].qty += item.totalQty;
-    totals[tkey].setup += item.setupTotal;
-  });
-
-  tfoot.innerHTML = '';
-  Object.values(totals).sort(function(a,b){ return a.label.localeCompare(b.label); }).forEach(function(t) {
-    const tr = document.createElement('tr');
-    const qFmt = Number.isInteger(t.qty) ? t.qty : t.qty.toFixed(3);
-    const sFmt = t.setup > 0 ? fmtTimeAuto(t.setup * 60) : '';
-    tr.innerHTML =
-      '<td colspan="3" style="text-align:right;color:var(--text2);font-size:11px;padding-right:8px">Total — <strong>' + t.label + '</strong></td>' +
-      '<td style="color:var(--text3);text-align:center">' + t.unit + '</td>' +
-      '<td></td><td></td>' +
-      '<td style="text-align:right;font-family:monospace;font-weight:700;color:var(--accent2)">' + qFmt + '</td>' +
-      '<td style="text-align:right;font-family:monospace;color:var(--text3)">' + sFmt + '</td>';
-    tfoot.appendChild(tr);
-  });
-}
-
-function filterMfgTable() {
-  const q = document.getElementById('mfgSearch').value.trim().toLowerCase();
-  if (mfgView === 'proc') { renderMfgByProcess(q); return; }
-  const sorted = getSortedMfgData();
-  const rows = document.querySelectorAll('#mfgBody tr');
-  let vis = 0;
-  rows.forEach(function(tr, i) {
-    const item = sorted[i];
-    if (!item) return;
-    const match = !q || item.pb.toLowerCase().includes(q) ||
-      item.procLabel.toLowerCase().includes(q) ||
-      item.desc.toLowerCase().includes(q) ||
-      item.unit.toLowerCase().includes(q);
-    tr.style.display = match ? '' : 'none';
-    if (match) vis++;
-  });
-  document.getElementById('mmStats').textContent = vis + ' / ' + mfgData.length + ' rows';
-}
-
-function sortMfg(col) {
-  if (mfgSort.col === col) mfgSort.asc = !mfgSort.asc;
-  else { mfgSort.col = col; mfgSort.asc = col !== 'totalQty' && col !== 'setupTotal'; }
-  document.querySelectorAll('#mfgTable thead th').forEach(function(th) {
-    th.classList.remove('msorted');
-    const si = th.querySelector('.sico');
-    if (si) si.textContent = '↕';
-  });
-  const colMap = ['procType','pb','desc','unit','unitQty','bomTq','totalQty','setupTotal'];
-  const ths = document.querySelectorAll('#mfgTable thead th');
-  const idx = colMap.indexOf(col);
-  if (idx >= 0 && ths[idx]) {
-    ths[idx].classList.add('msorted');
-    const si = ths[idx].querySelector('.sico');
-    if (si) si.textContent = mfgSort.asc ? '↑' : '↓';
-  }
-  renderMfgTable(getSortedMfgData());
-  filterMfgTable();
-}
-
-// ── Part Picker (add/edit ELTDesign parts from mfg summary) ─
-function openPartPicker() {
-  const wrap = document.getElementById('partPickerWrap');
-  wrap.style.display = wrap.style.display === 'none' ? 'block' : 'none';
-  if (wrap.style.display === 'block') {
-    document.getElementById('partPickerInput').value = '';
-    renderPartPickerList('');
-    document.getElementById('partPickerInput').focus();
-  }
-}
-
-function closePartPicker() {
-  document.getElementById('partPickerWrap').style.display = 'none';
-}
-
-function filterPartPicker() {
-  renderPartPickerList(document.getElementById('partPickerInput').value.trim().toLowerCase());
-}
-
-function renderPartPickerList(q) {
-  // Build unique ELTDesign item list from BOM
-  const seen = new Set();
-  const items = [];
-  BOM.forEach(function(item) {
-    if (item.type !== 'ELTDesign') return;
-    const pb = item.pb || item.pn;
-    if (seen.has(pb)) return;
-    seen.add(pb);
-    items.push({pb: pb, desc: item.desc, tq: item.tq || 1});
-  });
-
-  const filtered = q ? items.filter(function(it) {
-    return it.pb.toLowerCase().includes(q) || it.desc.toLowerCase().includes(q);
-  }) : items;
-
-  const list = document.getElementById('partPickerList');
-  list.innerHTML = '';
-
-  if (filtered.length === 0) {
-    list.innerHTML = '<div style="padding:10px;color:var(--text3);text-align:center">No matching ELTDesign parts</div>';
-    return;
-  }
-
-  filtered.slice(0, 80).forEach(function(it) {
-    const hasProc = procData[it.pb] && procData[it.pb].length > 0;
-    const div = document.createElement('div');
-    div.className = 'part-pick-item';
-    div.innerHTML =
-      '<span class="ppn">' + it.pb + '</span>' +
-      '<span class="pdesc">' + it.desc.substring(0, 50) + '</span>' +
-      '<span class="ptq">×' + it.tq + '</span>' +
-      (hasProc ? '<span class="phas">⚙ ' + procData[it.pb].length + '</span>' : '');
-    div.addEventListener('click', function() {
-      closePartPicker();
-      openProcEditor(it.pb, it.desc, it.tq);
-    });
-    list.appendChild(div);
-  });
-
-  if (filtered.length > 80) {
-    const more = document.createElement('div');
-    more.style.cssText = 'padding:6px 10px;color:var(--text3);font-size:11px;text-align:center';
-    more.textContent = (filtered.length - 80) + ' more — type to narrow';
-    list.appendChild(more);
-  }
-}
-
-function openMfgModal() {
-  buildMfgData();
-  const partCount = Object.keys(procData).length;
-  document.getElementById('mmSub').textContent = partCount + ' ELTDesign parts · ' + mfgData.length + ' process entries';
-  // Reset to 'part' view
-  mfgView = 'part';
-  document.getElementById('mfgTable').style.display = '';
-  document.getElementById('mfgProcTable').style.display = 'none';
-  document.getElementById('vtByPart').className = 'mm-vtbtn on';
-  document.getElementById('vtByProc').className = 'mm-vtbtn';
-  renderMfgTable(getSortedMfgData());
-  document.getElementById('mmStats').textContent = mfgData.length + ' / ' + mfgData.length + ' rows';
-  document.getElementById('mfgModal').classList.remove('hidden');
-  document.getElementById('mfgSearch').value = '';
-  document.getElementById('mfgSearch').placeholder = 'Search process or part…';
-  document.getElementById('mfgSearch').focus();
-}
-
-let mfgView = 'part'; // 'part' or 'proc'
-
-function setMfgView(v) {
-  mfgView = v;
-  document.getElementById('vtByPart').className = 'mm-vtbtn' + (v === 'part' ? ' on' : '');
-  document.getElementById('vtByProc').className = 'mm-vtbtn' + (v === 'proc' ? ' on' : '');
-  document.getElementById('mfgTable').style.display     = v === 'part' ? '' : 'none';
-  document.getElementById('mfgProcTable').style.display = v === 'proc' ? '' : 'none';
-  document.getElementById('mfgSearch').placeholder =
-    v === 'part' ? 'Search process or part…' : 'Search process type…';
-  if (v === 'proc') {
-    renderMfgByProcess(document.getElementById('mfgSearch').value.trim().toLowerCase());
-  } else {
-    renderMfgTable(getSortedMfgData());
-    filterMfgTable();
-  }
-}
-
-function renderMfgByProcess(q) {
-  // Normalize units before grouping:
-  // Time units → all converted to hours (h)
-  // Other units (m, m2, pcs) → kept as-is, grouped separately
-  function normalizeUnit(unit, qty) {
-    if (unit === 'min') return {unit: 'h', qty: qty / 60};
-    return {unit: unit, qty: qty};
-  }
-
-  // Group by (procType, normalizedUnit) — consolidate all parts under one heading per process type
-  const groups = {};
-  mfgData.forEach(function(item) {
-    const n = normalizeUnit(item.unit, item.totalQty);
-    const key = item.procType + '|' + n.unit;
-    if (!groups[key]) {
-      groups[key] = {
-        procType: item.procType,
-        procLabel: item.procLabel,
-        unit: n.unit,
-        totalQty: 0,
-        setupTotal: 0,
-        parts: [],
-        seenPartProc: new Set(), // deduplicate same part+proc combo
-        origUnits: new Set(), // track original units for display hint
-      };
-    }
-    groups[key].totalQty += n.qty;
-    // Only add setup once per unique part (setup is per-project, not per-unit)
-    const partProcKey = item.pb + '|' + item.procType;
-    if (!groups[key].seenPartProc.has(partProcKey)) {
-      groups[key].setupTotal += item.setupTotal;
-      groups[key].seenPartProc.add(partProcKey);
-    }
-    // Only list part once
-    if (!groups[key].parts.includes(item.pb)) {
-      groups[key].parts.push(item.pb);
-    }
-    groups[key].origUnits.add(item.unit);
-  });
-
-  // Sort by procLabel
-  const sorted = Object.values(groups).sort(function(a, b) {
-    return a.procLabel.localeCompare(b.procLabel);
-  });
-
-  const filtered = q ? sorted.filter(function(g) {
-    return g.procLabel.toLowerCase().includes(q);
-  }) : sorted;
-
-  const tbody = document.getElementById('mfgProcBody');
-  tbody.innerHTML = '';
-
-  if (filtered.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--text3);padding:30px">No processes match the search.</td></tr>';
-    document.getElementById('mmStats').textContent = '0 process types';
-    return;
-  }
-
-  filtered.forEach(function(g) {
-    const tr = document.createElement('tr');
-    tr.style.borderBottom = '1px solid var(--border)';
-
-    // Format qty using fmtTimeAuto for time units, plain number for others
-    const qty = g.totalQty;
-    const isTimeUnit = (g.unit === 'h' || g.unit === 'min');
-    const qFmt = isTimeUnit ? fmtTimeAuto(g.unit === 'h' ? qty * 60 : qty) : ((qty === Math.floor(qty)) ? qty.toLocaleString() : qty.toFixed(2));
-    const sFmt = g.setupTotal > 0 ? fmtTimeAuto(g.setupTotal * 60) : '—';
-
-    const uniqueParts = g.parts; // already deduplicated at insert time
-    const partsStr = uniqueParts.slice(0, 6).join(', ') +
-      (uniqueParts.length > 6 ? '  +' + (uniqueParts.length - 6) + ' more' : '');
-
-    // Show conversion hint if original units were mixed (e.g. h + min → h)
-    const origArr = Array.from(g.origUnits);
-    const unitHint = (origArr.length > 1 || (origArr[0] && origArr[0] !== g.unit))
-      ? '<span style="font-size:9px;color:var(--text3);margin-left:4px">(' + origArr.join('+') + '→' + g.unit + ')</span>'
-      : '';
-
-    tr.innerHTML =
-      '<td style="padding:8px 10px"><span class="proc-type-badge">' + g.procLabel + '</span></td>' +
-      '<td style="padding:8px 10px;text-align:center;color:var(--text3);font-size:12px">' + g.unit + unitHint + '</td>' +
-      '<td style="padding:8px 10px;text-align:right;font-weight:700;font-family:monospace;color:var(--accent2);font-size:15px">' + qFmt + '</td>' +
-      '<td style="padding:8px 10px;text-align:right;color:var(--text3);font-size:12px">' + uniqueParts.length + '</td>' +
-      '<td style="padding:8px 10px;text-align:right;color:var(--text3);font-size:12px">' + sFmt + '</td>' +
-      '<td style="padding:8px 10px;color:var(--text3);font-size:10px;font-family:monospace">' + partsStr + '</td>';
-    tbody.appendChild(tr);
-  });
-
-  document.getElementById('mmStats').textContent = filtered.length + ' process type' + (filtered.length !== 1 ? 's' : '');
-}
-
-function closeMfgModal() {
-  document.getElementById('mfgModal').classList.add('hidden');
-}
-
-document.getElementById('mfgModal').addEventListener('click', function(e) {
-  if (e.target === document.getElementById('mfgModal')) closeMfgModal();
-});
-document.addEventListener('keydown', function(e) {
-  if (e.key === 'Escape' &&
-      !document.getElementById('mfgModal').classList.contains('hidden') &&
-      document.getElementById('procModal').classList.contains('hidden') &&
-      document.getElementById('priceEditBox').classList.contains('hidden')) {
-    closeMfgModal();
-  }
-});
-
-// ── JSON Import / Export ──────────────────────────────────
-function exportProcJSON() {
-  const exportObj = {
-    version: 1,
-    project: 'ZMAG-6910W021',
-    exported: new Date().toISOString().slice(0, 10),
-    processes: procData
-  };
-  const blob = new Blob([JSON.stringify(exportObj, null, 2)], {type: 'application/json'});
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = 'ZMAG_Manufacturing_Processes.json';
-  a.click();
-}
-
-function importProcJSON(input) {
-  const file = input.files[0];
-  if (!file) return;
-  const reader = new FileReader();
-  reader.onload = function(e) {
-    try {
-      const obj = JSON.parse(e.target.result);
-      if (obj.customProcTypes && Array.isArray(obj.customProcTypes) && obj.customProcTypes.length) {
-        PROC_TYPES = obj.customProcTypes;
-      }
-      const imported = obj.processes || obj;
-      if (typeof imported === 'object' && imported !== null) {
-        procData = imported;
-        saveProcData();
-        buildTable();
-        buildMfgData();
-        renderMfgTable(getSortedMfgData());
-        filterMfgTable();
-        document.getElementById('mmSub').textContent =
-          Object.keys(procData).length + ' parts imported · ' + mfgData.length + ' process entries';
-      } else {
-        alert('Invalid JSON format.');
-      }
-    } catch(err) {
-      alert('Import failed: ' + err.message);
-    }
-    input.value = '';
-  };
-  reader.readAsText(file);
-}
-
-// ── Manufacturing CSV Export ──────────────────────────────
-function exportMfgCSV() {
-  buildMfgData();
-  const sorted = getSortedMfgData();
-  const rows = [['Process (HE)','Process (EN)','Part Number','Description','Unit Qty','Unit','BOM Total Qty','Total Process Qty','Setup Qty','Setup Unit','Setup Total (h)','Notes']];
-  sorted.forEach(function(item) {
-    const typeObj = PROC_TYPES.find(function(t){ return t.id === item.procType; });
-    rows.push([
-      typeObj ? typeObj.label : item.procType,
-      typeObj ? typeObj.en : item.procType,
-      item.pb, item.desc,
-      item.unitQty, item.unit,
-      item.bomTq, item.totalQty,
-      item.setup, item.setupUnit, item.setupTotal,
-      item.notes
-    ]);
-  });
-  const csv = rows.map(function(r) {
-    return r.map(function(v) { return '"' + String(v).replace(/"/g, '""') + '"'; }).join(',');
-  }).join('\n');
-  const blob = new Blob([csv], {type: 'text/csv'});
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = 'ZMAG_Manufacturing_Processes.csv';
-  a.click();
-}
-
-
-// ═══════════════════════════════════════════════════════════
-// ── Types Manager ──────────────────────────────────────────
-// ═══════════════════════════════════════════════════════════
-
-var _tmEditing = null; // working copy of PROC_TYPES being edited
-
-function openTypesManager() {
-  // Include cost & costUnit; fallback empty strings to avoid trim() crash on old data
-  _tmEditing = PROC_TYPES.map(function(t){ return {id:t.id, label:t.label||'', en:t.en||'', cost:t.cost||0, costUnit:t.costUnit||'h'}; });
-  renderTypesList();
-  document.getElementById('tmWarn').textContent = '';
-  document.getElementById('typesModal').classList.remove('hidden');
-}
-
-function closeTypesManager() {
-  document.getElementById('typesModal').classList.add('hidden');
-  _tmEditing = null;
-}
-
-function renderTypesList() {
-  const tbody = document.getElementById('tmList');
-  tbody.innerHTML = '';
-  _tmEditing.forEach(function(t, i) {
-    // Count uses of this type in procData
-    var useCount = 0;
-    Object.values(procData).forEach(function(procs) {
-      procs.forEach(function(p) { if (p.type === t.id) useCount++; });
-    });
-    var isDefault = DEFAULT_PROC_TYPES.some(function(d){ return d.id === t.id; });
-    var unitOpts = PROC_UNITS.map(function(u){
-      return '<option value="' + u.id + '"' + (u.id === (t.costUnit||'h') ? ' selected' : '') + '>' + u.id + '</option>';
-    }).join('');
-    var tr = document.createElement('tr');
-    tr.innerHTML =
-      '<td style="color:var(--text3);font-size:12px;padding:4px 8px;text-align:center">' + (i+1) + '</td>' +
-      '<td><input class="tm-input" value="' + escHtml(t.label) + '" data-i="' + i + '" data-field="label" oninput="tmUpdate(this)"></td>' +
-      '<td><input class="tm-input" value="' + escHtml(t.en) + '" data-i="' + i + '" data-field="en" oninput="tmUpdate(this)"></td>' +
-      '<td class="tm-id">' + escHtml(t.id) + (isDefault ? '' : ' <span title="custom" style="color:var(--accent);font-size:10px">✦</span>') + '</td>' +
-      '<td><input class="tm-input tm-cost-inp" type="number" min="0" step="0.01" value="' + (t.cost||0) + '" data-i="' + i + '" data-field="cost" oninput="tmUpdate(this)" placeholder="0"></td>' +
-      '<td><select class="tm-unit-sel" data-i="' + i + '" data-field="costUnit" onchange="tmUpdate(this)">' + unitOpts + '</select></td>' +
-      '<td><button class="tm-del" onclick="tmDeleteRow(' + i + ')" ' +
-        (useCount > 0 ? 'title="נמצא בשימוש ב-' + useCount + ' שורות — לא ניתן למחוק"' : '') +
-        (useCount > 0 ? 'disabled' : '') +
-        '>✕</button></td>';
-    tbody.appendChild(tr);
-  });
-}
-
-function escHtml(s) {
-  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-}
-
-function tmUpdate(input) {
-  var i = parseInt(input.dataset.i);
-  var field = input.dataset.field;
-  _tmEditing[i][field] = field === 'cost' ? parseFloat(input.value) || 0 : input.value;
-}
-
-function tmDeleteRow(i) {
-  _tmEditing.splice(i, 1);
-  renderTypesList();
-}
-
-function tmAddRow() {
-  _tmEditing.push({id: 'proc_' + Date.now(), label: '', en: '', cost: 0, costUnit: 'h'});
-  renderTypesList();
-  // Focus the last row's first input
-  var rows = document.getElementById('tmList').querySelectorAll('tr');
-  if (rows.length) {
-    var inp = rows[rows.length-1].querySelector('input');
-    if (inp) { inp.focus(); inp.select(); }
-  }
-}
-
-function saveTypesManager() {
-  var warn = document.getElementById('tmWarn');
-  try {
-    // Validate: all rows must have label and en filled
-    var hasEmpty = _tmEditing.some(function(t){ return !(t.label||'').trim() || !(t.en||'').trim(); });
-    if (hasEmpty) {
-      warn.textContent = '⚠ יש שדות ריקים — מלא שם עברי ושם אנגלי לכל תהליך';
-      return;
-    }
-    var ids = _tmEditing.map(function(t){ return t.id; });
-    var hasDup = ids.some(function(id, i){ return ids.indexOf(id) !== i; });
-    if (hasDup) {
-      warn.textContent = '⚠ ישנם מזהים כפולים';
-      return;
-    }
-    PROC_TYPES = _tmEditing.slice();
-    try { computeTreeCosts(); refreshCostCells(); } catch(e2){ console.warn('cost refresh error:',e2); }
-    saveProcData();
-    // Refresh any open dropdowns
-    if (typeof renderMfgSide === 'function' && typeof curItem !== 'undefined' && curItem && curItem.type === 'ELTDesign') {
-      renderMfgSide(curItem);
-    }
-    if (!document.getElementById('mfgModal').classList.contains('hidden')) {
-      try { buildMfgData(); renderMfgTable(getSortedMfgData()); filterMfgTable(); buildMfgProcTable(); } catch(e3){ console.warn('mfg refresh error:',e3); }
-    }
-    closeTypesManager();
-  } catch(err) {
-    warn.textContent = '⚠ שגיאה: ' + err.message;
-    console.error('saveTypesManager error:', err);
-  }
-}
-
-
-// ═══════════════════════════════════════════════════════════
-// ── Microsoft Graph API + MSAL Authentication ─────────────
-// ═══════════════════════════════════════════════════════════
-
-const MSAL_CLIENT_ID  = 'fe62b5b2-7236-4149-9d44-038ae6f98545';
-const MSAL_TENANT_ID  = 'fff493cd-fb80-4d62-b826-547a443f23de'; // SEI Technologies tenant only
-const MSAL_AUTHORITY_TENANT = MSAL_TENANT_ID;
-const GRAPH_SCOPES    = ['Files.ReadWrite.All', 'User.Read']; // Admin pre-consented — grants access to all files user can access (incl. SharePoint folders)
-
-// Project folder segments in SharePoint (used for all file access)
-const GRAPH_FOLDER_SEGS = [
-  'PROJECTS','HAARGAZ','ZMAG','Zmag',
-  'Zmag \u05dc\u05d7\u05d1\u05e8\u05ea \u05d4\u05d0\u05e8\u05d2\u05d6',
-  'ZMAG PRODUCTE FILE 10.03.26',
-  'ZMAG PRODUCTE FILE FOR FTS 10.03.26'
-];
-// Full path to the JSON proc file
-const GRAPH_PATH_SEGS = [...GRAPH_FOLDER_SEGS, PROC_JSON_FILENAME];
-
-// ── RFQ Modal ─────────────────────────────────────────────
-function openRFQModal() {
-  let m = document.getElementById('rfqModal');
-  if (!m) {
-    m = document.createElement('div');
-    m.id = 'rfqModal';
-    m.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:1000;display:none;align-items:center;justify-content:center';
-    m.innerHTML =
-      '<div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;width:820px;max-height:82vh;display:flex;flex-direction:column;overflow:hidden">' +
-        '<div style="padding:10px 16px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">' +
-          '<span style="font-weight:600;font-size:14px">🔧 RFQ – קבלני משנה</span>' +
-          '<div style="display:flex;gap:8px">' +
-            '<button onclick="exportRFQCSV()" style="padding:4px 12px;background:var(--accent2);color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:12px">📥 Export CSV</button>' +
-            '<button onclick="document.getElementById(\'rfqModal\').style.display=\'none\'" style="padding:4px 10px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;cursor:pointer">✕</button>' +
-          '</div>' +
-        '</div>' +
-        '<div id="rfqTableContainer" style="overflow:auto;flex:1;padding:14px;direction:rtl"></div>' +
-      '</div>';
-    document.body.appendChild(m);
-  }
-  renderRFQTable();
-  m.style.display = 'flex';
-}
-function renderRFQTable() {
-  const c = document.getElementById('rfqTableContainer');
-  if (!c) return;
-  const byDomain = {};
-  BOM.forEach(item => {
-    const pb = item.pb || item.pn;
-    if (!subData[pb]) return;
-    const domain = (subData[pb].domain || '').trim() || 'כללי';
-    if (!byDomain[domain]) byDomain[domain] = [];
-    byDomain[domain].push({item, pb});
-  });
-  const domains = Object.keys(byDomain).sort();
-  if (!domains.length) {
-    c.innerHTML = '<p style="color:var(--text2);text-align:center;padding:32px;font-size:13px">אין פריטי קבלן משנה מסווגים.<br>פתח עורך תהליכים (⚙) וסמן פריטים כקבלן משנה.</p>';
-    return;
-  }
-  let html = '';
-  domains.forEach(domain => {
-    const items = byDomain[domain];
-    html += '<div style="margin-bottom:16px">' +
-      '<div style="font-weight:600;color:var(--accent);font-size:13px;margin-bottom:6px;padding-bottom:4px;border-bottom:1px solid var(--border)">' + domain + ' (' + items.length + ')</div>' +
-      '<table style="width:100%;border-collapse:collapse;font-size:12px">' +
-        '<thead><tr style="background:var(--surface2)">' +
-          '<th style="padding:5px 8px;text-align:right;border:1px solid var(--border)">מק"ט</th>' +
-          '<th style="padding:5px 8px;text-align:right;border:1px solid var(--border)">תיאור</th>' +
-          '<th style="padding:5px 8px;text-align:center;border:1px solid var(--border)">כמות</th>' +
-          '<th style="padding:5px 8px;text-align:center;border:1px solid var(--border)">כמות כוללת</th>' +
-          '<th style="padding:5px 8px;text-align:center;border:1px solid var(--border)">יחידה</th>' +
-        '</tr></thead><tbody>';
-    items.forEach(({item}) => {
-      html += '<tr>' +
-        '<td style="padding:4px 8px;border:1px solid var(--border);font-family:monospace;font-size:11px">' + (item.pn||'') + '</td>' +
-        '<td style="padding:4px 8px;border:1px solid var(--border)">' + (item.desc||'') + '</td>' +
-        '<td style="padding:4px 8px;text-align:center;border:1px solid var(--border)">' + (item.qty||'') + '</td>' +
-        '<td style="padding:4px 8px;text-align:center;border:1px solid var(--border)">' + (item.tq||'') + '</td>' +
-        '<td style="padding:4px 8px;text-align:center;border:1px solid var(--border)">' + (item.uom||'') + '</td>' +
-        '</tr>';
-    });
-    html += '</tbody></table></div>';
-  });
-  c.innerHTML = html;
-}
-function exportRFQCSV() {
-  let csv = '﻿' + 'מקט,תיאור,כמות,כמות כוללת,יחידה,תחום\n';
-  const byDomain = {};
-  BOM.forEach(item => {
-    const pb = item.pb || item.pn;
-    if (!subData[pb]) return;
-    const domain = (subData[pb].domain||'').trim()||'כללי';
-    if (!byDomain[domain]) byDomain[domain] = [];
-    byDomain[domain].push(item);
-  });
-  Object.keys(byDomain).sort().forEach(domain => {
-    byDomain[domain].forEach(item => {
-      csv += '"' + (item.pn||'').replace(/"/g,'""') + '","' + (item.desc||'').replace(/"/g,'""') + '","' +
-        (item.qty||'') + '","' + (item.tq||'') + '","' + (item.uom||'') + '","' + domain + '"\n';
-    });
-  });
-  const a = document.createElement('a');
-  a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv);
-  a.download = 'ZMAG_RFQ_Subcontractors.csv';
-  a.click();
-}
-
-// ── Excel BOM Export ──────────────────────────────────────
-// Helper: given BOM index i, returns its <tr> regardless of current sort order
-function _bomTrByIdx(i) {
-  return document.querySelector('#bomBody tr[data-idx="' + i + '"]');
-}
-
-function exportBomExcel() {
-  const btn = document.getElementById('xlsxBtn');
-  // Determine scope: selected assembly subtree, or entire visible BOM
-  const isAssembly = selIdx >= 0;
-  const rootItem   = isAssembly ? BOM[selIdx] : null;
-  const rootLv     = isAssembly ? rootItem.lv : 0;
-
-  // Build the ordered list of BOM indices to export
-  let exportIndices;
-  if (isAssembly) {
-    // Subtree: root + descendants (in BOM order, visibility-unchecked — export all children)
-    exportIndices = [selIdx];
-    for (let j = selIdx + 1; j < BOM.length; j++) {
-      if (BOM[j].lv <= rootLv) break;
-      exportIndices.push(j);
-    }
-  } else {
-    // Full BOM: only currently-visible rows, in BOM order
-    exportIndices = [];
-    BOM.forEach((_, i) => {
-      const tr = _bomTrByIdx(i);
-      if (tr && !tr.classList.contains('hid') && !tr.classList.contains('vhid')) {
-        exportIndices.push(i);
-      }
-    });
-  }
-
-  if (btn) { btn.textContent = '⏳'; btn.disabled = true; }
-  const restore = () => {
-    if (btn) { btn.textContent = isAssembly ? '📊 הרכבה' : '📊 Excel'; btn.disabled = false; }
-  };
-
-  const run = () => {
-    try {
-      const wb = new ExcelJS.Workbook();
-      wb.creator = 'ZMAG BOM Viewer';
-      const wsName = isAssembly ? (rootItem.pn || 'Assembly').replace(/[\[\]\/\\:?*]/g, '-').substring(0, 31) : 'BOM';
-      const ws = wb.addWorksheet(wsName, {
-        views: [{ rightToLeft: true, state: 'frozen', ySplit: 1 }],
-        properties: { summaryBelow: false, summaryRight: false }
-      });
-      ws.columns = [
-        { header: '#',              key: 'num',    width: 5  },
-        { header: 'רמה',            key: 'lv',     width: 6  },
-        { header: 'מק"ט',           key: 'pn',     width: 26 },
-        { header: 'תיאור',          key: 'desc',   width: 48 },
-        { header: 'קטלוג',          key: 'cat',    width: 15 },
-        { header: 'כמות',           key: 'qty',    width: 8  },
-        { header: 'כמות כוללת',     key: 'tq',     width: 13 },
-        { header: 'יחידה',          key: 'uom',    width: 8  },
-        { header: 'סוג',            key: 'type',   width: 12 },
-        { header: 'סטטוס',          key: 'st',     width: 12 },
-        { header: '⚙ Setup',        key: 'setupH', width: 13 },
-        { header: '⏱ ייצור',       key: 'cycleH', width: 13 },
-        { header: '⏱ עץ',          key: 'cumCH',  width: 13 },
-        { header: '⏱ כולל',        key: 'totalH', width: 13 },
-        { header: '💰 עלות שורה',   key: 'ucost',  width: 14 },
-        { header: '🌳 עלות עץ',     key: 'tcost',  width: 14 },
-        { header: '🌳 פרוייקט',    key: 'pcost',  width: 14 },
-      ];
-      const hdrRow = ws.getRow(1);
-      hdrRow.height = 20;
-      hdrRow.eachCell(cell => {
-        cell.font      = { bold: true, color: { argb: 'FFFFFFFF' }, size: 10, name: 'Arial' };
-        cell.fill      = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1F3864' } };
-        cell.alignment = { horizontal: 'center', vertical: 'middle', readingOrder: 'rightToLeft' };
-        cell.border    = { bottom: { style: 'thin', color: { argb: 'FF8EA9C1' } } };
-      });
-      ws.autoFilter = { from: 'A1', to: 'Q1' };
-      const typeFill = { ELTDesign: 'FFD6E4BC', Buy: 'FFBDD7EE', Package: 'FFFFFFCC' };
-
-      exportIndices.forEach((i, rowNum) => {
-        const item = BOM[i];
-        const relLv  = item.lv - rootLv;            // relative level (0 = root)
-        const indent = '  '.repeat(relLv);
-        const setupV  = setupHours[i] > 0.005 ? Math.round(setupHours[i] * 100) / 100 : null;
-        const cycleV  = perUnitH[i]   > 0.005 ? Math.round(perUnitH[i]   * 100) / 100 : null;
-        const cumCV   = cumCycleH[i]  > 0.005 ? Math.round(cumCycleH[i]  * 100) / 100 : null;
-        const totalHV = cumCV != null          ? Math.round(cumCV * projectQty * 100) / 100 : null;
-        const ucVal   = unitCosts[i]  > 0      ? Math.round(unitCosts[i]  * 100) / 100 : null;
-        const tcVal   = treeCosts[i]    > 0     ? Math.round(treeCosts[i] * 100) / 100 : null;
-        const setupC  = (cumSetupCosts && cumSetupCosts[i] > 0) ? cumSetupCosts[i] : 0;
-        const pcVal   = (tcVal != null || setupC > 0) ? Math.round(((tcVal || 0) * projectQty + setupC) * 100) / 100 : null;
-        const exRow = ws.addRow({
-          num:   rowNum + 1,
-          lv:    relLv,
-          pn:    indent + (item.pn  || ''),
-          desc:  item.desc || '',
-          cat:   item.cat  || '',
-          qty:   item.qty  != null ? item.qty  : '',
-          tq:    item.tq   != null ? item.tq   : '',
-          uom:   item.uom  || '',
-          type:  item.type || '',
-          st:    item.st   || '',
-          setupH: setupV, cycleH: cycleV, cumCH: cumCV, totalH: totalHV,
-          ucost: ucVal, tcost: tcVal, pcost: pcVal,
-        });
-        exRow.outlineLevel = Math.min(relLv, 7);
-        exRow.height = 15;
-        const bg = typeFill[item.type];
-        exRow.eachCell({ includeEmpty: true }, cell => {
-          cell.font      = { name: 'Arial', size: 9 };
-          cell.alignment = { vertical: 'middle', readingOrder: 'rightToLeft' };
-          if (bg) cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: bg } };
-          cell.border    = { bottom: { style: 'hair', color: { argb: 'FFD0D0D0' } } };
-        });
-        ['num','lv','qty','tq'].forEach(k => {
-          const cell = exRow.getCell(ws.getColumn(k).number);
-          cell.alignment = { horizontal: 'center', vertical: 'middle' };
-        });
-        ['setupH','cycleH','cumCH','totalH'].forEach(k => {
-          const cell = exRow.getCell(ws.getColumn(k).number);
-          cell.numFmt = '#,##0.00" hr"'; cell.alignment = { horizontal: 'right', vertical: 'middle' };
-        });
-        ['ucost','tcost','pcost'].forEach(k => {
-          const cell = exRow.getCell(ws.getColumn(k).number);
-          cell.numFmt = '₪#,##0.00'; cell.alignment = { horizontal: 'right', vertical: 'middle' };
-        });
-      });
-
-      const date = new Date().toISOString().slice(0,10).replace(/-/g,'');
-      const fname = isAssembly
-        ? 'ZMAG_' + (rootItem.pn || 'Assembly').replace(/[\/\\*?[\]:]/g,'_') + '_' + date + '.xlsx'
-        : 'ZMAG_BOM_' + date + '.xlsx';
-      wb.xlsx.writeBuffer().then(buf => {
-        const blob = new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
-        const url  = URL.createObjectURL(blob);
-        const a    = document.createElement('a');
-        a.href = url; a.download = fname;
-        document.body.appendChild(a); a.click(); a.remove();
-        URL.revokeObjectURL(url);
-        restore();
-      }).catch(e => { alert('שגיאה בייצוא: ' + e.message); restore(); });
-    } catch(e) { alert('שגיאה: ' + e.message); restore(); }
-  };
-  if (window.ExcelJS) { run(); return; }
-  const s = document.createElement('script');
-  s.src = 'https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.3.0/exceljs.min.js';
-  s.onload = run;
-  s.onerror = () => { alert('לא ניתן לטעון ספריית Excel'); restore(); };
-  document.head.appendChild(s);
-}
-
-function exportAssemblyExcel() {
-  if (selIdx < 0) return;
-  const rootItem = BOM[selIdx];
-  const rootLv = rootItem.lv;
-
-  // Collect root + all descendants
-  const indices = [selIdx];
-  for (let j = selIdx + 1; j < BOM.length; j++) {
-    if (BOM[j].lv <= rootLv) break;
-    indices.push(j);
-  }
-
-  const run = () => {
-    const wb = new ExcelJS.Workbook();
-    wb.creator = 'ZMAG BOM Viewer';
-    const ws = wb.addWorksheet('Assembly', {
-      views: [{ rightToLeft: true, state: 'frozen', ySplit: 1 }],
-      properties: { summaryBelow: false }
-    });
-    ws.columns = [
-      { header: '#',             key: 'num',   width: 5  },
-      { header: 'רמה',           key: 'lv',    width: 6  },
-      { header: 'מק"ט',          key: 'pn',    width: 26 },
-      { header: 'תיאור',         key: 'desc',  width: 48 },
-      { header: 'קטלוג',         key: 'cat',   width: 15 },
-      { header: 'כמות',          key: 'qty',   width: 8  },
-      { header: 'כמות כוללת',    key: 'tq',    width: 13 },
-      { header: 'יחידה',         key: 'uom',   width: 8  },
-      { header: 'סוג',           key: 'type',  width: 12 },
-      { header: 'סטטוס',         key: 'st',    width: 12 },
-      { header: '⚙ Setup',       key: 'setupH', width: 13 },
-      { header: '⏱ ייצור',      key: 'cycleH', width: 13 },
-      { header: '⏱ עץ',         key: 'cumCH',  width: 13 },
-      { header: '⏱ כולל',       key: 'totalH', width: 13 },
-      { header: '💰 עלות שורה',  key: 'ucost',  width: 14 },
-      { header: '🌳 עלות עץ',    key: 'tcost',  width: 14 },
-      { header: '🌳 פרוייקט',   key: 'pcost',  width: 14 },
-    ];
-    const hdrRow = ws.getRow(1);
-    hdrRow.height = 20;
-    hdrRow.eachCell(cell => {
-      cell.font      = { bold: true, color: { argb: 'FFFFFFFF' }, size: 10, name: 'Arial' };
-      cell.fill      = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1F3864' } };
-      cell.alignment = { horizontal: 'center', vertical: 'middle', readingOrder: 'rightToLeft' };
-    });
-    ws.autoFilter = { from: 'A1', to: 'Q1' };
-    const typeFill = { ELTDesign: 'FFD6E4BC', Buy: 'FFBDD7EE', Package: 'FFFFFFCC' };
-    indices.forEach((i, rowNum) => {
-      const item = BOM[i];
-      const indent = '  '.repeat(item.lv - rootLv);
-      const setupV  = setupHours[i] > 0.005 ? Math.round(setupHours[i] * 100) / 100 : null;
-      const cycleV  = perUnitH[i]   > 0.005 ? Math.round(perUnitH[i]   * 100) / 100 : null;
-      const cumCV   = cumCycleH[i]  > 0.005 ? Math.round(cumCycleH[i]  * 100) / 100 : null;
-      const totalHV = cumCV != null          ? Math.round(cumCV * projectQty * 100) / 100 : null;
-      const uc      = unitCosts[i]  > 0      ? Math.round(unitCosts[i]  * 100) / 100 : null;
-      const tc      = treeCosts[i]    > 0     ? Math.round(treeCosts[i] * 100) / 100 : null;
-      const setupC  = (cumSetupCosts && cumSetupCosts[i] > 0) ? cumSetupCosts[i] : 0;
-      const pcVal   = (tc != null || setupC > 0) ? Math.round(((tc || 0) * projectQty + setupC) * 100) / 100 : null;
-      const exRow = ws.addRow({
-        num:   rowNum + 1,
-        lv:    item.lv - rootLv,
-        pn:    indent + (item.pn  || ''),
-        desc:  item.desc || '',
-        cat:   item.cat  || '',
-        qty:   item.qty  != null ? item.qty  : '',
-        tq:    item.tq   != null ? item.tq   : '',
-        uom:   item.uom  || '',
-        type:  item.type || '',
-        st:    item.st   || '',
-        setupH: setupV, cycleH: cycleV, cumCH: cumCV, totalH: totalHV,
-        ucost: uc, tcost: tc, pcost: pcVal,
-      });
-      exRow.outlineLevel = Math.min(item.lv - rootLv, 7);
-      exRow.height = 15;
-      const bg = typeFill[item.type];
-      exRow.eachCell({ includeEmpty: true }, cell => {
-        cell.font      = { name: 'Arial', size: 9 };
-        cell.alignment = { vertical: 'middle', readingOrder: 'rightToLeft' };
-        if (bg) cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: bg } };
-        cell.border    = { bottom: { style: 'hair', color: { argb: 'FFD0D0D0' } } };
-      });
-      ['num','lv','qty','tq'].forEach(k => {
-        const col = ws.getColumn(k);
-        const cell = exRow.getCell(col.number);
-        cell.alignment = { horizontal: 'center', vertical: 'middle' };
-      });
-      ['setupH','cycleH','cumCH','totalH'].forEach(k => {
-        const cell = exRow.getCell(ws.getColumn(k).number);
-        cell.numFmt = '#,##0.00" hr"';
-        cell.alignment = { horizontal: 'right', vertical: 'middle' };
-      });
-      ['ucost','tcost','pcost'].forEach(k => {
-        const cell = exRow.getCell(ws.getColumn(k).number);
-        cell.numFmt = '₪#,##0.00';
-        cell.alignment = { horizontal: 'right', vertical: 'middle' };
-      });
-    });
-    const safeName = (rootItem.pn||'assembly').replace(/[\/\\*?[\]:]/g,'_');
-    wb.xlsx.writeBuffer().then(buf => {
-      const blob = new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = 'ZMAG_' + safeName + '.xlsx';
-      document.body.appendChild(a); a.click(); a.remove();
-      URL.revokeObjectURL(url);
-    });
-  };
-  if (window.ExcelJS) { run(); return; }
-  const s = document.createElement('script');
-  s.src = 'https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.3.0/exceljs.min.js';
-  s.onload = run;
-  s.onerror = () => alert('לא ניתן לטעון ספריית Excel');
-  document.head.appendChild(s);
-}
-
-var _msalApp    = null;
-var _msalAcct   = null;
-var _graphMode  = false;
-var _graphTimer = null;
-// Hardcoded SEI SharePoint document library — discovered 2026-06-11
-// Drive: "מסמכים" | https://erezsei.sharepoint.com/sites/SEI/Shared%20Documents
-const _SP_DRIVE_ID       = 'b!Qe1iOstjY0KbJKrc_v_5zIHLrm4I4_pOlmnmzqhw083lJ5hviuDDQrvoUnxCy0Ge';
-// Item ID of ZMAG PRODUCTE FILE FOR FTS 10.03.26 folder — discovered 2026-06-14
-const _SP_FOLDER_ITEM_ID = '016E63ZBJ6UJWY3QBN6FEIMO7SI5IBYW4D';
-var _graphDriveBase = null;
-
-// Returns the SharePoint drive base URL
-async function _discoverSite() {
-  if (_graphDriveBase) return _graphDriveBase;
-  _graphDriveBase = 'https://graph.microsoft.com/v1.0/drives/' + _SP_DRIVE_ID;
-  setFileSyncStatus('✅ SharePoint מחובר', '');
-  return _graphDriveBase;
-}
-
-async function _graphFileUrl() {
-  const base = await _discoverSite();
-  const path = GRAPH_PATH_SEGS.map(encodeURIComponent).join('/');
-  return base + '/root:/' + path + ':/content';
-}
-// Get Graph API item metadata URL — uses folder item ID (Files.ReadWrite.All grants access)
-async function _graphItemUrl(relPath) {
-  const encodedPath = relPath.split('/').map(encodeURIComponent).join('/');
-  return 'https://graph.microsoft.com/v1.0/drives/' + _SP_DRIVE_ID + '/items/' + _SP_FOLDER_ITEM_ID + ':/' + encodedPath;
-}
-// Get a pre-authenticated download URL (no auth header needed – works as iframe src)
-async function _graphDownloadUrl(filename) {
-  const token = await _graphToken();
-  const url1 = await _graphItemUrl(filename); // now async (discovers site)
-  const r1 = await fetch(url1, { headers: { Authorization: 'Bearer ' + token } });
-  if (r1.ok) {
-    const d = await r1.json();
-    if (d['@microsoft.graph.downloadUrl']) return d['@microsoft.graph.downloadUrl'];
-    throw new Error('No downloadUrl in response for ' + filename);
-  }
-  let errBody1 = {};
-  try { errBody1 = await r1.json(); } catch(e) {}
-  const errMsg1 = (errBody1.error && (errBody1.error.code + ': ' + errBody1.error.message)) || r1.status;
-  console.warn('[Graph item]', r1.status, errMsg1, url1);
-  throw new Error('Graph ' + r1.status + ': ' + errMsg1 + ' | ' + filename);
-}
-
-// ── Inline MSAL-compatible OAuth2 PKCE (no CDN required) ─────────────────────
-// Implements only the methods used by this app via redirect flow.
-// Login redirects to Microsoft → returns to this page with #code= → auto-handled.
-var msal = (function(){
-  function _ss(k,d){try{return JSON.parse(sessionStorage.getItem(k))||d}catch(e){return d}}
-  function _sv(k,v){sessionStorage.setItem(k,JSON.stringify(v))}
-  function _cv(){var a=new Uint8Array(32);crypto.getRandomValues(a);return btoa(String.fromCharCode.apply(null,a)).replace(/\+/g,'-').replace(/\//g,'_').replace(/=/g,'')}
-  async function _ch(v){var d=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(v));return btoa(String.fromCharCode.apply(null,new Uint8Array(d))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=/g,'')}
-
-  function PCA(cfg){this._c=cfg;this._accts=_ss('_msal_a',[]);this._toks=_ss('_msal_t',{})}
-
-  PCA.prototype.handleRedirectPromise=async function(){
-    // Step-by-step debug visible to user
-    var dbg=[];
-    var push=function(s){dbg.push(s);console.log('[MSAL]',s);};
-    // Check both hash (fragment mode) and query string (query mode)
-    var h=location.hash||'';
-    var q=location.search||'';
-    push('hash='+(h||'(empty)')+' query='+(q||'(empty)'));
-    var p=new URLSearchParams(h.slice(1));
-    if(!p.get('code')&&!p.get('error')) p=new URLSearchParams(q.slice(1));
-    var code=p.get('code'),err=p.get('error');
-    if(!code&&!err){push('no code/error in URL → returning null'); sessionStorage.setItem('_msal_dbg',JSON.stringify(dbg)); return null;}
-    push('code found! length='+code.length);
-    history.replaceState({},document.title,location.pathname);
-    if(err){push('error='+err); sessionStorage.setItem('_msal_dbg',JSON.stringify(dbg)); throw new Error(p.get('error_description')||err);}
-    var cv=sessionStorage.getItem('_msal_cv')||localStorage.getItem('_msal_cv_bk');
-    push('cv='+(cv?'✅ found (len='+cv.length+')':'❌ NOT FOUND'));
-    if(!cv){ push('FATAL: no code_verifier'); sessionStorage.setItem('_msal_dbg',JSON.stringify(dbg)); console.warn('MSAL: no code_verifier found'); return null; }
-    var sc=_ss('_msal_sc',[]);
-    push('exchanging code for token...');
-    sessionStorage.setItem('_msal_dbg',JSON.stringify(dbg));
-    var tok=await this._exchange(code,cv);
-    push('token received: access_token='+(tok.access_token?'✅':'❌')+' id_token='+(tok.id_token?'✅':'❌')+' error='+(tok.error||'none'));
-    sessionStorage.removeItem('_msal_cv');
-    this._save(tok,sc);
-    push('saved. accounts='+this._accts.length);
-    sessionStorage.setItem('_msal_dbg',JSON.stringify(dbg));
-    return{account:this._accts[0]};
-  };
-  PCA.prototype.getAllAccounts=function(){return this._accts};
-  PCA.prototype.loginPopup=async function(req){await this._go(req.scopes||[]);return new Promise(function(){})};
-  PCA.prototype.acquireTokenSilent=async function(req){
-    var k=(req.scopes||[]).slice().sort().join(' ');
-    var t=this._toks[k]||this._toks['$'];
-    if(t&&t.e>Date.now())return{accessToken:t.v,account:this._accts[0]};
-    throw new Error('no_token');
-  };
-  PCA.prototype.acquireTokenPopup=async function(req){await this._go(req.scopes||[]);return new Promise(function(){})};
-  PCA.prototype.logoutPopup=async function(){this._accts=[];this._toks={};_sv('_msal_a',[]);_sv('_msal_t',{})};
-
-  PCA.prototype._go=async function(scopes){
-    var v=_cv(),ch=await _ch(v);
-    // Clear any stale state from previous failed attempts
-    sessionStorage.removeItem('_msal_cv');
-    localStorage.removeItem('_msal_cv_bk');
-    sessionStorage.removeItem('_msal_dbg');
-    sessionStorage.setItem('_msal_cv',v);
-    localStorage.setItem('_msal_cv_bk',v); // backup — some browsers clear sessionStorage on cross-origin redirect
-    _sv('_msal_sc',scopes);
-    var tid=this._c.auth.authority.split('/').pop();
-    // response_mode:'query' puts code in ?code=... (different cache key) → forces fresh page load
-    // This ensures the redirect hits the LATEST deployed version, not a browser-cached old version
-    location.href='https://login.microsoftonline.com/'+tid+'/oauth2/v2.0/authorize?'+
-      new URLSearchParams({client_id:this._c.auth.clientId,response_type:'code',
-        redirect_uri:this._c.auth.redirectUri,scope:scopes.join(' '),
-        code_challenge:ch,code_challenge_method:'S256',response_mode:'query',
-        prompt:'select_account'});
-  };
-  PCA.prototype._exchange=async function(code,cv){
-    var tid=this._c.auth.authority.split('/').pop();
-    var r=await fetch('https://login.microsoftonline.com/'+tid+'/oauth2/v2.0/token',{
-      method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},
-      body:new URLSearchParams({client_id:this._c.auth.clientId,code:code,
-        grant_type:'authorization_code',redirect_uri:this._c.auth.redirectUri,code_verifier:cv})});
-    var d=await r.json();if(d.error)throw new Error(d.error_description||d.error);return d;
-  };
-  PCA.prototype._save=function(tok,scopes){
-    var acctSaved=false;
-    // Try id_token first
-    if(tok.id_token){
-      try{
-        var b=tok.id_token.split('.')[1].replace(/-/g,'+').replace(/_/g,'/');
-        while(b.length%4)b+='=';
-        var pp=JSON.parse(atob(b));
-        this._accts=[{username:pp.preferred_username||pp.upn||pp.unique_name||pp.email||'SEI User',name:pp.name||'',homeAccountId:pp.oid||''}];
-        _sv('_msal_a',this._accts);
-        acctSaved=true;
-      }catch(e){console.error('MSAL _save id_token parse:',e);}
-    }
-    // Fallback: parse access_token for user info
-    if(!acctSaved&&tok.access_token){
-      try{
-        var ab=tok.access_token.split('.')[1].replace(/-/g,'+').replace(/_/g,'/');
-        while(ab.length%4)ab+='=';
-        var ap=JSON.parse(atob(ab));
-        this._accts=[{username:ap.upn||ap.unique_name||ap.preferred_username||ap.email||'SEI User',name:ap.name||'',homeAccountId:ap.oid||ap.sub||''}];
-        _sv('_msal_a',this._accts);
-        acctSaved=true;
-      }catch(e){console.error('MSAL _save access_token parse:',e);}
-    }
-    // Last resort: we have a token — create placeholder account so auth succeeds
-    if(!acctSaved&&tok.access_token){
-      this._accts=[{username:'SEI User',name:'SEI User',homeAccountId:'sei'}];
-      _sv('_msal_a',this._accts);
-    }
-    if(tok.access_token){
-      var k=(scopes||[]).slice().sort().join(' ')||'$';
-      var entry={v:tok.access_token,e:Date.now()+(tok.expires_in||3600)*1000};
-      this._toks[k]=entry;this._toks['$']=entry;
-      _sv('_msal_t',this._toks);
-    }
-  };
-  return{PublicClientApplication:PCA};
-})();
-// ── End inline MSAL ──────────────────────────────────────────────────────────
-
-async function _initMSAL() {
-  _msalApp = new msal.PublicClientApplication({
-    auth: {
-      clientId: MSAL_CLIENT_ID,
-      authority: 'https://login.microsoftonline.com/' + MSAL_AUTHORITY_TENANT,
-      redirectUri: window.location.origin + window.location.pathname,
-    },
-    cache: { cacheLocation: 'localStorage', storeAuthStateInCookie: false }
-  });
-  // initialize() not needed for inline impl
-  try {
-    const resp = await _msalApp.handleRedirectPromise();
-    if (resp) { _msalAcct = resp.account; localStorage.removeItem('_msal_cv_bk'); }
-  } catch(e) {
-    console.error('MSAL redirect error:', e);
-    // Show error so user knows what failed
-    const msg = e.message || String(e);
-    setFileSyncStatus('⚠ Auth error: ' + msg.slice(0,60), 'err');
-    // Common fix: redirect URI must be "Single-page application" type in Azure AD
-    if (msg.includes('invalid_grant') || msg.includes('invalid_client') || msg.includes('AADSTS')) {
-      setTimeout(()=>alert('שגיאת אימות Azure AD:\n' + msg + '\n\nפתרון: ב-App Registration → Authentication → הוסף את ה-URI תחת "Single-page application" (לא "Web")'), 100);
-    }
-  }
-  if (!_msalAcct) {
-    const accts = _msalApp.getAllAccounts();
-    if (accts.length) _msalAcct = accts[0];
-  }
-  // Token recovery: a stale cached page may have exchanged the code and stored a token
-  // but failed to save the account. Recover by parsing the stored access_token directly.
-  if (!_msalAcct) {
-    try {
-      var _rt=JSON.parse(sessionStorage.getItem('_msal_t')||localStorage.getItem('_msal_t')||'{}');
-      var _re=_rt['$'];
-      if(_re&&_re.v&&_re.e>Date.now()){
-        var _rb=_re.v.split('.')[1].replace(/-/g,'+').replace(/_/g,'/');
-        while(_rb.length%4)_rb+='=';
-        var _rp=JSON.parse(atob(_rb));
-        _msalAcct={username:_rp.upn||_rp.unique_name||_rp.preferred_username||_rp.email||'SEI User',name:_rp.name||'',homeAccountId:_rp.oid||_rp.sub||''};
-        _msalApp._accts=[_msalAcct]; _msalApp._toks=_rt;
-        sessionStorage.setItem('_msal_a',JSON.stringify([_msalAcct]));
-        console.log('[MSAL] Token recovery succeeded:', _msalAcct.username);
-      }
-    }catch(e){console.warn('token recovery error:',e);}
-  }
-  // Set _graphMode BEFORE _updateAuthUI so UI reflects correct state
-  if (_msalAcct) _graphMode = true;
-  _updateAuthUI();
-  const _vb=document.getElementById('verBadge');
-  if(_vb) _vb.textContent=BUILD_VER+' | '+(_msalAcct ? '✅ '+(_msalAcct.username||'ok') : '❌ not auth');
-  // Show auth debug panel (auto-hides after 20s, or click to dismiss)
-  try{
-    var _dbgLog=JSON.parse(sessionStorage.getItem('_msal_dbg')||'[]');
-    if(_dbgLog.length){
-      var _dbgDiv=document.createElement('div');
-      _dbgDiv.style.cssText='position:fixed;bottom:60px;right:12px;background:#1a1a2e;color:#cdd;padding:10px 14px;border-radius:8px;font-size:11px;font-family:monospace;max-width:380px;z-index:9999;border:1px solid #557;box-shadow:0 4px 16px #0006;cursor:pointer';
-      _dbgDiv.title='לחץ לסגירה';
-      _dbgDiv.innerHTML='<b style="color:#8ef">Auth Debug</b> <span style="float:right;opacity:.6">✕</span><br>'+_dbgLog.map(function(s){return '<div style="margin-top:2px">'+s+'</div>';}).join('');
-      _dbgDiv.onclick=function(){_dbgDiv.remove();};
-      document.body.appendChild(_dbgDiv);
-      setTimeout(function(){if(_dbgDiv.parentNode)_dbgDiv.remove();},20000);
-    }
-  }catch(e){}
-  if (_msalAcct) {
-    // Load shared proc data from SharePoint via Graph API
-    setTimeout(async function(){
-      try {
-        await loadProcFromGraph();
-        // Show Sync button so user can manually refresh
-        const sb = document.getElementById('syncBtn');
-        if (sb) sb.style.display = '';
-      } catch(e) { console.error('[post-auth proc load]', e); }
-    }, 1500);
-  }
-}
-
-async function _graphToken() {
-  if (!_msalApp || !_msalAcct) throw new Error('Not signed in');
-  try {
-    const r = await _msalApp.acquireTokenSilent({ scopes: GRAPH_SCOPES, account: _msalAcct });
-    return r.accessToken;
-  } catch(e) {
-    const r = await _msalApp.acquireTokenPopup({ scopes: GRAPH_SCOPES });
-    _msalAcct = r.account;
-    return r.accessToken;
-  }
-}
-
-async function msalLogin() {
-  if (!_msalApp) await _initMSAL();
-  if (!_msalApp) { alert('Auth initialization failed.'); return; }
-  // loginPopup() uses redirect flow — page navigates to Microsoft and returns.
-  // _initMSAL() handles the return via handleRedirectPromise() on page reload.
-  setFileSyncStatus('↗ מעביר לכניסת Microsoft...', '');
-  try {
-    await _msalApp.loginPopup({ scopes: GRAPH_SCOPES });
-  } catch(e) { setFileSyncStatus('⚠ ' + (e.message || 'Login failed'), 'err'); }
-}
-
-async function msalLogout() {
-  if (!_msalApp) return;
-  await _msalApp.logoutPopup({ account: _msalAcct });
-  _msalAcct = null; _graphMode = false;
-  _updateAuthUI();
-}
-
-function _updateAuthUI() {
-  // Hide local folder picker when Graph mode is active — files come from SharePoint
-  const folderBtn = document.getElementById('folderBtn');
-  if (folderBtn) folderBtn.style.display = _graphMode ? 'none' : '';
-  const btn = document.getElementById('loginBtn');
-  const status = document.getElementById('authStatus');
-  if (!btn) return;
-  if (_msalAcct) {
-    const name = _msalAcct.name || _msalAcct.username || '';
-    btn.textContent = '🔓 ' + name.split(' ')[0];
-    btn.title = name + ' — לחץ להתנתק';
-    btn.classList.remove('signed-out');
-    btn.onclick = msalLogout;
-    if (status) status.textContent = '● מחובר לSharePoint';
-    // Show sync button
-    const syncBtn = document.getElementById('syncBtn');
-    if (syncBtn) syncBtn.style.display = '';
-    // Show admin folder ID button only when folder item ID not yet hardcoded
-    const adminBtn = document.getElementById('adminFolderBtn');
-    if (adminBtn) adminBtn.style.display = _SP_FOLDER_ITEM_ID ? 'none' : '';
-  } else {
-    btn.textContent = '🔑 התחבר';
-    btn.title = 'התחבר עם חשבון Microsoft';
-    btn.classList.add('signed-out');
-    btn.onclick = msalLogin;
-    if (status) status.textContent = '';
-    const syncBtn = document.getElementById('syncBtn');
-    if (syncBtn) syncBtn.style.display = 'none';
-  }
-}
-
-// ── Subcontractor RFQ Modal ───────────────────────────────
-function openRFQModal() {
-  let m = document.getElementById('rfqModal');
-  if (!m) {
-    m = document.createElement('div');
-    m.id = 'rfqModal';
-    m.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:1000;display:none;align-items:center;justify-content:center';
-    m.innerHTML =
-      '<div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;width:820px;max-height:82vh;display:flex;flex-direction:column;overflow:hidden">' +
-      '<div style="padding:10px 16px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">' +
-      '<span style="font-weight:600;font-size:14px">🔧 RFQ – קבלני משנה</span>' +
-      '<div style="display:flex;gap:8px">' +
-      '<button onclick="exportRFQCSV()" style="padding:4px 12px;background:var(--accent2);color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:12px">📥 Export CSV</button>' +
-      '<button onclick="document.getElementById(\'rfqModal\').style.display=\'none\'" style="padding:4px 10px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;cursor:pointer">✕</button>' +
-      '</div></div>' +
-      '<div id="rfqTableContainer" style="overflow:auto;flex:1;padding:14px"></div>' +
-      '</div>';
-    document.body.appendChild(m);
-    m.addEventListener('click', function(e) { if (e.target === m) m.style.display = 'none'; });
-  }
-  renderRFQTable();
-  m.style.display = 'flex';
-}
-
-function renderRFQTable() {
-  const container = document.getElementById('rfqTableContainer');
-  if (!container) return;
-  const byDomain = {};
-  BOM.forEach(item => {
-    const pb = item.pb || item.pn;
-    if (!subData[pb]) return;
-    const domain = (subData[pb].domain || '').trim() || 'כללי';
-    if (!byDomain[domain]) byDomain[domain] = [];
-    byDomain[domain].push({item, pb});
-  });
-  const domains = Object.keys(byDomain).sort();
-  if (!domains.length) {
-    container.innerHTML = '<p style="color:var(--text2);text-align:center;padding:32px;font-size:13px">אין פריטי קבלן משנה מסווגים.<br>פתח עורך תהליכים (⚙) וסמן פריטים כקבלן משנה.</p>';
-    return;
-  }
-  let html = '';
-  domains.forEach(domain => {
-    const items = byDomain[domain];
-    html += '<div style="margin-bottom:16px">' +
-      '<div style="font-weight:600;color:var(--accent);font-size:13px;margin-bottom:6px;padding-bottom:4px;border-bottom:1px solid var(--border)">' + domain + ' (' + items.length + ')</div>' +
-      '<table style="width:100%;border-collapse:collapse;font-size:12px">' +
-      '<thead><tr style="background:var(--surface2)">' +
-      '<th style="padding:5px 8px;text-align:left;border:1px solid var(--border)">Part #</th>' +
-      '<th style="padding:5px 8px;text-align:left;border:1px solid var(--border)">Description</th>' +
-      '<th style="padding:5px 8px;text-align:center;border:1px solid var(--border)">QTY</th>' +
-      '<th style="padding:5px 8px;text-align:center;border:1px solid var(--border)">Total QTY</th>' +
-      '<th style="padding:5px 8px;text-align:left;border:1px solid var(--border)">UOM</th>' +
-      '</tr></thead><tbody>';
-    items.forEach(function(entry) {
-      const item = entry.item;
-      html += '<tr>' +
-        '<td style="padding:4px 8px;border:1px solid var(--border)">' + (item.pn||'') + '</td>' +
-        '<td style="padding:4px 8px;border:1px solid var(--border)">' + (item.desc||'') + '</td>' +
-        '<td style="padding:4px 8px;text-align:center;border:1px solid var(--border)">' + (item.qty||'') + '</td>' +
-        '<td style="padding:4px 8px;text-align:center;border:1px solid var(--border)">' + (item.tq||'') + '</td>' +
-        '<td style="padding:4px 8px;border:1px solid var(--border)">' + (item.uom||'') + '</td>' +
-        '</tr>';
-    });
-    html += '</tbody></table></div>';
-  });
-  container.innerHTML = html;
-}
-
-function exportRFQCSV() {
-  let csv = 'Part Number,Description,QTY,Total QTY,UOM,Domain\n';
-  const byDomain = {};
-  BOM.forEach(item => {
-    const pb = item.pb || item.pn;
-    if (!subData[pb]) return;
-    const domain = (subData[pb].domain||'').trim()||'כללי';
-    if (!byDomain[domain]) byDomain[domain] = [];
-    byDomain[domain].push(item);
-  });
-  Object.keys(byDomain).sort().forEach(domain => {
-    byDomain[domain].forEach(item => {
-      csv += '"' + (item.pn||'').replace(/"/g,'""') + '","' + (item.desc||'').replace(/"/g,'""') + '","' + (item.qty||'') + '","' + (item.tq||'') + '","' + (item.uom||'') + '","' + domain + '"\n';
-    });
-  });
-  const a = document.createElement('a');
-  a.href = 'data:text/csv;charset=utf-8,﻿' + encodeURIComponent(csv);
-  a.download = 'ZMAG_RFQ_Subcontractors.csv';
-  a.click();
-}
-
-window.addEventListener('load', function() {
-  _initMSAL();
-  // Pre-load 3D libraries in background so first CAD click is faster
-  setTimeout(()=>{ ensureThree().catch(()=>{}); getWorkerUrl(); }, 3000);
-});
-</script>
-</body>
-</html>
+      '<td style="text-align:right;color:var(--text3)
