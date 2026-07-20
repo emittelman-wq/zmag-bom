@@ -1982,18 +1982,18 @@ function openRawMatEditor(pb, desc, tq) {
         '<td style="font-size:10px;color:var(--text2);max-width:110px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:2px 4px" title="'+p.parentPb+'">'+p.parentDesc+'</td>'+
         '<td style="padding:1px 2px"><input class="ar-pdim" data-dim="L" data-ppb="'+safePP+'" data-row="'+i+'" value="'+Lval+'" placeholder="mm" type="number" min="0" step="1" '+
           'style="width:60px;padding:2px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px;font-size:11px" '+
-          'oninput="arParentDimChanged(''+safePb+'',this,'+i+')"></td>'+
+          'oninput="arParentDimChanged(\''+safePb+'\',this,'+i+')"></td>'+
         (isSheet
           ? '<td style="padding:1px 2px"><input class="ar-pdim" data-dim="W" data-ppb="'+safePP+'" data-row="'+i+'" value="'+Wval+'" placeholder="mm" type="number" min="0" step="1" '+
             'style="width:60px;padding:2px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px;font-size:11px" '+
-            'oninput="arParentDimChanged(''+safePb+'',this,'+i+')"></td>'
+            'oninput="arParentDimChanged(\''+safePb+'\',this,'+i+')"></td>'
           : '<td></td>')+
         '<td id="ar-pmass-'+i+'" style="font-size:10px;color:var(--text3);text-align:right;padding:2px 4px"></td>'+
         '<td style="font-size:10px;color:var(--text3);text-align:center;padding:2px 3px">×'+p.tq+'</td>'+
         '<td id="ar-psub-'+i+'" style="font-size:10px;color:#68d391;text-align:right;padding:2px 4px;font-weight:600"></td>'+
         '<td style="padding:1px 3px">'+
           (hasStep
-            ? '<button onclick="runARStepEstimateForParent(''+safePb+'','+i+',this)" data-stp="'+stpEsc+'" '+
+            ? '<button onclick="runARStepEstimateForParent(\''+safePb+'\','+i+',this)" data-stp="'+stpEsc+'" '+
               'style="padding:2px 6px;background:#ed8936;color:#fff;border:none;border-radius:3px;cursor:pointer;font-size:10px" title="'+stpEsc+'">📐</button>'
             : '<span style="font-size:9px;color:var(--text3)">—</span>')+
           '<span id="ar-presult-'+i+'" style="font-size:9px;margin-left:2px"></span>'+
@@ -2279,7 +2279,7 @@ async function runARStepEstimateForParent(pb, rowIdx, btn) {
     });
     arRefreshRow(pb, rowIdx);
     arRefreshAggregate(pb);
-    if (resultEl) resultEl.innerHTML = '<span style="color:#68d391;cursor:help" title="'+est.note.replace(/"/g,\'&quot;\')+'">✓</span>';
+    if (resultEl) resultEl.innerHTML = '<span style="color:#68d391;cursor:help" title="'+est.note.replace(/"/g,'&quot;')+'">\u2713</span>';
   } catch(e) {
     if (resultEl) resultEl.innerHTML = '<span style="color:#fc8181;cursor:help" title="'+e.message+'">⚠</span>';
   } finally {
@@ -5254,73 +5254,3 @@ function buildMfgData() {
 
   Object.entries(procData).forEach(function(entry) {
     const pb = entry[0], procs = entry[1];
-    const bomTq = tqMap[pb] || 0;
-    const bomItem = BOM.find(function(i) { return (i.pb || i.pn) === pb && i.type === 'ELTDesign'; });
-    const desc = bomItem ? bomItem.desc : '';
-
-    procs.forEach(function(proc) {
-      if (!proc.type) return;
-      const typeObj = PROC_TYPES.find(function(t) { return t.id === proc.type; });
-      const typeLabel = typeObj ? (typeObj.label + ' (' + typeObj.en + ')') : proc.type;
-      const totalQty = Math.round((proc.qty || 0) * bomTq * 1000) / 1000;
-      let setupH = 0;
-      if (proc.setup) {
-        setupH = proc.setupUnit === 'min' ? proc.setup / 60 : proc.setup;
-        setupH = Math.round(setupH * 1000) / 1000;
-      }
-      mfgData.push({
-        pb: pb, desc: desc,
-        procType: proc.type,
-        procLabel: typeLabel,
-        unitQty: proc.qty || 0,
-        unit: proc.unit || '',
-        bomTq: bomTq,
-        totalQty: totalQty,
-        setup: proc.setup || 0,
-        setupUnit: proc.setupUnit || 'h',
-        setupTotal: setupH,
-        notes: proc.notes || '',
-      });
-    });
-  });
-}
-
-function getSortedMfgData() {
-  const d = mfgData.slice();
-  const col = mfgSort.col, asc = mfgSort.asc;
-  d.sort(function(a, b) {
-    const va = a[col] !== undefined ? a[col] : '';
-    const vb = b[col] !== undefined ? b[col] : '';
-    if (typeof va === 'number') return asc ? va - vb : vb - va;
-    return asc ? String(va).localeCompare(String(vb)) : String(vb).localeCompare(String(va));
-  });
-  return d;
-}
-
-function renderMfgTable(data) {
-  const tbody = document.getElementById('mfgBody');
-  const tfoot = document.getElementById('mfgFoot');
-  tbody.innerHTML = '';
-
-  if (data.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--text3);padding:30px">No manufacturing processes defined.<br>Click ⚙ on any ELTDesign row in the BOM table to add processes.</td></tr>';
-    tfoot.innerHTML = '';
-    return;
-  }
-
-  const totals = {};
-  data.forEach(function(item) {
-    const tr = document.createElement('tr');
-    const tqFmt = Number.isInteger(item.totalQty) ? item.totalQty.toLocaleString() : item.totalQty.toFixed(3);
-    const uqFmt = Number.isInteger(item.unitQty) ? item.unitQty : item.unitQty.toFixed(3);
-    // Convert setup hours→min for fmtTimeAuto (setupTotal stored in hours)
-    const stFmt = item.setupTotal > 0 ? fmtTimeAuto(item.setupTotal * 60) : '—';
-
-    tr.title = 'Click to edit processes for ' + item.pb;
-    tr.innerHTML =
-      '<td><span class="proc-type-badge">' + item.procLabel + '</span></td>' +
-      '<td style="font-family:monospace;font-size:11px;color:var(--accent)">' + item.pb + '</td>' +
-      '<td style="color:var(--text2)" title="' + item.desc.replace(/"/g,'&quot;') + '">' + item.desc.substring(0, 45) + '</td>' +
-      '<td style="color:var(--text3);text-align:center">' + item.unit + '</td>' +
-      '<td style="text-align:right;color:var(--text2)">' + uqFmt + '</td>' +
-      '<td style="text-align:right;color:var(--text3)
