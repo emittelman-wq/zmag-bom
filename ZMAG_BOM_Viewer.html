@@ -392,7 +392,7 @@ tr.row-disabled .badge,tr.row-disabled .proc-btn{opacity:.5}
 <div class="topbar">
   <div>
     <div class="topbar-title">ZMAG BOM Viewer</div>
-    <div class="topbar-sub">6910W021-001 Rev B &nbsp;<span id="verBadge" style="font-size:9px;opacity:0.45;font-family:monospace">v20260719.2300</span></div>
+    <div class="topbar-sub">6910W021-001 Rev B &nbsp;<span id="verBadge" style="font-size:9px;opacity:0.45;font-family:monospace">v20260720.0900</span></div>
   </div>
   <div class="sep"></div>
 
@@ -3492,6 +3492,51 @@ async function load3D(stpPath, container){
   document.addEventListener('mouseup',()=>{ drag=false; sp2.classList.remove('drag'); document.body.style.userSelect=''; });
 })();
 
+// ── Price Database — verified from supplier pages ─────────
+// Sources: fastenersuperstore.com, boltdepot.com (June 2026)
+const PRICE_DB = {
+  '14020.060.001': {p:0.076, src:'https://www.fastenersuperstore.com/products/548484/weld-nuts',   note:'M6 weld nut DIN929 steel, carton 5000'},
+  'ISO7089-6-200HV-A5D': {p:0.050, src:'https://boltdepot.com/Product-Details?product=4527',              note:'M6 flat washer zinc, boltdepot.com'},
+  'ISO7089-6-200HV-A4':  {p:0.028, src:'https://www.fastenersuperstore.com/products/463685/flat-washers', note:'M6 flat washer 18-8 SS, carton 6000'},
+  'ISO7089-8-200HV-A5D': {p:0.063, src:'https://www.fastenersuperstore.com/products/529701/flat-washers', note:'M8 flat washer 18-8 SS, carton 5000'},
+  'ISO7089-8-200HV-A2':  {p:0.063, src:'https://www.fastenersuperstore.com/products/529701/flat-washers', note:'M8 flat washer 18-8 SS, carton 5000'},
+  'ISO7089-8-200HV-A4':  {p:0.063, src:'https://www.fastenersuperstore.com/products/529701/flat-washers', note:'M8 flat washer 18-8 SS, carton 5000'},
+  'ISO7089-8-200HV-A5T': {p:0.063, src:'https://www.fastenersuperstore.com/products/529701/flat-washers', note:'M8 flat washer 18-8 SS, carton 5000'},
+  'ISO7089-10-200HV-A5D':{p:0.071, src:'https://www.fastenersuperstore.com/products/259563/flat-washers', note:'M10 flat washer zinc, carton 2000'},
+  'ISO7089-10-200HV-A4': {p:0.071, src:'https://www.fastenersuperstore.com/products/259563/flat-washers', note:'M10 flat washer zinc, carton 2000'},
+  'SD66BS':   {p:0.12,  src:'https://boltdepot.com/Product-Details?product=15352', note:'3/16" dome head blind rivet, zinc steel'},
+  'SD64BSLF': {p:0.15,  src:'https://boltdepot.com/Product-Details?product=15369', note:'3/16" large-flange blind rivet, zinc steel'},
+};
+
+function fmtPrice(n, currency) {
+  if (n === null || n === undefined) return '';
+  const sym = currencySym(currency || 'USD');
+  if (n < 0.01) return sym + n.toFixed(4);
+  if (n < 0.10) return sym + n.toFixed(3);
+  return sym + n.toFixed(2);
+}
+function fmtCost(n, currency) {
+  if (!n) return '';
+  const sym = currencySym(currency || 'USD');
+  return sym + n.toFixed(2);
+}
+
+function getPriceEntry(pb) {
+  const raw = localStorage.getItem('px_' + pb);
+  if (raw !== null) {
+    try {
+      const obj = JSON.parse(raw);
+      return {p: obj.p, src: obj.src || '', currency: obj.currency || 'USD', note: 'Custom (click to edit)', custom: true};
+    } catch(e) {}
+  }
+  // Fallback: check buyNotes for price
+  const bn = buyNotes[pb];
+  if (bn && bn.price != null && bn.price > 0) {
+    return {p: bn.price, src: bn.url || '', currency: bn.currency || 'USD', note: 'Custom', custom: true};
+  }
+  return PRICE_DB[pb] || null;
+}
+
 // ─── Init ────────────────────────────────────────────────
 try {
   const savedW = JSON.parse(localStorage.getItem(COL_WIDTHS_KEY));
@@ -3774,51 +3819,6 @@ updateStats();
 let buyData = [];
 let buySort = { col: 'totalQty', asc: false };
 let buyBuilt = false;
-
-// ── Price Database — verified from supplier pages ─────────
-// Sources: fastenersuperstore.com, boltdepot.com (June 2026)
-const PRICE_DB = {
-  '14020.060.001': {p:0.076, src:'https://www.fastenersuperstore.com/products/548484/weld-nuts',   note:'M6 weld nut DIN929 steel, carton 5000'},
-  'ISO7089-6-200HV-A5D': {p:0.050, src:'https://boltdepot.com/Product-Details?product=4527',              note:'M6 flat washer zinc, boltdepot.com'},
-  'ISO7089-6-200HV-A4':  {p:0.028, src:'https://www.fastenersuperstore.com/products/463685/flat-washers', note:'M6 flat washer 18-8 SS, carton 6000'},
-  'ISO7089-8-200HV-A5D': {p:0.063, src:'https://www.fastenersuperstore.com/products/529701/flat-washers', note:'M8 flat washer 18-8 SS, carton 5000'},
-  'ISO7089-8-200HV-A2':  {p:0.063, src:'https://www.fastenersuperstore.com/products/529701/flat-washers', note:'M8 flat washer 18-8 SS, carton 5000'},
-  'ISO7089-8-200HV-A4':  {p:0.063, src:'https://www.fastenersuperstore.com/products/529701/flat-washers', note:'M8 flat washer 18-8 SS, carton 5000'},
-  'ISO7089-8-200HV-A5T': {p:0.063, src:'https://www.fastenersuperstore.com/products/529701/flat-washers', note:'M8 flat washer 18-8 SS, carton 5000'},
-  'ISO7089-10-200HV-A5D':{p:0.071, src:'https://www.fastenersuperstore.com/products/259563/flat-washers', note:'M10 flat washer zinc, carton 2000'},
-  'ISO7089-10-200HV-A4': {p:0.071, src:'https://www.fastenersuperstore.com/products/259563/flat-washers', note:'M10 flat washer zinc, carton 2000'},
-  'SD66BS':   {p:0.12,  src:'https://boltdepot.com/Product-Details?product=15352', note:'3/16" dome head blind rivet, zinc steel'},
-  'SD64BSLF': {p:0.15,  src:'https://boltdepot.com/Product-Details?product=15369', note:'3/16" large-flange blind rivet, zinc steel'},
-};
-
-function fmtPrice(n, currency) {
-  if (n === null || n === undefined) return '';
-  const sym = currencySym(currency || 'USD');
-  if (n < 0.01) return sym + n.toFixed(4);
-  if (n < 0.10) return sym + n.toFixed(3);
-  return sym + n.toFixed(2);
-}
-function fmtCost(n, currency) {
-  if (!n) return '';
-  const sym = currencySym(currency || 'USD');
-  return sym + n.toFixed(2);
-}
-
-function getPriceEntry(pb) {
-  const raw = localStorage.getItem('px_' + pb);
-  if (raw !== null) {
-    try {
-      const obj = JSON.parse(raw);
-      return {p: obj.p, src: obj.src || '', currency: obj.currency || 'USD', note: 'Custom (click to edit)', custom: true};
-    } catch(e) {}
-  }
-  // Fallback: check buyNotes for price
-  const bn = buyNotes[pb];
-  if (bn && bn.price != null && bn.price > 0) {
-    return {p: bn.price, src: bn.url || '', currency: bn.currency || 'USD', note: 'Custom', custom: true};
-  }
-  return PRICE_DB[pb] || null;
-}
 
 // ── Price Edit Modal ──────────────────────────────────────
 let _peKey = null;
@@ -5256,5 +5256,4 @@ function buildMfgData() {
     }
   });
 
-  Object.entries(procData).forEach(function(entry) {
-    const pb = entry[0], procs = entry[1];
+  Object.entries(procDa
