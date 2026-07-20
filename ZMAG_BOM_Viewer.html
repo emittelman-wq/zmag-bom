@@ -392,7 +392,7 @@ tr.row-disabled .badge,tr.row-disabled .proc-btn{opacity:.5}
 <div class="topbar">
   <div>
     <div class="topbar-title">ZMAG BOM Viewer</div>
-    <div class="topbar-sub">6910W021-001 Rev B &nbsp;<span id="verBadge" style="font-size:9px;opacity:0.45;font-family:monospace">v20260720.2100</span></div>
+    <div class="topbar-sub">6910W021-001 Rev B &nbsp;<span id="verBadge" style="font-size:9px;opacity:0.45;font-family:monospace">v20260720.2200</span></div>
   </div>
   <div class="sep"></div>
 
@@ -798,8 +798,18 @@ function getItemUnitCost(item, bomIdx) {
     if (rawMatData[pb]) {
       const uom = item.uom || '';
       if (isARUnit(uom)) {
-        // AR items: aggregate cost covers all parent usages (computed by computeARAggregate)
-        return computeARAggregate(pb).cost;
+        // Per-parent: each BOM occurrence has a different parent assembly → different blank size
+        const parentPb = getParentPbForBOMIndex(bomIdx);
+        const dims = getARDimsForParent(pb, parentPb);
+        if (!dims.L) return 0;
+        const rm = rawMatData[pb];
+        const density = parseFloat(rm.density) || (MATERIAL_DB[rm.family]||{}).density || 1000;
+        const uc = parseFloat(rm.unitCost) || 0;
+        const vol = calcRawMatVolume(rm.form, dims);
+        const mass = vol * density;
+        if (rm.costUnit === 'm2' && dims.W)
+          return (parseFloat(dims.L)/1000)*(parseFloat(dims.W)/1000)*uc;
+        return mass * uc;
       }
       const rm = getRawMatCostPerUnit(pb, uom);
       return rm ? rm.cost : 0;
@@ -825,7 +835,18 @@ function getItemUnitCost(item, bomIdx) {
     if (rawMatData[pb]) {
       const uom = item.uom || '';
       if (isARUnit(uom)) {
-        return computeARAggregate(pb).cost;
+        // Per-parent blank cost (same logic as Buy above)
+        const parentPb = getParentPbForBOMIndex(bomIdx);
+        const dims = getARDimsForParent(pb, parentPb);
+        if (!dims.L) return 0;
+        const rm = rawMatData[pb];
+        const density = parseFloat(rm.density) || (MATERIAL_DB[rm.family]||{}).density || 1000;
+        const uc = parseFloat(rm.unitCost) || 0;
+        const vol = calcRawMatVolume(rm.form, dims);
+        const mass = vol * density;
+        if (rm.costUnit === 'm2' && dims.W)
+          return (parseFloat(dims.L)/1000)*(parseFloat(dims.W)/1000)*uc;
+        return mass * uc;
       }
       const rm = getRawMatCostPerUnit(pb, uom);
       return rm ? rm.cost : 0;
@@ -857,34 +878,18 @@ function computeTreeCosts() {
   treeCosts    = new Array(n).fill(0);
   itemSetupCost = new Array(n).fill(0);
   cumSetupCosts = new Array(n).fill(0);
-  // AR raw-material items have no numeric tq — their "unit cost" IS the full
-  // aggregate (sum across all parent blanks).  Use a seen-set so if the same
-  // material appears more than once in the BOM we don't double-count.
-  const _arSeen = new Set();
   for (let i = 0; i < n; i++) {
-    const pb_i = BOM[i].pb || BOM[i].pn;
-    const isARMat = rawMatData && rawMatData[pb_i] && isARUnit(BOM[i].uom);
-    if (isARMat) {
-      unitCosts[i] = _arSeen.has(pb_i) ? 0 : computeARAggregate(pb_i).cost;
-      _arSeen.add(pb_i);
-    } else {
-      unitCosts[i] = getItemUnitCost(BOM[i], i);
-    }
+    unitCosts[i]    = getItemUnitCost(BOM[i], i);
     itemSetupCost[i] = getItemSetupCost(BOM[i]);
   }
   // Bottom-up: tree cost = own extended cost + children tree costs
   for (let i = n - 1; i >= 0; i--) {
     const lv = BOM[i].lv;
-    const pb_i = BOM[i].pb || BOM[i].pn;
-    // AR items: aggregate already in unitCosts[i], effective qty = 1
-    const tqI = (rawMatData && rawMatData[pb_i] && isARUnit(BOM[i].uom)) ? 1 : (BOM[i].tq || 0);
-    let tsum = unitCosts[i] * tqI;
+    let tsum = unitCosts[i] * (BOM[i].tq || 0);
     let ssum = itemSetupCost[i];
     for (let j = i + 1; j < n; j++) {
       if (BOM[j].lv <= lv) break;
-      const pb_j = BOM[j].pb || BOM[j].pn;
-      const tqJ = (rawMatData && rawMatData[pb_j] && isARUnit(BOM[j].uom)) ? 1 : (BOM[j].tq || 0);
-      tsum += unitCosts[j] * tqJ;
+      tsum += unitCosts[j] * (BOM[j].tq || 0);
       ssum += itemSetupCost[j];
     }
     treeCosts[i]    = tsum;
