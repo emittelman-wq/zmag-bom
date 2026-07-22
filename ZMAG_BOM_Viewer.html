@@ -424,7 +424,7 @@ tr.row-disabled .badge,tr.row-disabled .proc-btn{opacity:.5}
 <div class="topbar">
   <div>
     <div class="topbar-title">ZMAG BOM Viewer</div>
-    <div class="topbar-sub">6910W021-001 Rev B &nbsp;<span id="verBadge" style="font-size:9px;opacity:0.45;font-family:monospace">v20260722.2800</span></div>
+    <div class="topbar-sub">6910W021-001 Rev B &nbsp;<span id="verBadge" style="font-size:9px;opacity:0.45;font-family:monospace">v20260722.2900</span></div>
   </div>
   <div class="sep"></div>
   <button class="auth-btn signed-out" id="loginBtn" onclick="msalLogin()" title="התחבר עם חשבון Microsoft לסנכרון JSON ב-SharePoint">🔑 התחבר</button>
@@ -557,11 +557,14 @@ tr.row-disabled .badge,tr.row-disabled .proc-btn{opacity:.5}
   <!-- ══ רכש (Buy / Procurement) tab ══ -->
   <div class="mtp" id="mtp-buy">
     <div class="tab-action-bar">
-      <button class="btn" id="buyBtn" onclick="openBuyModal()">📦 Buy Summary (פירוט)</button>
-      <button class="btn" onclick="exportBomExcel()">📊 ייצוא BOM Excel</button>
+      <div class="search-wrap" style="max-width:240px">
+        <span class="si">🔍</span>
+        <input type="text" id="buyTabSearch" placeholder="חיפוש PN / תיאור…" oninput="_buyTabFilter(this.value)">
+        <button class="sc" id="clearBuyTabSearch" onclick="_buyTabFilter('');document.getElementById('buyTabSearch').value=''">✕</button>
+      </div>
       <span class="stats" id="buyTabStats" style="margin-left:auto"></span>
     </div>
-    <div id="buyTabContent" style="flex:1;overflow:auto;padding:10px 14px"></div>
+    <div id="buyTabContent" style="flex:1;overflow:auto"></div>
   </div>
 
   <!-- ══ חומרי גלם (Raw Materials) tab ══ -->
@@ -576,7 +579,8 @@ tr.row-disabled .badge,tr.row-disabled .proc-btn{opacity:.5}
   <!-- ══ דוחות (Reports) tab ══ -->
   <div class="mtp" id="mtp-reports">
     <div class="tab-action-bar">
-      <button class="btn" id="mfgBtn" onclick="openMfgModal()">⚙ Manufacturing Summary</button>
+      <button class="btn" id="buyBtn" onclick="openBuyModal()">📦 Buy Summary</button>
+      <button class="btn" id="mfgBtn" onclick="openMfgModal()">⚙ Manufacturing</button>
       <button class="btn" id="rfqBtn" onclick="openRFQModal()">🔧 RFQ</button>
       <button class="btn" onclick="openAnomalyPanel()">🔍 אנומליות</button>
       <button class="btn" onclick="exportBomExcel()">📊 Excel</button>
@@ -2804,6 +2808,15 @@ function saveAIPrice(pb) {
   saveProcToFile();
   computeTreeCosts(); refreshCostCells();
   buildTable(); applyFilters();
+  // Refresh buy tab price cells if tab is open
+  buyBuilt=false;
+  if(document.getElementById('mtp-buy') && document.getElementById('mtp-buy').classList.contains('active')){
+    _populateBuyTab(true);
+  } else {
+    // invalidate so next open rebuilds
+    const btEl=document.getElementById('buyTabContent');
+    if(btEl) btEl.dataset.built='';
+  }
 }
 
 // ─── Raw Materials Excel Export ───────────────────────────
@@ -3621,46 +3634,146 @@ async function load3D(stpPath, container){
 function switchMainTab(id) {
   document.querySelectorAll('.mtn-tab').forEach(function(b){ b.classList.toggle('on', b.id==='mtn-'+id); });
   document.querySelectorAll('.mtp').forEach(function(p){ p.classList.toggle('active', p.id==='mtp-'+id); });
-  if(id==='buy')     _populateBuyTab();
-  if(id==='rawmat')  _populateRawmatTab();
+  if(id==='buy')     _populateBuyTab(true);
+  if(id==='rawmat')  _populateRawmatTab(true);
   if(id==='reports') _populateReportsTab();
 }
 
-function _populateBuyTab() {
+// Map from sanitized DOM id → real pb
+let _btPbMap = {};
+function _btId(pb){ return 'bt_'+pb.replace(/[^a-zA-Z0-9]/g,'_'); }
+
+function _populateBuyTab(force) {
   const el=document.getElementById('buyTabContent');
   const st=document.getElementById('buyTabStats');
   if(!el) return;
-  const buys=BOM.filter(function(b){ return b.type==='Buy'; });
-  // aggregate by pb
-  const agg={};
-  buys.forEach(function(b){
-    const pb=b.pb||b.pn;
-    if(!agg[pb]) agg[pb]={pb:pb,desc:b.desc||'',tq:0,occ:0,hasPrice:false};
-    agg[pb].tq+=b.tq||0; agg[pb].occ++;
-    const e=getPriceEntry(pb); if(e) agg[pb].hasPrice=true;
-  });
-  const rows=Object.values(agg).sort(function(a,b){ return b.tq-a.tq; });
-  if(st) st.textContent=rows.length+' Buy items';
-  if(!rows.length){ el.innerHTML='<div style="color:var(--text3);padding:30px;text-align:center">No Buy items</div>'; return; }
-  let h='<table style="width:100%;border-collapse:collapse;font-size:12px">';
-  h+='<thead><tr>';
-  ['Part Number','Description','Total Qty','Occurrences','Price'].forEach(function(c){
-    h+='<th style="position:sticky;top:0;background:var(--header-bg);border-bottom:2px solid var(--border);padding:6px 10px;text-align:left;font-size:11px;font-weight:600;color:var(--text2);text-transform:uppercase;white-space:nowrap">'+c+'</th>';
-  });
-  h+='</tr></thead><tbody>';
+  if(!force && el.dataset.built==='1') return; // already built, use filter only
+
+  _btPbMap = {};
+  buildBuyData();
+  // EA only — exclude raw material units (M, M2, AR, A/R)
+  const RAW_UOM=/^(m2|m|ar|a\/r|kg)$/i;
+  const rows=buyData.filter(function(r){ return !RAW_UOM.test((r.uom||'').trim()); })
+                    .sort(function(a,b){ return b.totalQty - a.totalQty; });
+
+  rows.forEach(function(r){ _btPbMap[_btId(r.pb)]=r.pb; });
+  if(st) st.textContent=rows.length+' Buy items (EA)';
+
+  let priced=0, totalILS=0;
   rows.forEach(function(r){
     const e=getPriceEntry(r.pb);
-    const priceStr=e ? fmtC(toILS(e.p, e.currency||'USD')) : '<span style="color:var(--text3)">—</span>';
-    h+='<tr style="border-bottom:1px solid var(--border);cursor:pointer" onclick="openBuyModal()">';
-    h+='<td style="padding:5px 10px;font-family:monospace;color:var(--accent)">'+escHtml(r.pb)+'</td>';
-    h+='<td style="padding:5px 10px;color:var(--text2)">'+escHtml(r.desc)+'</td>';
-    h+='<td style="padding:5px 10px;font-weight:600">'+r.tq+'</td>';
-    h+='<td style="padding:5px 10px;color:var(--text3)">×'+r.occ+'</td>';
-    h+='<td style="padding:5px 10px;font-family:monospace;color:var(--accent2)">'+priceStr+'</td>';
+    if(e){ priced++; totalILS+=toILS(e.p,e.currency||'USD')*(r.totalQty||0); }
+  });
+  if(st) st.textContent=rows.length+' פריטים · '+priced+' עם מחיר · '+fmtC(totalILS)+' סה"כ';
+
+  if(!rows.length){ el.innerHTML='<div style="color:var(--text3);padding:30px;text-align:center">No EA Buy items</div>'; return; }
+
+  let h='<table id="buyTabTable" style="width:100%;border-collapse:collapse;font-size:12px">';
+  h+='<thead><tr>';
+  ['Part Number','Description','Total Qty','×Occ','Unit Price','Total Cost',''].forEach(function(c,i){
+    const w=i===1?'':'';
+    h+='<th style="position:sticky;top:0;background:var(--header-bg);border-bottom:2px solid var(--border);padding:6px 10px;text-align:left;font-size:11px;font-weight:600;color:var(--text2);text-transform:uppercase;white-space:nowrap'+w+'">'+c+'</th>';
+  });
+  h+='</tr></thead><tbody>';
+
+  rows.forEach(function(r){
+    const bid=_btId(r.pb);
+    const e=getPriceEntry(r.pb);
+    const safePb=r.pb.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+    const safeDesc=(r.desc||'').replace(/'/g,"\\'").slice(0,60);
+    const safeCat =(r.cat||'').replace(/'/g,"\\'");
+    const priceVal=e ? e.p : '';
+    const curVal  =e ? (e.currency||'USD') : 'USD';
+    const totalILS_=e ? toILS(e.p,curVal)*(r.totalQty||0) : 0;
+    const srcUrl  =e ? (e.src||'') : '';
+
+    h+='<tr class="bt-row" id="btrow-'+bid+'" data-pb="'+escHtml(r.pb)+'" data-desc="'+escHtml(r.desc||'')+'">';
+    h+='<td style="padding:5px 10px;font-family:monospace;color:var(--accent);white-space:nowrap">'+escHtml(r.pb)+'</td>';
+    h+='<td style="padding:5px 10px;color:var(--text2);max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+escHtml(r.desc||'')+'">'+escHtml(r.desc||'')+'</td>';
+    h+='<td style="padding:5px 10px;font-weight:600;text-align:right">'+r.totalQty+'</td>';
+    h+='<td style="padding:5px 10px;color:var(--text3);text-align:center">×'+((r.occ||1))+'</td>';
+    // Unit price cell — currency + input + source link
+    h+='<td style="padding:4px 8px;white-space:nowrap">';
+    h+='<div style="display:flex;align-items:center;gap:4px">';
+    h+='<select id="btcur-'+bid+'" onchange="_saveTabBuyPrice(\''+bid+'\')" style="padding:2px 4px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:11px">';
+    ['ILS','USD','EUR'].forEach(function(c){
+      h+='<option value="'+c+'"'+(curVal===c?' selected':'')+'>'+c+'</option>';
+    });
+    h+='</select>';
+    h+='<input type="number" id="btprice-'+bid+'" value="'+escHtml(String(priceVal))+'" placeholder="0.00" step="0.01" min="0"'+
+       ' onchange="_saveTabBuyPrice(\''+bid+'\')"'+
+       ' style="width:82px;padding:3px 6px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px;text-align:right">';
+    if(srcUrl){
+      h+='<a id="btsrc-'+bid+'" href="'+escHtml(srcUrl)+'" target="_blank" title="מקור מחיר" style="font-size:14px;text-decoration:none;opacity:.7">🔗</a>';
+    } else {
+      h+='<span id="btsrc-'+bid+'" style="font-size:14px;opacity:.3;cursor:default" title="אין מקור">🔗</span>';
+    }
+    h+='</div>';
+    h+='</td>';
+    // Total cost
+    h+='<td id="bttotal-'+bid+'" data-tq="'+r.totalQty+'" style="padding:5px 10px;font-family:monospace;font-weight:700;color:var(--accent2);text-align:right;white-space:nowrap">'+
+       (totalILS_>0 ? fmtC(totalILS_) : '<span style="color:var(--text3)">—</span>')+'</td>';
+    // Actions
+    h+='<td style="padding:4px 8px;white-space:nowrap">';
+    h+='<button class="btn" onclick="openAIPriceSearch(\''+safePb+'\',\''+safeDesc+'\',\''+safeCat+'\')" style="font-size:11px;padding:3px 8px" title="חיפוש מחיר AI + ספקים">🤖 AI</button>';
+    h+='</td>';
     h+='</tr>';
   });
   h+='</tbody></table>';
   el.innerHTML=h;
+  el.dataset.built='1';
+  _btCurrentFilter='';
+}
+
+function _saveTabBuyPrice(bid) {
+  const pb=_btPbMap[bid]; if(!pb) return;
+  const priceEl=document.getElementById('btprice-'+bid);
+  const curEl  =document.getElementById('btcur-'+bid);
+  if(!priceEl||!curEl) return;
+  const price=parseFloat(priceEl.value);
+  const currency=curEl.value||'USD';
+  if(!price||isNaN(price)){
+    localStorage.removeItem('px_'+pb);
+    const bn=buyNotes[pb]; if(bn){ delete bn.price; delete bn.currency; }
+  } else {
+    buyNotes[pb]=Object.assign(buyNotes[pb]||{},{price,currency});
+    localStorage.setItem('px_'+pb,JSON.stringify({p:price,src:(buyNotes[pb]||{}).url||'',currency}));
+  }
+  buyBuilt=false; buildBuyData();
+  computeTreeCosts(); refreshCostCells();
+  // update total cell
+  const totalEl=document.getElementById('bttotal-'+bid);
+  if(totalEl){
+    const tq=parseFloat(totalEl.dataset.tq||0);
+    const ils=(price&&!isNaN(price)) ? toILS(price,currency)*tq : 0;
+    totalEl.innerHTML=ils>0 ? fmtC(ils) : '<span style="color:var(--text3)">—</span>';
+  }
+  // refresh stats
+  _refreshBuyTabStats();
+}
+
+let _btCurrentFilter='';
+function _buyTabFilter(q){
+  _btCurrentFilter=q.toLowerCase();
+  document.querySelectorAll('#buyTabTable .bt-row').forEach(function(tr){
+    const pb=(tr.dataset.pb||'').toLowerCase();
+    const desc=(tr.dataset.desc||'').toLowerCase();
+    tr.style.display=(pb.includes(_btCurrentFilter)||desc.includes(_btCurrentFilter)) ? '' : 'none';
+  });
+  document.getElementById('clearBuyTabSearch').style.display=q?'block':'none';
+}
+
+function _refreshBuyTabStats(){
+  const st=document.getElementById('buyTabStats');
+  if(!st) return;
+  const RAW_UOM=/^(m2|m|ar|a\/r|kg)$/i;
+  const rows=buyData.filter(function(r){ return !RAW_UOM.test((r.uom||'').trim()); });
+  let priced=0, totalILS=0;
+  rows.forEach(function(r){
+    const e=getPriceEntry(r.pb);
+    if(e){ priced++; totalILS+=toILS(e.p,e.currency||'USD')*(r.totalQty||0); }
+  });
+  st.textContent=rows.length+' פריטים · '+priced+' עם מחיר · '+fmtC(totalILS)+' סה"כ';
 }
 
 function _populateRawmatTab() {
