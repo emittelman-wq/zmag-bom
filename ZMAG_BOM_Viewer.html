@@ -133,8 +133,28 @@ td{padding:5px 8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;ver
 .vt-btn{background:rgba(26,29,39,.85);border:1px solid var(--border);border-radius:6px;color:var(--text2);padding:4px 8px;font-size:11px;cursor:pointer;backdrop-filter:blur(4px)}
 .vt-btn:hover{border-color:var(--accent);color:var(--accent)}
 
+/* ── Main tab navigation ── */
+.main-tab-nav{background:var(--header-bg);border-bottom:2px solid var(--border);display:flex;flex-shrink:0;padding:0 10px;gap:0}
+.mtn-tab{background:none;border:none;border-bottom:2px solid transparent;color:var(--text2);padding:8px 18px;font-size:13px;font-weight:600;cursor:pointer;transition:color .15s,border-color .15s;margin-bottom:-2px;white-space:nowrap}
+.mtn-tab:hover{color:var(--text)}
+.mtn-tab.on{color:var(--accent);border-bottom-color:var(--accent)}
+/* Tab body */
+.main-tab-body{flex:1;overflow:hidden;display:flex;flex-direction:column;min-height:0}
+.mtp{display:none;flex:1;flex-direction:column;overflow:hidden;min-height:0}
+.mtp.active{display:flex}
+/* Filter bar (moved from topbar into ראשי tab) */
+.filter-bar{background:var(--header-bg);border-bottom:1px solid var(--border);padding:5px 10px;display:flex;align-items:center;gap:7px;flex-shrink:0;flex-wrap:wrap}
+/* Ensure .main fills remaining space in flex column */
+.main{min-height:0}
+/* Vertical (row-resize) splitter between BOM area and mfg bottom */
+.v-splitter{height:5px;background:transparent;cursor:row-resize;flex-shrink:0;transition:background .15s}
+.v-splitter:hover,.v-splitter.drag{background:var(--accent)}
+/* Tab action bar for non-main tabs */
+.tab-action-bar{background:var(--header-bg);border-bottom:1px solid var(--border);padding:8px 12px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;flex-shrink:0}
 /* Manufacturing side panel */
 .mfg-side{width:300px;flex-shrink:0;border-left:1px solid var(--border);display:flex;flex-direction:column;background:var(--preview-bg,var(--surface));overflow:hidden}
+/* Mfg panel when placed at the bottom of the ראשי tab */
+.mfg-bottom{height:220px;width:auto!important;border-left:none!important;border-top:1px solid var(--border);flex-shrink:0}
 .ms-header{padding:8px 12px;border-bottom:1px solid var(--border);flex-shrink:0}
 .ms-title{font-size:12px;font-weight:700;color:var(--accent);letter-spacing:.3px;text-transform:uppercase}
 .ms-pn{font-family:monospace;font-size:11px;color:var(--text2);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -389,64 +409,19 @@ tr.row-disabled .badge,tr.row-disabled .proc-btn{opacity:.5}
 </head>
 <body>
 
+<!-- ── Topbar: title + auth/settings only ── -->
 <div class="topbar">
   <div>
     <div class="topbar-title">ZMAG BOM Viewer</div>
-    <div class="topbar-sub">6910W021-001 Rev B &nbsp;<span id="verBadge" style="font-size:9px;opacity:0.45;font-family:monospace">v20260720.2500</span></div>
+    <div class="topbar-sub">6910W021-001 Rev B &nbsp;<span id="verBadge" style="font-size:9px;opacity:0.45;font-family:monospace">v20260722.2700</span></div>
   </div>
   <div class="sep"></div>
-
-  <!-- Search -->
-  <div class="search-wrap">
-    <span class="si">🔍</span>
-    <input type="text" id="searchInput" placeholder="Search PN, description, catalog…">
-    <button class="sc" id="clearSearch" onclick="clearSearch()">✕</button>
-  </div>
-
-  <!-- Level slider -->
-  <div class="level-ctrl">
-    <span>Level ≤</span>
-    <input type="range" id="levelSlider" min="0" max="10" value="10" oninput="onLevel(this.value)">
-    <span class="level-badge" id="levelDisp">All</span>
-  </div>
-
-  <!-- Multi-type dropdown -->
-  <div class="type-wrap" id="typeWrap">
-    <button class="type-btn" id="typeBtn" onclick="toggleTypeDD()">All Types ▾</button>
-    <div class="type-dropdown" id="typeDD">
-      <label class="type-item"><input type="checkbox" checked onchange="toggleType('ELTDesign',this)"> ELTDesign</label>
-      <label class="type-item"><input type="checkbox" checked onchange="toggleType('Buy',this)"> Buy</label>
-      <label class="type-item"><input type="checkbox" checked onchange="toggleType('Package',this)"> Package</label>
-    </div>
-  </div>
-
-  <!-- Status -->
-  <select class="filter-sel" id="statusFilter" onchange="applyFilters()">
-    <option value="">All Status</option>
-    <option value="Released">Released</option>
-    <option value="Obsolete">Obsolete</option>
-  </select>
-
-  <!-- Has files -->
-  <button class="btn" id="filesOnlyBtn" onclick="toggleFilesOnly()">📄 Has Files</button>
-
-  <!-- Tree controls -->
-  <button class="btn" onclick="collapseAll()">⊖ Collapse</button>
-  <button class="btn" onclick="expandAll()">⊕ Expand</button>
-
   <button class="auth-btn signed-out" id="loginBtn" onclick="msalLogin()" title="התחבר עם חשבון Microsoft לסנכרון JSON ב-SharePoint">🔑 התחבר</button>
   <span class="auth-status" id="authStatus"></span>
-  <button class="btn" id="graphBaseBtn" onclick="editGraphBase()" title="OneDrive base folder path — used to locate part files (PDFs/STEP) via Microsoft Graph" style="display:none;font-size:11px">⚙ OneDrive path</button>
-  <button class="btn" id="folderBtn" onclick="grantAccess()" title="פתח תיקיית הפרויקט — נדרש לטעינת STP ולשמירת תהליכי ייצור לקובץ JSON">📁 Select Folder</button>
-  <button class="btn" id="syncBtn" onclick="syncProcFromFile()" title="סנכרן נתוני ייצור מהקובץ — לשימוש מרובה משתמשים" style="display:none">🔄 Sync</button>
+  <button class="btn" id="graphBaseBtn" onclick="editGraphBase()" title="OneDrive base folder path" style="display:none;font-size:11px">⚙ OneDrive path</button>
+  <button class="btn" id="folderBtn" onclick="grantAccess()" title="פתח תיקיית הפרויקט">📁 Select Folder</button>
+  <button class="btn" id="syncBtn" onclick="syncProcFromFile()" title="סנכרן נתוני ייצור" style="display:none">🔄 Sync</button>
   <span id="fileSyncStatus" style="font-size:11px;color:var(--accent2);opacity:0;transition:opacity .5s;margin-right:4px"></span>
-  <button class="btn" id="buyBtn" onclick="openBuyModal()" title="Show aggregated Buy items list">📦 Buy Summary</button>
-  <button class="btn" id="mfgBtn" onclick="openMfgModal()" title="Manufacturing processes summary">⚙ Manufacturing</button>
-  <button class="btn" id="rfqBtn" onclick="openRFQModal()" title="Subcontractor RFQ list">🔧 RFQ</button>
-  <button class="btn" id="anomalyBtn" onclick="openAnomalyPanel()" title="בדיקת אנומליות בהערכות שעות">🔍 אנומליות<span class="anom-counter" id="anomalyBadge" style="display:none">0</span></button>
-  <button class="btn" id="rmExcelBtn" onclick="exportRawMaterials()" title="ייצוא חומרי גלם לExcel לפי משפחות">🧱 ח"ג Excel</button>
-  <button class="btn" id="xlsxBtn" onclick="exportBomExcel()" title="ייצוא BOM לקובץ Excel עם היררכיה וקיבוץ">📊 Excel</button>
-  <button class="btn" id="adminFolderBtn" onclick="adminGetFolderItemId()" title="Admin: Get SharePoint Folder Item ID for hardcoding" style="display:none;font-size:10px;opacity:.6">🔧 Get Folder ID</button>
   <button class="btn" id="themeBtn" onclick="toggleTheme()" title="Toggle light/dark mode">☀️</button>
   <span id="projectQtyWrap" style="font-size:11px;color:var(--text2);display:flex;align-items:center;gap:4px">
     ערכות:
@@ -457,73 +432,151 @@ tr.row-disabled .badge,tr.row-disabled .proc-btn{opacity:.5}
   <div class="stats" id="statsBar">Loading…</div>
 </div>
 
-<div class="main">
-  <div class="bom-panel" id="bomPanel">
-    <div class="table-wrap" id="tableWrap">
-      <table id="bomTable">
-        <colgroup id="colgroup"></colgroup>
-        <thead id="thead">
-          <tr id="headerRow"></tr>
-        </thead>
-        <tbody id="bomBody"></tbody>
-      </table>
-      <div class="empty-state" id="emptyState" style="display:none">No matching parts found.</div>
-    </div>
-  </div>
+<!-- ── Main tab navigation ── -->
+<div class="main-tab-nav">
+  <button class="mtn-tab on" id="mtn-main"    onclick="switchMainTab('main')">📋 ראשי</button>
+  <button class="mtn-tab"    id="mtn-buy"     onclick="switchMainTab('buy')">📦 רכש</button>
+  <button class="mtn-tab"    id="mtn-rawmat"  onclick="switchMainTab('rawmat')">🧱 חומרי גלם</button>
+  <button class="mtn-tab"    id="mtn-reports" onclick="switchMainTab('reports')">📊 דוחות</button>
+</div>
 
-  <div class="splitter" id="splitter"></div>
+<!-- ── Tab content ── -->
+<div class="main-tab-body">
 
-  <div class="preview" id="preview">
-    <div class="no-sel" id="noSel">
-      <div class="no-sel-icon">📋</div>
-      <div class="no-sel-txt">Click a row to preview files</div>
-    </div>
-    <div id="pvContent" style="display:none;flex-direction:column;height:100%">
-      <div class="pv-header">
-        <div style="min-width:0">
-          <div class="pv-pn" id="pvPN"></div>
-          <div class="pv-desc" id="pvDesc"></div>
+  <!-- ══ ראשי (Main BOM) tab ══ -->
+  <div class="mtp active" id="mtp-main">
+    <!-- Filter / action bar -->
+    <div class="filter-bar">
+      <div class="search-wrap">
+        <span class="si">🔍</span>
+        <input type="text" id="searchInput" placeholder="Search PN, description, catalog…">
+        <button class="sc" id="clearSearch" onclick="clearSearch()">✕</button>
+      </div>
+      <div class="level-ctrl">
+        <span>Level ≤</span>
+        <input type="range" id="levelSlider" min="0" max="10" value="10" oninput="onLevel(this.value)">
+        <span class="level-badge" id="levelDisp">All</span>
+      </div>
+      <div class="type-wrap" id="typeWrap">
+        <button class="type-btn" id="typeBtn" onclick="toggleTypeDD()">All Types ▾</button>
+        <div class="type-dropdown" id="typeDD">
+          <label class="type-item"><input type="checkbox" checked onchange="toggleType('ELTDesign',this)"> ELTDesign</label>
+          <label class="type-item"><input type="checkbox" checked onchange="toggleType('Buy',this)"> Buy</label>
+          <label class="type-item"><input type="checkbox" checked onchange="toggleType('Package',this)"> Package</label>
         </div>
-        <button class="pv-close" onclick="closePreview()">✕</button>
       </div>
-      <div class="pv-meta" id="pvMeta"></div>
-      <div class="pv-tabs">
-        <div class="pv-tab on" id="tabDrw" onclick="switchTab('drawing')">📐 Drawing</div>
-        <div class="pv-tab" id="tabCad" onclick="switchTab('cad')">🔩 CAD</div>
-        <div class="pv-tab" id="tabAll" onclick="switchTab('all')">📁 All Files</div>
+      <select class="filter-sel" id="statusFilter" onchange="applyFilters()">
+        <option value="">All Status</option>
+        <option value="Released">Released</option>
+        <option value="Obsolete">Obsolete</option>
+      </select>
+      <button class="btn" id="filesOnlyBtn" onclick="toggleFilesOnly()">📄 Has Files</button>
+      <button class="btn" onclick="collapseAll()">⊖ Collapse</button>
+      <button class="btn" onclick="expandAll()">⊕ Expand</button>
+      <button class="btn" id="xlsxBtn" onclick="exportBomExcel()" title="ייצוא BOM לקובץ Excel">📊 Excel</button>
+      <button class="btn" id="anomalyBtn" onclick="openAnomalyPanel()" title="בדיקת אנומליות בהערכות שעות">🔍 אנומליות<span class="anom-counter" id="anomalyBadge" style="display:none">0</span></button>
+      <button class="btn" id="adminFolderBtn" onclick="adminGetFolderItemId()" style="display:none;font-size:10px;opacity:.6">🔧 Get Folder ID</button>
+    </div>
+    <!-- Main area: BOM (left) + Drawing/CAD preview (right) -->
+    <div class="main">
+      <div class="bom-panel" id="bomPanel">
+        <div class="table-wrap" id="tableWrap">
+          <table id="bomTable">
+            <colgroup id="colgroup"></colgroup>
+            <thead id="thead"><tr id="headerRow"></tr></thead>
+            <tbody id="bomBody"></tbody>
+          </table>
+          <div class="empty-state" id="emptyState" style="display:none">No matching parts found.</div>
+        </div>
       </div>
-      <div class="pv-body" id="pvBody"></div>
+      <div class="splitter" id="splitter"></div>
+      <div class="preview" id="preview">
+        <div class="no-sel" id="noSel">
+          <div class="no-sel-icon">📋</div>
+          <div class="no-sel-txt">Click a row to preview files</div>
+        </div>
+        <div id="pvContent" style="display:none;flex-direction:column;height:100%">
+          <div class="pv-header">
+            <div style="min-width:0">
+              <div class="pv-pn" id="pvPN"></div>
+              <div class="pv-desc" id="pvDesc"></div>
+            </div>
+            <button class="pv-close" onclick="closePreview()">✕</button>
+          </div>
+          <div class="pv-meta" id="pvMeta"></div>
+          <div class="pv-tabs">
+            <div class="pv-tab on" id="tabDrw" onclick="switchTab('drawing')">📐 Drawing</div>
+            <div class="pv-tab" id="tabCad" onclick="switchTab('cad')">🔩 CAD</div>
+            <div class="pv-tab" id="tabAll" onclick="switchTab('all')">📁 All Files</div>
+          </div>
+          <div class="pv-body" id="pvBody"></div>
+        </div>
+      </div>
+    </div>
+    <!-- Vertical (row-resize) splitter -->
+    <div class="v-splitter" id="vSplitter"></div>
+    <!-- Manufacturing process panel at bottom -->
+    <div class="mfg-side mfg-bottom" id="mfgSide">
+      <div class="ms-header">
+        <div class="ms-title">⚙ Manufacturing</div>
+        <div class="ms-pn" id="msPn">Select an ELTDesign row</div>
+      </div>
+      <div class="ms-tq" id="msTq"></div>
+      <div class="ms-body" id="msBody">
+        <div class="ms-empty">
+          <span style="font-size:28px;opacity:.3">⚙</span>
+          <span>Select an ELTDesign row<br>to add manufacturing processes</span>
+        </div>
+      </div>
+      <div class="ms-saved" id="msSaved">✓ Saved</div>
+      <button class="ms-add-btn" id="msAddBtn" style="display:none" onclick="msAddRow()">＋ Add Process</button>
+      <div id="msExportAssyBtn" style="display:none"></div>
+      <div id="msSubSection" style="display:none;padding:8px 10px 10px;border-top:1px solid var(--border);margin-top:4px">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;color:var(--text2)">
+          <input type="checkbox" id="msSubCheck" onchange="msSideSub()">
+          <span>🔧 קבלן משנה (Subcontractor)</span>
+        </label>
+        <div id="msSubDomainRow" style="margin-top:6px;display:none">
+          <input id="msSubDomain" type="text" placeholder="תחום: צנרת, כבילה, מכאני..." style="width:100%;box-sizing:border-box;padding:4px 8px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px" oninput="msSideSubDomain(this.value)">
+        </div>
+      </div>
     </div>
   </div>
 
-  <div class="splitter" id="splitter2"></div>
+  <!-- ══ רכש (Buy / Procurement) tab ══ -->
+  <div class="mtp" id="mtp-buy">
+    <div class="tab-action-bar">
+      <button class="btn" id="buyBtn" onclick="openBuyModal()">📦 Buy Summary (פירוט)</button>
+      <button class="btn" onclick="exportBomExcel()">📊 ייצוא BOM Excel</button>
+      <span class="stats" id="buyTabStats" style="margin-left:auto"></span>
+    </div>
+    <div id="buyTabContent" style="flex:1;overflow:auto;padding:10px 14px"></div>
+  </div>
 
-  <!-- ── Manufacturing Side Panel ── -->
-  <div class="mfg-side" id="mfgSide">
-    <div class="ms-header">
-      <div class="ms-title">⚙ Manufacturing</div>
-      <div class="ms-pn" id="msPn">Select an ELTDesign row</div>
+  <!-- ══ חומרי גלם (Raw Materials) tab ══ -->
+  <div class="mtp" id="mtp-rawmat">
+    <div class="tab-action-bar">
+      <button class="btn" id="rmExcelBtn" onclick="exportRawMaterials()">🧱 ייצוא ח"ג Excel</button>
+      <span class="stats" id="rawmatTabStats" style="margin-left:auto"></span>
     </div>
-    <div class="ms-tq" id="msTq"></div>
-    <div class="ms-body" id="msBody">
-      <div class="ms-empty">
-        <span style="font-size:28px;opacity:.3">⚙</span>
-        <span>Select an ELTDesign row<br>to add manufacturing processes</span>
-      </div>
+    <div id="rawmatTabContent" style="flex:1;overflow:auto;padding:10px 14px"></div>
+  </div>
+
+  <!-- ══ דוחות (Reports) tab ══ -->
+  <div class="mtp" id="mtp-reports">
+    <div class="tab-action-bar">
+      <button class="btn" id="mfgBtn" onclick="openMfgModal()">⚙ Manufacturing Summary</button>
+      <button class="btn" id="rfqBtn" onclick="openRFQModal()">🔧 RFQ</button>
+      <button class="btn" onclick="openAnomalyPanel()">🔍 אנומליות</button>
+      <button class="btn" onclick="exportBomExcel()">📊 Excel</button>
     </div>
-    <div class="ms-saved" id="msSaved">✓ Saved</div>
-    <button class="ms-add-btn" id="msAddBtn" style="display:none" onclick="msAddRow()">＋ Add Process</button>
-    <div id="msExportAssyBtn" style="display:none"></div>
-    <div id="msSubSection" style="display:none;padding:8px 10px 10px;border-top:1px solid var(--border);margin-top:4px">
-      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;color:var(--text2)">
-        <input type="checkbox" id="msSubCheck" onchange="msSideSub()">
-        <span>🔧 קבלן משנה (Subcontractor)</span>
-      </label>
-      <div id="msSubDomainRow" style="margin-top:6px;display:none">
-        <input id="msSubDomain" type="text" placeholder="תחום: צנרת, כבילה, מכאני..." style="width:100%;box-sizing:border-box;padding:4px 8px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px" oninput="msSideSubDomain(this.value)">
+    <div id="reportsTabContent" style="flex:1;overflow:auto;padding:10px 14px">
+      <div style="color:var(--text3);font-size:12px;padding:30px;text-align:center">
+        Use the buttons above to open detailed reports
       </div>
     </div>
   </div>
+
 </div>
 
 <script>
@@ -902,6 +955,9 @@ function fmtC(n) {
   if (!n || isNaN(n)) return '';
   if (n < 0.01) return '₪' + n.toFixed(4);
   if (n < 10)   return '₪' + n.toFixed(2);
+  // Show decimals when fractional part ≥ 0.01 (e.g. ₪13.03 not ₪13)
+  const frac = n - Math.floor(n);
+  if (frac >= 0.01) return '₪' + n.toFixed(2);
   return '₪' + Math.round(n).toLocaleString();
 }
 function fmtTimeAuto(minutes) {
@@ -3009,6 +3065,7 @@ function hlTxt(t,q){
   return esc(t.slice(0,i))+'<span class="hl">'+esc(t.slice(i,i+q.length))+'</span>'+esc(t.slice(i+q.length));
 }
 function esc(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function escHtml(s){ return esc(String(s||'')); }
 
 // ─── Sort ────────────────────────────────────────────────
 function sortBy(col){
@@ -3538,16 +3595,115 @@ async function load3D(stpPath, container){
   document.addEventListener('mouseup',()=>{ drag=false; sp.classList.remove('drag'); document.body.style.userSelect=''; });
 })();
 
-// ── Second splitter (center | mfg side) ──
+// ── Vertical splitter (resize mfg-bottom height) ──
 (()=>{
-  const sp2=document.getElementById('splitter2');
-  const preview=document.getElementById('preview');
-  const mfgSide=document.getElementById('mfgSide');
-  let drag=false, startX=0, startW=0;
-  sp2.addEventListener('mousedown',e=>{ drag=true; startX=e.clientX; startW=mfgSide.offsetWidth; sp2.classList.add('drag'); document.body.style.userSelect='none'; e.preventDefault(); });
-  document.addEventListener('mousemove',e=>{ if(!drag) return; const dw=startX-e.clientX; mfgSide.style.width=Math.max(220,Math.min(480,startW+dw))+'px'; });
-  document.addEventListener('mouseup',()=>{ drag=false; sp2.classList.remove('drag'); document.body.style.userSelect=''; });
+  const vs=document.getElementById('vSplitter');
+  const mfg=document.getElementById('mfgSide');
+  if(!vs||!mfg) return;
+  let drag=false,sy=0,sh=0;
+  vs.addEventListener('mousedown',function(e){ drag=true; sy=e.clientY; sh=mfg.offsetHeight; vs.classList.add('drag'); document.body.style.userSelect='none'; e.preventDefault(); });
+  document.addEventListener('mousemove',function(e){ if(!drag) return; const dy=sy-e.clientY; mfg.style.height=Math.max(60,Math.min(600,sh+dy))+'px'; });
+  document.addEventListener('mouseup',function(){ drag=false; vs.classList.remove('drag'); document.body.style.userSelect=''; });
 })();
+
+// ── Main tab switching ──
+function switchMainTab(id) {
+  document.querySelectorAll('.mtn-tab').forEach(function(b){ b.classList.toggle('on', b.id==='mtn-'+id); });
+  document.querySelectorAll('.mtp').forEach(function(p){ p.classList.toggle('active', p.id==='mtp-'+id); });
+  if(id==='buy')     _populateBuyTab();
+  if(id==='rawmat')  _populateRawmatTab();
+  if(id==='reports') _populateReportsTab();
+}
+
+function _populateBuyTab() {
+  const el=document.getElementById('buyTabContent');
+  const st=document.getElementById('buyTabStats');
+  if(!el) return;
+  const buys=BOM.filter(function(b){ return b.type==='Buy'; });
+  // aggregate by pb
+  const agg={};
+  buys.forEach(function(b){
+    const pb=b.pb||b.pn;
+    if(!agg[pb]) agg[pb]={pb:pb,desc:b.desc||'',tq:0,occ:0,hasPrice:false};
+    agg[pb].tq+=b.tq||0; agg[pb].occ++;
+    const e=getPriceEntry(pb); if(e) agg[pb].hasPrice=true;
+  });
+  const rows=Object.values(agg).sort(function(a,b){ return b.tq-a.tq; });
+  if(st) st.textContent=rows.length+' Buy items';
+  if(!rows.length){ el.innerHTML='<div style="color:var(--text3);padding:30px;text-align:center">No Buy items</div>'; return; }
+  let h='<table style="width:100%;border-collapse:collapse;font-size:12px">';
+  h+='<thead><tr>';
+  ['Part Number','Description','Total Qty','Occurrences','Price'].forEach(function(c){
+    h+='<th style="position:sticky;top:0;background:var(--header-bg);border-bottom:2px solid var(--border);padding:6px 10px;text-align:left;font-size:11px;font-weight:600;color:var(--text2);text-transform:uppercase;white-space:nowrap">'+c+'</th>';
+  });
+  h+='</tr></thead><tbody>';
+  rows.forEach(function(r){
+    const e=getPriceEntry(r.pb);
+    const priceStr=e ? fmtC(toILS(e.p, e.currency||'USD')) : '<span style="color:var(--text3)">—</span>';
+    h+='<tr style="border-bottom:1px solid var(--border);cursor:pointer" onclick="openBuyModal()">';
+    h+='<td style="padding:5px 10px;font-family:monospace;color:var(--accent)">'+escHtml(r.pb)+'</td>';
+    h+='<td style="padding:5px 10px;color:var(--text2)">'+escHtml(r.desc)+'</td>';
+    h+='<td style="padding:5px 10px;font-weight:600">'+r.tq+'</td>';
+    h+='<td style="padding:5px 10px;color:var(--text3)">×'+r.occ+'</td>';
+    h+='<td style="padding:5px 10px;font-family:monospace;color:var(--accent2)">'+priceStr+'</td>';
+    h+='</tr>';
+  });
+  h+='</tbody></table>';
+  el.innerHTML=h;
+}
+
+function _populateRawmatTab() {
+  const el=document.getElementById('rawmatTabContent');
+  const st=document.getElementById('rawmatTabStats');
+  if(!el) return;
+  const pbs=Object.keys(rawMatData||{});
+  if(st) st.textContent=pbs.length+' חומרי גלם';
+  if(!pbs.length){ el.innerHTML='<div style="color:var(--text3);padding:30px;text-align:center">לא נטענו חומרי גלם</div>'; return; }
+  let h='<table style="width:100%;border-collapse:collapse;font-size:12px">';
+  h+='<thead><tr>';
+  ['PB / Part','Family','Grade','Form','Dims','Density (kg/m³)','Unit Cost','Cost Unit','Total Mass (kg)','Total Cost'].forEach(function(c){
+    h+='<th style="position:sticky;top:0;background:var(--header-bg);border-bottom:2px solid var(--border);padding:6px 10px;text-align:left;font-size:11px;font-weight:600;color:var(--text2);text-transform:uppercase;white-space:nowrap">'+c+'</th>';
+  });
+  h+='</tr></thead><tbody>';
+  pbs.forEach(function(pb){
+    const r=rawMatData[pb];
+    let agg={mass:0,cost:0};
+    try{ agg=computeARAggregate(pb)||agg; }catch(e){}
+    h+='<tr style="border-bottom:1px solid var(--border)">';
+    h+='<td style="padding:5px 10px;font-family:monospace;color:var(--accent)">'+escHtml(pb)+'</td>';
+    h+='<td style="padding:5px 10px">'+escHtml(r.family||'')+'</td>';
+    h+='<td style="padding:5px 10px">'+escHtml(r.grade||'')+'</td>';
+    h+='<td style="padding:5px 10px">'+escHtml(r.form||'')+'</td>';
+    h+='<td style="padding:5px 10px;font-size:11px;color:var(--text2)">'+escHtml(r.dims||'')+'</td>';
+    h+='<td style="padding:5px 10px">'+escHtml(String(r.density||''))+'</td>';
+    h+='<td style="padding:5px 10px;font-family:monospace;color:var(--accent2)">'+(r.unitCost ? fmtC(parseFloat(r.unitCost)) : '')+'</td>';
+    h+='<td style="padding:5px 10px">'+escHtml(r.costUnit||'')+'</td>';
+    h+='<td style="padding:5px 10px;font-weight:600">'+(agg.mass>0 ? agg.mass.toFixed(2) : '—')+'</td>';
+    h+='<td style="padding:5px 10px;font-family:monospace;color:var(--accent2)">'+(agg.cost>0 ? fmtC(agg.cost) : '—')+'</td>';
+    h+='</tr>';
+  });
+  h+='</tbody></table>';
+  el.innerHTML=h;
+}
+
+function _populateReportsTab() {
+  const el=document.getElementById('reportsTabContent');
+  if(!el) return;
+  // show summary stats
+  const elt=BOM.filter(function(b){ return b.type==='ELTDesign'; }).length;
+  const analyzed=BOM.filter(function(b){ return b.type==='ELTDesign' && procData[b.pb||b.pn] && procData[b.pb||b.pn].length; }).length;
+  el.innerHTML='<div style="display:flex;gap:20px;flex-wrap:wrap;padding:10px 0 20px">'
+    +'<div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:16px 20px">'
+    +'<div style="font-size:11px;color:var(--text3);text-transform:uppercase;margin-bottom:4px">ELTDesign rows</div>'
+    +'<div style="font-size:24px;font-weight:700;color:var(--accent)">'+elt+'</div></div>'
+    +'<div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:16px 20px">'
+    +'<div style="font-size:11px;color:var(--text3);text-transform:uppercase;margin-bottom:4px">Analyzed</div>'
+    +'<div style="font-size:24px;font-weight:700;color:var(--accent2)">'+analyzed+'</div></div>'
+    +'<div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:16px 20px">'
+    +'<div style="font-size:11px;color:var(--text3);text-transform:uppercase;margin-bottom:4px">Coverage</div>'
+    +'<div style="font-size:24px;font-weight:700;color:var(--warn)">'+(elt>0 ? Math.round(analyzed/elt*100) : 0)+'%</div></div>'
+    +'</div>';
+}
 
 // ── Price Database — verified from supplier pages ─────────
 // Sources: fastenersuperstore.com, boltdepot.com (June 2026)
