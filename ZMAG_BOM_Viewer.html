@@ -424,7 +424,7 @@ tr.row-disabled .badge,tr.row-disabled .proc-btn{opacity:.5}
 <div class="topbar">
   <div>
     <div class="topbar-title">ZMAG BOM Viewer</div>
-    <div class="topbar-sub">6910W021-001 Rev B &nbsp;<span id="verBadge" style="font-size:9px;opacity:0.45;font-family:monospace">v20260722.3101</span></div>
+    <div class="topbar-sub">6910W021-001 Rev B &nbsp;<span id="verBadge" style="font-size:9px;opacity:0.45;font-family:monospace">v20260722.3200</span></div>
   </div>
   <div class="sep"></div>
   <button class="auth-btn signed-out" id="loginBtn" onclick="msalLogin()" title="התחבר עם חשבון Microsoft לסנכרון JSON ב-SharePoint">🔑 התחבר</button>
@@ -1922,6 +1922,34 @@ function getARDimsForParent(pb, parentPb) {
   return base;
 }
 
+// Generic: collect unique parent PBs for ANY raw-material (M / M2 / AR), with total BOM tq + STEP path
+function getParentsForRawMat(pb) {
+  const map = new Map();
+  const RAW_UOM = /^(m2|m|ar|a\/r)$/i;
+  BOM.forEach(function(item, idx) {
+    if ((item.pb || item.pn) !== pb) return;
+    if (!RAW_UOM.test((item.uom||'').trim())) return;
+    const tq = item.tq || 0;
+    for (let j = idx - 1; j >= 0; j--) {
+      if (BOM[j].lv < item.lv) {
+        const parentPb = BOM[j].pb || BOM[j].pn;
+        const stpFiles = (BOM[j].cads || []).filter(function(c){ return /\.stp$|\.step$/i.test(c); });
+        if (!map.has(parentPb)) {
+          map.set(parentPb, {
+            parentPb: parentPb,
+            parentDesc: (BOM[j].desc || BOM[j].pn || '').slice(0, 32),
+            tq: 0,
+            stpPath: stpFiles[0] || null
+          });
+        }
+        map.get(parentPb).tq += tq;
+        break;
+      }
+    }
+  });
+  return [...map.values()];
+}
+
 // Collect unique parent PBs for an AR material, grouped with their total tq + STEP path
 function getParentsForARMaterial(pb) {
   const map = new Map();
@@ -2080,11 +2108,13 @@ function openRawMatEditor(pb, desc, tq) {
         '🔍 זוהה אוטומטית: '+detectedLabels.join(' · ')+'<br><span style="font-size:10px;opacity:.8">אשר או תקן לפני שמירה</span></div>'
     : '';
 
-  // AR estimation banner — per-parent table
+  // Per-parent estimation banner — for ALL raw-mat UOMs (M, M2, AR)
   const bomInfo = getBOMInfoForPb(pb);
-  window._arParents = bomInfo.isAR ? getParentsForARMaterial(pb) : [];
+  window._arUom = bomInfo.uom || '';
+  window._arParents = getParentsForRawMat(pb);
   const _arParents = window._arParents;
-  const arBanner = bomInfo.isAR ? (function(){
+  const _isRawMatItem = /^(m2|m|ar|a\/r)$/i.test(window._arUom);
+  const arBanner = (_isRawMatItem && _arParents.length) ? (function(){
     const isSheet = (formId === 'sheet');
     const existPP = (rawMatData[pb]||{}).perParent || {};
     const rowsHTML = _arParents.map(function(p, i) {
@@ -2117,8 +2147,10 @@ function openRawMatEditor(pb, desc, tq) {
         '</td>'+
       '</tr>';
     }).join('');
+    const _uomLabel = (window._arUom||'').toUpperCase();
+    const _uomTitle = bomInfo.isAR ? 'AR — As Required' : _uomLabel+' — חומר גלם';
     return '<div style="background:rgba(237,137,54,.1);border:1px solid rgba(237,137,54,.4);border-radius:6px;padding:8px 10px">'+
-      '<div style="font-size:11px;font-weight:700;color:#ed8936;margin-bottom:5px">📐 AR — As Required · '+_arParents.length+' פריטי אב</div>'+
+      '<div style="font-size:11px;font-weight:700;color:#ed8936;margin-bottom:5px">📐 '+_uomTitle+' · '+_arParents.length+' פריטי אב</div>'+
       '<div style="max-height:190px;overflow-y:auto;border:1px solid var(--border);border-radius:4px">'+
       '<table style="width:100%;border-collapse:collapse">'+
       '<thead><tr style="background:var(--surface2);position:sticky;top:0;z-index:1">'+
@@ -2303,15 +2335,33 @@ function arRefreshRow(pb, rowIdx) {
   const row = document.getElementById('ar-prow-'+rowIdx);
   if (!row) return;
   const parentPb = row.dataset.ppb;
-  const tq = parseInt(row.dataset.tq) || 1;
+  const tqRaw  = parseFloat(row.dataset.tq) || 1;
   const form    = document.getElementById('rmForm')?.value || rm.form || 'sheet';
   const density = parseFloat(document.getElementById('rmDensity')?.value) || parseFloat(rm.density) || 2700;
-  const dims = getARDimsForParent(pb, parentPb);
-  if (!dims.L) { massTd.textContent = ''; subTd.textContent = ''; return; }
-  const vol  = calcRawMatVolume(form, dims);
-  const mass = vol * density;
-  massTd.textContent = mass >= 0.001 ? (mass*1000).toFixed(0)+' g' : (mass*1e6).toFixed(0)+' mg';
-  subTd.textContent  = (mass*tq >= 0.001 ? (mass*tq).toFixed(3) : '<0.001')+' kg';
+  const uom     = (window._arUom||'').toLowerCase();
+  const dims    = getARDimsForParent(pb, parentPb);  // base + perParent
+
+  if (isARUnit(uom)) {
+    // AR: tqRaw = number of blanks. Per-blank dims required.
+    if (!dims.L) { massTd.textContent = ''; subTd.textContent = ''; return; }
+    const vol  = calcRawMatVolume(form, dims);
+    const mass = vol * density;
+    massTd.textContent = mass >= 0.001 ? (mass*1000).toFixed(0)+' g' : (mass*1e6).toFixed(0)+' mg';
+    subTd.textContent  = (mass*tqRaw >= 0.001 ? (mass*tqRaw).toFixed(3) : '<0.001')+' kg';
+  } else {
+    // M / M2: tqRaw = total length (m) or area (m²) from BOM. Mass computable directly.
+    const totalMass = _computeLinearMass(rm, uom, tqRaw);
+    // If blank L set via perParent: also show per-blank mass
+    if (dims.L) {
+      const blankDims = Object.assign({}, rm.dims||{}, dims);
+      const vol = calcRawMatVolume(form, blankDims);
+      const massPerBlank = vol * density;
+      massTd.textContent = massPerBlank >= 0.001 ? (massPerBlank*1000).toFixed(0)+' g' : '—';
+    } else {
+      massTd.textContent = '—';
+    }
+    subTd.textContent = totalMass >= 0.001 ? totalMass.toFixed(3)+' kg' : '—';
+  }
 }
 
 function arRefreshAggregate(pb) {
@@ -2324,19 +2374,29 @@ function arRefreshAggregate(pb) {
   const form     = document.getElementById('rmForm')?.value || rm.form || 'sheet';
   const uc       = parseFloat(document.getElementById('rmUnitCost')?.value) || parseFloat(rm.unitCost) || 0;
   const costUnit = document.getElementById('rmCostUnit')?.value || rm.costUnit || 'kg';
+  const uom      = (window._arUom||'').toLowerCase();
+  const RAW_UOM  = /^(m2|m|ar|a\/r)$/i;
   let totalMass = 0, totalArea = 0, counted = 0;
+
   BOM.forEach(function(item, idx) {
     if ((item.pb || item.pn) !== pb) return;
-    if (!isARUnit(item.uom)) return;
+    if (!RAW_UOM.test((item.uom||'').trim())) return;
     const tq = item.tq || 0; if (!tq) return;
-    const parentPb = getParentPbForBOMIndex(idx);
-    const dims = getARDimsForParent(pb, parentPb);
-    if (!dims.L) return;
     counted++;
-    const vol = calcRawMatVolume(form, dims);
-    totalMass += vol * density * tq;
-    if (form === 'sheet' && dims.W)
-      totalArea += (parseFloat(dims.L)/1000)*(parseFloat(dims.W)/1000)*tq;
+    if (isARUnit(item.uom)) {
+      // AR: use per-parent blank dims
+      const parentPb = getParentPbForBOMIndex(idx);
+      const dims = getARDimsForParent(pb, parentPb);
+      if (!dims.L) return;
+      const vol = calcRawMatVolume(form, dims);
+      totalMass += vol * density * tq;
+      if (form === 'sheet' && dims.W)
+        totalArea += (parseFloat(dims.L)/1000)*(parseFloat(dims.W)/1000)*tq;
+    } else {
+      // M / M2: mass derivable directly from BOM tq
+      totalMass += _computeLinearMass(rm, item.uom, tq);
+      if (uom === 'm2') totalArea += tq; // tq already in m²
+    }
   });
   let totalCost = 0;
   if (costUnit==='kg') totalCost = totalMass * uc;
@@ -2344,13 +2404,14 @@ function arRefreshAggregate(pb) {
   else totalCost = totalMass * uc;
   const total = window._arParents ? window._arParents.length : '?';
   if (counted > 0) {
+    const qtyLabel = isARUnit(uom) ? '' : (uom==='m2' ? ' ('+totalArea.toFixed(3)+' m²)' : '');
     aggEl.innerHTML =
       '<strong style="color:#68d391">סה"כ: '+totalMass.toFixed(2)+' kg</strong>'+
-      (totalArea>0 ? ' <span style="color:var(--text3);font-size:10px">('+totalArea.toFixed(3)+' M²)</span>' : '')+
+      (totalArea>0 ? ' <span style="color:var(--text3);font-size:10px">('+totalArea.toFixed(3)+(isARUnit(uom)?' m²':' m²')+')</span>' : '')+
       (uc ? ' · <strong style="color:var(--accent2)">'+fmtC(totalCost)+'</strong>' : '')+
-      ' <span style="color:var(--text3);font-size:10px">מ-'+counted+'/'+total+' פריטים</span>';
+      ' <span style="color:var(--text3);font-size:10px">'+counted+'/'+total+' פריטי אב</span>';
   } else {
-    aggEl.textContent = 'הזן L ו-W בטבלה כדי לחשב';
+    aggEl.textContent = isARUnit(uom) ? 'הזן L ו-W בטבלה כדי לחשב' : 'לא נמצאו פריטי אב ב-BOM';
   }
 }
 
@@ -3879,7 +3940,7 @@ function _populateRawmatTab(force) {
     h+='<tr class="rm-row" id="rmrow-'+rmId+'" data-pb="'+escHtml(r.pb)+'" data-desc="'+escHtml(r.desc)+'" style="border-bottom:1px solid var(--border);'+rowBg+'">';
     // Toggle button for AR expansion
     h+='<td style="padding:4px 10px;font-family:monospace;color:var(--accent);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">';
-    if(isAR && isConfigured){ h+='<button id="rmtoggle-'+rmId+'" onclick="_toggleRawmatAR(\''+safePb+'\')" style="background:none;border:none;color:var(--text3);cursor:pointer;font-size:10px;margin-right:3px;padding:0;line-height:1">▶</button>'; }
+    if(isConfigured){ h+='<button id="rmtoggle-'+rmId+'" onclick="_toggleRawmatExpand(\''+safePb+'\')" style="background:none;border:none;color:var(--text3);cursor:pointer;font-size:10px;margin-right:3px;padding:0;line-height:1">▶</button>'; }
     h+=escHtml(r.pb)+'</td>';
     h+='<td style="padding:5px 10px;color:var(--text2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+escHtml(r.desc)+'">'+escHtml(r.desc)+'</td>';
     h+='<td style="padding:5px 10px;font-weight:700;color:var(--warn)">'+escHtml(r.uom)+'</td>';
@@ -3914,8 +3975,8 @@ function _populateRawmatTab(force) {
   _rmInitColResize();
 }
 
-// ── Rawmat tab: expand AR row to show per-parent blanks ──
-function _toggleRawmatAR(pb) {
+// ── Rawmat tab: expand any configured row to show per-parent breakdown ──
+function _toggleRawmatExpand(pb) {
   const rmId='rm_'+pb.replace(/[^a-zA-Z0-9]/g,'_');
   const subId='rmpar-'+rmId;
   let sub=document.getElementById(subId);
@@ -3923,38 +3984,80 @@ function _toggleRawmatAR(pb) {
   if(sub){ sub.style.display=sub.style.display==='none'?'':'none'; if(btn) btn.textContent=sub.style.display===''?'▼':'▶'; return; }
 
   const rm=rawMatData[pb]; if(!rm) return;
-  const parents=getParentsForARMaterial(pb); if(!parents.length) return;
+  const parents=getParentsForRawMat(pb); if(!parents.length) return;
   const density=parseFloat(rm.density)||(MATERIAL_DB[rm.family]||{}).density||2700;
   const uc=parseFloat(rm.unitCost)||0;
+
+  // Determine UOM from BOM
+  let uom='ar';
+  for(let i=0;i<BOM.length;i++){
+    if((BOM[i].pb||BOM[i].pn)===pb && BOM[i].uom){ uom=(BOM[i].uom||'').trim().toLowerCase(); break; }
+  }
+  const isAR_uom=/^(ar|a\/r)$/i.test(uom);
+  const isM=/^m$/i.test(uom);
+  const isM2=/^m2$/i.test(uom);
   const isSheet=rm.form==='sheet';
+
+  // Header columns vary by UOM
+  let hd='<th style="padding:3px 8px;text-align:left;color:var(--text3);font-size:10px;font-weight:600">פריט אב</th>';
+  if(isAR_uom||isM2){ hd+='<th style="padding:3px 8px;text-align:right;color:var(--text3);font-size:10px;font-weight:600">L (mm)</th>'; }
+  if(isAR_uom||isM2){ hd+='<th style="padding:3px 8px;text-align:right;color:var(--text3);font-size:10px;font-weight:600">W (mm)</th>'; }
+  if(isM){ hd+='<th style="padding:3px 8px;text-align:right;color:var(--text3);font-size:10px;font-weight:600">אורך גלם (mm)</th>'; }
+  hd+='<th style="padding:3px 8px;text-align:right;color:var(--text3);font-size:10px;font-weight:600">'+(isAR_uom?'כמות':(isM?'אורך (m)':'שטח (m²)'))+'</th>';
+  hd+='<th style="padding:3px 8px;text-align:right;color:var(--text3);font-size:10px;font-weight:600">מסה (kg)</th>';
+  hd+='<th style="padding:3px 8px;text-align:right;color:var(--text3);font-size:10px;font-weight:600">עלות</th>';
+  hd+='<th style="padding:3px 8px;color:var(--text3);font-size:10px;font-weight:600">📐</th>';
 
   let h='<tr id="'+subId+'" style="background:var(--surface2)">'
     +'<td colspan="12" style="padding:0 10px 8px 32px">'
     +'<table style="width:100%;border-collapse:collapse;font-size:11px;margin-top:4px">'
-    +'<thead><tr style="border-bottom:1px solid var(--border)">'
-    +'<th style="padding:3px 8px;text-align:left;color:var(--text3);font-size:10px;font-weight:600">פריט אב</th>'
-    +'<th style="padding:3px 8px;text-align:right;color:var(--text3);font-size:10px;font-weight:600">L (mm)</th>'
-    +(isSheet?'<th style="padding:3px 8px;text-align:right;color:var(--text3);font-size:10px;font-weight:600">W (mm)</th>':'')
-    +'<th style="padding:3px 8px;text-align:right;color:var(--text3);font-size:10px;font-weight:600">כמות</th>'
-    +'<th style="padding:3px 8px;text-align:right;color:var(--text3);font-size:10px;font-weight:600">Mass/unit (kg)</th>'
-    +'<th style="padding:3px 8px;text-align:right;color:var(--text3);font-size:10px;font-weight:600">עלות blank</th>'
-    +'</tr></thead><tbody>';
+    +'<thead><tr style="border-bottom:1px solid var(--border)">'+hd+'</tr></thead><tbody>';
 
   parents.forEach(function(p){
-    const dims=getARDimsForParent(pb,p.parentPb);
-    const hasDims=!!dims.L;
-    const vol=hasDims ? calcRawMatVolume(rm.form,dims) : 0;
-    const massUnit=vol*density; // per single blank
-    const cost=rm.costUnit==='m2'&&dims.W
-      ? (parseFloat(dims.L)/1000)*(parseFloat(dims.W)/1000)*uc*p.tq
-      : massUnit*uc*p.tq;
+    let mass=0, cost=0, dimsHtml='', tqHtml='';
+    const safePbE=pb.replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'&quot;');
+    const safeDescE=(rm.desc||(p.parentDesc||'')).replace(/'/g,"\\'").replace(/"/g,'&quot;').slice(0,60);
+
+    if(isAR_uom){
+      const dims=getARDimsForParent(pb,p.parentPb);
+      const hasDims=!!dims.L;
+      const vol=hasDims?calcRawMatVolume(rm.form,dims):0;
+      const massUnit=vol*density;
+      dimsHtml='<td style="padding:3px 8px;text-align:right">'+(hasDims?escHtml(String(dims.L)):'<span style="color:var(--text3)">—</span>')+'</td>'
+               +'<td style="padding:3px 8px;text-align:right">'+(hasDims&&dims.W?escHtml(String(dims.W)):'<span style="color:var(--text3)">—</span>')+'</td>';
+      tqHtml='<td style="padding:3px 8px;text-align:right;color:var(--text3)">×'+p.tq+'</td>';
+      mass=massUnit*p.tq;
+      cost=rm.costUnit==='m2'&&dims.W?(parseFloat(dims.L)/1000)*(parseFloat(dims.W)/1000)*uc*p.tq:mass*uc;
+    } else if(isM){
+      // perParent blank length
+      const blankL=((rm.perParent||{})[p.parentPb]||{}).dims||{};
+      const Lmm=blankL.L||'';
+      dimsHtml='<td style="padding:3px 8px;text-align:right">'+(Lmm?Lmm+' mm':'<span style="color:var(--text3)">—</span>')+'</td>';
+      tqHtml='<td style="padding:3px 8px;text-align:right;color:var(--text3)">'+p.tq.toFixed(3)+' m</td>';
+      mass=_computeLinearMass(rm,'m',p.tq);
+      cost=mass*uc;
+    } else if(isM2){
+      const blankD=((rm.perParent||{})[p.parentPb]||{}).dims||{};
+      const Lmm=blankD.L||'', Wmm=blankD.W||'';
+      dimsHtml='<td style="padding:3px 8px;text-align:right">'+(Lmm?Lmm+' mm':'<span style="color:var(--text3)">—</span>')+'</td>'
+               +'<td style="padding:3px 8px;text-align:right">'+(Wmm?Wmm+' mm':'<span style="color:var(--text3)">—</span>')+'</td>';
+      tqHtml='<td style="padding:3px 8px;text-align:right;color:var(--text3)">'+p.tq.toFixed(3)+' m²</td>';
+      mass=_computeLinearMass(rm,'m2',p.tq);
+      cost=rm.costUnit==='m2'?p.tq*uc:mass*uc;
+    }
+
+    const hasStep=!!p.stpPath;
     h+='<tr style="border-bottom:1px solid rgba(100,110,140,.15)">'
-      +'<td style="padding:3px 8px;font-family:monospace;font-size:10px;color:var(--accent);overflow:hidden;text-overflow:ellipsis;max-width:130px;white-space:nowrap">'+escHtml(p.parentDesc)+'</td>'
-      +'<td style="padding:3px 8px;text-align:right">'+(hasDims?escHtml(String(dims.L)):'<span style="color:var(--text3)">—</span>')+'</td>'
-      +(isSheet?'<td style="padding:3px 8px;text-align:right">'+(hasDims&&dims.W?escHtml(String(dims.W)):'<span style="color:var(--text3)">—</span>')+'</td>':'')
-      +'<td style="padding:3px 8px;text-align:right;color:var(--text3)">×'+p.tq+'</td>'
-      +'<td style="padding:3px 8px;text-align:right;font-weight:600">'+(hasDims?(massUnit*1000).toFixed(1)+' g':'—')+'</td>'
-      +'<td style="padding:3px 8px;text-align:right;color:var(--accent2);font-weight:700">'+(hasDims?fmtC(cost):'<span style="color:var(--text3)">—</span>')+'</td>'
+      +'<td style="padding:3px 8px;font-size:10px;color:var(--accent);overflow:hidden;text-overflow:ellipsis;max-width:140px;white-space:nowrap" title="'+escHtml(p.parentPb)+'">'+escHtml(p.parentDesc)+'</td>'
+      +dimsHtml
+      +tqHtml
+      +'<td style="padding:3px 8px;text-align:right;font-weight:600">'+(mass>0?mass.toFixed(3):'—')+'</td>'
+      +'<td style="padding:3px 8px;text-align:right;color:var(--accent2);font-weight:700">'+(cost>0?fmtC(cost):'<span style="color:var(--text3)">—</span>')+'</td>'
+      +'<td style="padding:3px 8px">'
+        +(hasStep
+          ?'<button onclick="openRawMatEditor(\''+safePbE+'\',\''+safeDescE+'\','+p.tq+')" title="📐 הגדר ממדים עבור '+escHtml(p.parentDesc)+'" style="background:var(--accent);color:#fff;border:none;border-radius:3px;cursor:pointer;font-size:10px;padding:2px 6px">📐</button>'
+          :'<span style="color:var(--text3);font-size:9px">—</span>')
+      +'</td>'
       +'</tr>';
   });
   h+='</tbody></table></td></tr>';
@@ -3963,6 +4066,8 @@ function _toggleRawmatAR(pb) {
   if(mainRow){ mainRow.insertAdjacentHTML('afterend',h); }
   if(btn) btn.textContent='▼';
 }
+// Backward-compat alias (still called from old HTML if any)
+function _toggleRawmatAR(pb){ _toggleRawmatExpand(pb); }
 
 function _saveRawmatCost(pb, val) {
   if(!rawMatData[pb]) return;
