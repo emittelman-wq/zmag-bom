@@ -392,7 +392,7 @@ tr.row-disabled .badge,tr.row-disabled .proc-btn{opacity:.5}
 <div class="topbar">
   <div>
     <div class="topbar-title">ZMAG BOM Viewer</div>
-    <div class="topbar-sub">6910W021-001 Rev B &nbsp;<span id="verBadge" style="font-size:9px;opacity:0.45;font-family:monospace">v20260720.2400</span></div>
+    <div class="topbar-sub">6910W021-001 Rev B &nbsp;<span id="verBadge" style="font-size:9px;opacity:0.45;font-family:monospace">v20260720.2500</span></div>
   </div>
   <div class="sep"></div>
 
@@ -634,6 +634,8 @@ const COLS = [
   {id:'cycleH',label:'⏱ ייצור',     w:65,  sort:false},
   {id:'cumCH', label:'⏱ עץ',        w:65,  sort:false},
   {id:'totalH',label:'⏱ כולל',      w:70,  sort:false},
+  {id:'lcost', label:'🔧 עלות ייצור', w:85,  sort:false},
+  {id:'bcost', label:'🛒 עלות רכש',  w:85,  sort:false},
   {id:'ucost', label:'💰 עלות שורה', w:90,  sort:false},
   {id:'tcost', label:'🌳 עלות עץ',   w:90,  sort:false},
   {id:'pcost', label:'🌳 פרוייקט',  w:90,  sort:false},
@@ -1089,6 +1091,16 @@ function buildTable(){
     tdTotH.dataset.totalHIdx = idx;
     tdTotH.style.cssText = 'text-align:right;font-size:11px;color:var(--text2)';
     tr.appendChild(tdTotH);
+    // 🔧 Labor cost cell — ELTDesign process cost × tq
+    const tdLC = document.createElement('td');
+    tdLC.className = 'cost-val cost-mfg';
+    tdLC.dataset.laborIdx = idx;
+    tr.appendChild(tdLC);
+    // 🛒 Buy/material cost cell — Buy or raw material cost × tq
+    const tdBC = document.createElement('td');
+    tdBC.className = 'cost-val cost-buy';
+    tdBC.dataset.buyIdx = idx;
+    tr.appendChild(tdBC);
     // 💰 Direct labor/buy cost cell (unitCost × tq)
     const tdUC = document.createElement('td');
     tdUC.className = 'cost-val';
@@ -3090,6 +3102,22 @@ function updateStats(vis){
 }
 function refreshCostCells() {
   if (!unitCosts.length) return;
+  // 🔧 Labor cost (ELTDesign process cost × tq)
+  document.querySelectorAll('[data-labor-idx]').forEach(function(td) {
+    const i = parseInt(td.dataset.laborIdx);
+    const item = BOM[i];
+    if (!item || item.type !== 'ELTDesign') { td.textContent = ''; return; }
+    const cost = (unitCosts[i] || 0) * (item.tq || 0);
+    td.textContent = cost > 0 ? fmtC(cost) : '—';
+  });
+  // 🛒 Buy/material cost (Buy or raw material cost × tq)
+  document.querySelectorAll('[data-buy-idx]').forEach(function(td) {
+    const i = parseInt(td.dataset.buyIdx);
+    const item = BOM[i];
+    if (!item || item.type === 'ELTDesign') { td.textContent = ''; return; }
+    const cost = (unitCosts[i] || 0) * (item.tq || 0);
+    td.textContent = cost > 0 ? fmtC(cost) : '—';
+  });
   document.querySelectorAll('[data-cost-idx]').forEach(function(td){
     const i = parseInt(td.dataset.costIdx);
     const uc = unitCosts[i] || 0;
