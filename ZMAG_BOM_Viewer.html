@@ -392,7 +392,7 @@ tr.row-disabled .badge,tr.row-disabled .proc-btn{opacity:.5}
 <div class="topbar">
   <div>
     <div class="topbar-title">ZMAG BOM Viewer</div>
-    <div class="topbar-sub">6910W021-001 Rev B &nbsp;<span id="verBadge" style="font-size:9px;opacity:0.45;font-family:monospace">v20260720.2300</span></div>
+    <div class="topbar-sub">6910W021-001 Rev B &nbsp;<span id="verBadge" style="font-size:9px;opacity:0.45;font-family:monospace">v20260720.2400</span></div>
   </div>
   <div class="sep"></div>
 
@@ -5087,6 +5087,13 @@ function setFileSyncStatus(msg, state) {
 }
 
 loadProcData();
+// Refresh UI — buildTable() ran in script-block-1 before procData was loaded from localStorage.
+// Now that procData is available, update row highlighting + time columns without a full rebuild.
+try { computeTreeCosts(); } catch(e) {}
+try { updateStats(); } catch(e) {}
+updateAnalyzedRows();
+buildCumulativeHours();
+updateWHCells();
 
 // ── Process Editor ────────────────────────────────────────
 function makeProcTypeSelect(val) {
