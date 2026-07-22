@@ -392,7 +392,7 @@ tr.row-disabled .badge,tr.row-disabled .proc-btn{opacity:.5}
 <div class="topbar">
   <div>
     <div class="topbar-title">ZMAG BOM Viewer</div>
-    <div class="topbar-sub">6910W021-001 Rev B &nbsp;<span id="verBadge" style="font-size:9px;opacity:0.45;font-family:monospace">v20260720.2200</span></div>
+    <div class="topbar-sub">6910W021-001 Rev B &nbsp;<span id="verBadge" style="font-size:9px;opacity:0.45;font-family:monospace">v20260720.2300</span></div>
   </div>
   <div class="sep"></div>
 
@@ -1126,7 +1126,8 @@ function buildTable(){
   } catch(e) {
     console.error('[computeTreeCosts]', e);
   }
-  updateStats();
+  try { updateStats(); } catch(e) { console.error('[updateStats]', e); }
+  updateAnalyzedRows();
 }
 
 // ─── Cumulative work hours ────────────────────────────────
@@ -3076,7 +3077,8 @@ function updateStats(vis){
   const rootCycleH = BOM.reduce((sum, item, i) => item.lv === 0 ? sum + (cumCycleH[i] || 0) : sum, 0);
   const rootSetupH = setupHours.reduce((a, b) => a + b, 0);
   // Raw material subtotal (for breakdown display — already included in rootCost via getItemUnitCost)
-  const rawMatTotal = Object.keys(rawMatData).reduce((sum, pb) => sum + computeARAggregate(pb).cost, 0);
+  let rawMatTotal = 0;
+  try { rawMatTotal = Object.keys(rawMatData || {}).reduce((sum, pb) => sum + (computeARAggregate(pb)||{cost:0}).cost, 0); } catch(e) {}
   const projCostStr  = rootCost   > 0 ? ' · 💰 ' + fmtC(rootCost * projectQty) : '';
   const rawMatStr    = rawMatTotal > 0 ? ' · 🧱 ' + fmtC(rawMatTotal * projectQty) : '';
   const projHoursStr = rootCycleH > 0 ? ' · ⏱ ' + fmtTimeAuto(rootCycleH * projectQty * 60) : '';
