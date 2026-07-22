@@ -424,7 +424,7 @@ tr.row-disabled .badge,tr.row-disabled .proc-btn{opacity:.5}
 <div class="topbar">
   <div>
     <div class="topbar-title">ZMAG BOM Viewer</div>
-    <div class="topbar-sub">6910W021-001 Rev B &nbsp;<span id="verBadge" style="font-size:9px;opacity:0.45;font-family:monospace">v20260722.3000</span></div>
+    <div class="topbar-sub">6910W021-001 Rev B &nbsp;<span id="verBadge" style="font-size:9px;opacity:0.45;font-family:monospace">v20260722.3100</span></div>
   </div>
   <div class="sep"></div>
   <button class="auth-btn signed-out" id="loginBtn" onclick="msalLogin()" title="התחבר עם חשבון Microsoft לסנכרון JSON ב-SharePoint">🔑 התחבר</button>
@@ -571,9 +571,14 @@ tr.row-disabled .badge,tr.row-disabled .proc-btn{opacity:.5}
   <div class="mtp" id="mtp-rawmat">
     <div class="tab-action-bar">
       <button class="btn" id="rmExcelBtn" onclick="exportRawMaterials()">🧱 ייצוא ח"ג Excel</button>
+      <div class="search-wrap" style="max-width:220px">
+        <span class="si">🔍</span>
+        <input type="text" id="rawmatTabSearch" placeholder="חיפוש חומר…" oninput="_rawmatFilter(this.value)">
+        <button class="sc" id="clearRawmatSearch" onclick="_rawmatFilter('');document.getElementById('rawmatTabSearch').value=''">✕</button>
+      </div>
       <span class="stats" id="rawmatTabStats" style="margin-left:auto"></span>
     </div>
-    <div id="rawmatTabContent" style="flex:1;overflow:auto;padding:10px 14px"></div>
+    <div id="rawmatTabContent" style="flex:1;overflow:auto"></div>
   </div>
 
   <!-- ══ דוחות (Reports) tab ══ -->
@@ -3785,13 +3790,38 @@ function _fmtDims(dims) {
   return parts.length ? parts.join(' ') : '—';
 }
 
+// Compute mass for M / M2 items from configured dims + qty
+function _computeLinearMass(rm, uom, tq) {
+  if (!rm || !tq) return 0;
+  const density = parseFloat(rm.density) || 2700;
+  const dims = rm.dims || {};
+  const uomL = (uom||'').toLowerCase();
+  if (uomL === 'm2') {
+    const T = parseFloat(dims.T || dims.TH) || 0;
+    if (!T) return 0;
+    return tq * (T/1000) * density;
+  }
+  if (uomL === 'm') {
+    const D  = parseFloat(dims.D || dims.OD) || 0;
+    const W  = parseFloat(dims.W) || 0;
+    const Th = parseFloat(dims.T || dims.TH) || 0;
+    let A = 0;
+    if (D) A = Math.PI * (D/2000) * (D/2000);
+    else if (W && Th) A = (W/1000) * (Th/1000);
+    else if (W) A = (W/1000) * (W/1000);
+    if (!A) return 0;
+    return tq * A * density;
+  }
+  return 0;
+}
+
 function _populateRawmatTab(force) {
   const el=document.getElementById('rawmatTabContent');
   const st=document.getElementById('rawmatTabStats');
   if(!el) return;
 
-  // Collect ALL BOM raw-material items (UOM = M, M2, AR, A/R)
   const RAW_UOM=/^(m2|m|ar|a\/r)$/i;
+  const IS_AR=/^(ar|a\/r)$/i;
   const aggMap={};
   BOM.forEach(function(b){
     if(b.type!=='Buy') return;
@@ -3804,68 +3834,134 @@ function _populateRawmatTab(force) {
   });
   const rows=Object.values(aggMap).sort(function(a,b){ return a.pb.localeCompare(b.pb); });
 
-  // Stats
   let configured=0, totalMass=0, totalCost=0;
   rows.forEach(function(r){
-    if(rawMatData[r.pb]) configured++;
-    let agg={mass:0,cost:0};
-    try{ agg=computeARAggregate(r.pb)||agg; }catch(e){}
-    totalMass+=agg.mass||0; totalCost+=agg.cost||0;
+    const rm=rawMatData[r.pb];
+    if(rm) configured++;
+    let mass=0, cost=0;
+    if(rm){
+      if(IS_AR.test(r.uom)){ try{ const a=computeARAggregate(r.pb)||{}; mass=a.mass||0; cost=a.cost||0; }catch(e){} }
+      else{ mass=_computeLinearMass(rm,r.uom,r.tq); cost=mass*(parseFloat(rm.unitCost)||0); }
+    }
+    totalMass+=mass; totalCost+=cost;
   });
   if(st) st.textContent=rows.length+' חומרים · '+configured+' מוגדרים'+(totalMass>0?' · '+totalMass.toFixed(1)+' kg':'')+(totalCost>0?' · '+fmtC(totalCost):'');
 
   if(!rows.length){ el.innerHTML='<div style="color:var(--text3);padding:30px;text-align:center">לא נמצאו חומרי גלם ב-BOM (M / M2 / AR)</div>'; return; }
 
-  const TH='position:sticky;top:0;background:var(--header-bg);border-bottom:2px solid var(--border);padding:6px 10px;text-align:left;font-size:11px;font-weight:600;color:var(--text2);text-transform:uppercase;white-space:nowrap';
-  let h='<table id="rawmatTabTable" style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr>';
-  ['PB / Part','תיאור','UOM','Qty','Form','Family · Grade','Density','עלות יחידה','ממדים','Total Mass (kg)','Total Cost',''].forEach(function(c){
-    h+='<th style="'+TH+'">'+c+'</th>';
+  const TH='position:sticky;top:0;background:var(--header-bg);border-bottom:2px solid var(--border);padding:6px 10px;text-align:left;font-size:11px;font-weight:600;color:var(--text2);text-transform:uppercase;white-space:nowrap;user-select:none;position:relative;overflow:visible';
+  const COL_WIDTHS=[130,200,55,80,80,140,90,120,130,110,110,90];
+  let h='<table id="rawmatTabTable" style="width:100%;border-collapse:collapse;font-size:12px;table-layout:fixed"><colgroup>';
+  COL_WIDTHS.forEach(function(w){ h+='<col style="width:'+w+'px">'; });
+  h+='</colgroup><thead><tr>';
+  ['PB / Part','תיאור','UOM','Qty','Form','Family · Grade','Density','עלות יחידה','ממדים','Total Mass','Total Cost',''].forEach(function(c,i){
+    h+='<th style="'+TH+(i>0?' position:relative':'')+'">'
+      +'<span>'+c+'</span>'
+      +'<div class="rh" style="position:absolute;right:0;top:0;bottom:0;width:5px;cursor:col-resize;z-index:2" onmousedown="_rmColResizeStart(event,'+i+')"></div>'
+      +'</th>';
   });
   h+='</tr></thead><tbody>';
 
   rows.forEach(function(r){
     const rm=rawMatData[r.pb]||{};
     const isConfigured=!!rawMatData[r.pb];
-    let agg={mass:0,cost:0};
-    try{ agg=computeARAggregate(r.pb)||agg; }catch(e){}
+    const isAR=IS_AR.test(r.uom);
+    let mass=0, cost=0;
+    if(isConfigured){
+      if(isAR){ try{ const a=computeARAggregate(r.pb)||{}; mass=a.mass||0; cost=a.cost||0; }catch(e){} }
+      else{ mass=_computeLinearMass(rm,r.uom,r.tq); const uc=parseFloat(rm.unitCost)||0; cost=mass*uc; }
+    }
     const safePb=r.pb.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
     const safeDesc=(r.desc||'').replace(/'/g,"\\'").slice(0,60);
     const rmId='rm_'+r.pb.replace(/[^a-zA-Z0-9]/g,'_');
-    const rowBg=isConfigured?'':'background:rgba(245,166,35,.05)';
+    const rowBg=isConfigured?'':'background:rgba(245,166,35,.04)';
 
-    h+='<tr id="rmrow-'+rmId+'" style="border-bottom:1px solid var(--border);'+rowBg+'">';
-    h+='<td style="padding:5px 10px;font-family:monospace;color:var(--accent);white-space:nowrap">'+escHtml(r.pb)+'</td>';
-    h+='<td style="padding:5px 10px;color:var(--text2);max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+escHtml(r.desc)+'">'+escHtml(r.desc)+'</td>';
+    h+='<tr class="rm-row" id="rmrow-'+rmId+'" data-pb="'+escHtml(r.pb)+'" data-desc="'+escHtml(r.desc)+'" style="border-bottom:1px solid var(--border);'+rowBg+'">';
+    // Toggle button for AR expansion
+    h+='<td style="padding:4px 10px;font-family:monospace;color:var(--accent);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">';
+    if(isAR && isConfigured){ h+='<button id="rmtoggle-'+rmId+'" onclick="_toggleRawmatAR(\''+safePb+'\')" style="background:none;border:none;color:var(--text3);cursor:pointer;font-size:10px;margin-right:3px;padding:0;line-height:1">▶</button>'; }
+    h+=escHtml(r.pb)+'</td>';
+    h+='<td style="padding:5px 10px;color:var(--text2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+escHtml(r.desc)+'">'+escHtml(r.desc)+'</td>';
     h+='<td style="padding:5px 10px;font-weight:700;color:var(--warn)">'+escHtml(r.uom)+'</td>';
     h+='<td style="padding:5px 10px;text-align:right">'+r.tq+(r.occ>1?' <span style="color:var(--text3);font-size:10px">×'+r.occ+'</span>':'')+'</td>';
-    h+='<td style="padding:5px 10px;color:var(--text2)">'+escHtml(rm.form||'—')+'</td>';
-    h+='<td style="padding:5px 10px;color:var(--text2)">'+escHtml((rm.family||'')+(rm.grade&&rm.grade!=='generic'?' · '+rm.grade:''))+'</td>';
-    h+='<td style="padding:5px 10px;text-align:right;color:var(--text2)">'+escHtml(rm.density?rm.density+' kg/m³':'—')+'</td>';
+    h+='<td style="padding:5px 10px;color:var(--text2);overflow:hidden;text-overflow:ellipsis">'+escHtml(rm.form||'—')+'</td>';
+    h+='<td style="padding:5px 10px;color:var(--text2);overflow:hidden;text-overflow:ellipsis">'+escHtml((rm.family||'')+(rm.grade&&rm.grade!=='generic'?' · '+rm.grade:''))+'</td>';
+    h+='<td style="padding:5px 10px;text-align:right;color:var(--text2)">'+escHtml(rm.density?String(rm.density):'—')+'</td>';
     // Inline unit cost
-    h+='<td style="padding:4px 8px;white-space:nowrap">';
+    h+='<td style="padding:4px 8px;overflow:hidden">';
     if(isConfigured){
-      h+='<div style="display:flex;align-items:center;gap:4px">';
-      h+='<input type="number" id="rmcost-'+rmId+'" value="'+escHtml(String(rm.unitCost||''))+'" placeholder="0.00" min="0" step="0.01"'+
-         ' onchange="_saveRawmatCost(\''+safePb+'\',this.value)"'+
-         ' style="width:68px;padding:3px 5px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px;text-align:right">';
-      h+='<span style="font-size:10px;color:var(--text3)">₪/'+escHtml(rm.costUnit||'kg')+'</span>';
-      h+='</div>';
-    } else {
-      h+='<span style="font-size:11px;color:var(--text3);font-style:italic">לא מוגדר</span>';
-    }
+      h+='<div style="display:flex;align-items:center;gap:3px">'
+        +'<input type="number" id="rmcost-'+rmId+'" value="'+escHtml(String(rm.unitCost||''))+'" placeholder="0.00" min="0" step="0.01"'
+        +' onchange="_saveRawmatCost(\''+safePb+'\',this.value)"'
+        +' style="width:62px;padding:3px 4px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:11px;text-align:right">'
+        +'<span style="font-size:10px;color:var(--text3)">₪/'+escHtml(rm.costUnit||'kg')+'</span>'
+        +'</div>';
+    } else { h+='<span style="font-size:10px;color:var(--text3);font-style:italic">לא מוגדר</span>'; }
     h+='</td>';
-    h+='<td style="padding:5px 10px;font-size:11px;color:var(--text3);white-space:nowrap">'+escHtml(_fmtDims(rm.dims))+'</td>';
-    h+='<td id="rmmass-'+rmId+'" style="padding:5px 10px;font-weight:600;text-align:right">'+(agg.mass>0?agg.mass.toFixed(2):'—')+'</td>';
-    h+='<td id="rmtotal-'+rmId+'" style="padding:5px 10px;font-family:monospace;font-weight:700;color:var(--accent2);text-align:right;white-space:nowrap">'+(agg.cost>0?fmtC(agg.cost):'—')+'</td>';
-    h+='<td style="padding:4px 8px;white-space:nowrap">';
-    h+='<button class="btn" onclick="openRawMatEditor(\''+safePb+'\',\''+safeDesc+'\','+r.tq+')"'+
-       ' style="font-size:11px;padding:3px 10px'+(isConfigured?'':';border-color:var(--warn);color:var(--warn)')+'">'+
-       (isConfigured?'✏️ ערוך':'⚙ הגדר')+'</button>';
-    h+='</td>';
+    h+='<td style="padding:5px 10px;font-size:11px;color:var(--text3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+escHtml(_fmtDims(rm.dims))+'</td>';
+    h+='<td id="rmmass-'+rmId+'" style="padding:5px 10px;font-weight:600;text-align:right">'+(mass>0?mass.toFixed(2):'—')+'</td>';
+    h+='<td id="rmtotal-'+rmId+'" style="padding:5px 10px;font-family:monospace;font-weight:700;color:var(--accent2);text-align:right;white-space:nowrap">'+(cost>0?fmtC(cost):'—')+'</td>';
+    h+='<td style="padding:4px 6px;white-space:nowrap">'
+      +'<button class="btn" onclick="openRawMatEditor(\''+safePb+'\',\''+safeDesc+'\','+r.tq+')"'
+      +' style="font-size:11px;padding:3px 8px'+(isConfigured?'':';border-color:var(--warn);color:var(--warn)')+'">'
+      +(isConfigured?'✏️ ערוך':'⚙ הגדר')+'</button>'
+      +'</td>';
     h+='</tr>';
   });
   h+='</tbody></table>';
   el.innerHTML=h;
+  // Wire up column resizers
+  _rmInitColResize();
+}
+
+// ── Rawmat tab: expand AR row to show per-parent blanks ──
+function _toggleRawmatAR(pb) {
+  const rmId='rm_'+pb.replace(/[^a-zA-Z0-9]/g,'_');
+  const subId='rmpar-'+rmId;
+  let sub=document.getElementById(subId);
+  const btn=document.getElementById('rmtoggle-'+rmId);
+  if(sub){ sub.style.display=sub.style.display==='none'?'':'none'; if(btn) btn.textContent=sub.style.display===''?'▼':'▶'; return; }
+
+  const rm=rawMatData[pb]; if(!rm) return;
+  const parents=getParentsForARMaterial(pb); if(!parents.length) return;
+  const density=parseFloat(rm.density)||(MATERIAL_DB[rm.family]||{}).density||2700;
+  const uc=parseFloat(rm.unitCost)||0;
+  const isSheet=rm.form==='sheet';
+
+  let h='<tr id="'+subId+'" style="background:var(--surface2)">'
+    +'<td colspan="12" style="padding:0 10px 8px 32px">'
+    +'<table style="width:100%;border-collapse:collapse;font-size:11px;margin-top:4px">'
+    +'<thead><tr style="border-bottom:1px solid var(--border)">'
+    +'<th style="padding:3px 8px;text-align:left;color:var(--text3);font-size:10px;font-weight:600">פריט אב</th>'
+    +'<th style="padding:3px 8px;text-align:right;color:var(--text3);font-size:10px;font-weight:600">L (mm)</th>'
+    +(isSheet?'<th style="padding:3px 8px;text-align:right;color:var(--text3);font-size:10px;font-weight:600">W (mm)</th>':'')
+    +'<th style="padding:3px 8px;text-align:right;color:var(--text3);font-size:10px;font-weight:600">כמות</th>'
+    +'<th style="padding:3px 8px;text-align:right;color:var(--text3);font-size:10px;font-weight:600">Mass/unit (kg)</th>'
+    +'<th style="padding:3px 8px;text-align:right;color:var(--text3);font-size:10px;font-weight:600">עלות blank</th>'
+    +'</tr></thead><tbody>';
+
+  parents.forEach(function(p){
+    const dims=getARDimsForParent(pb,p.parentPb);
+    const hasDims=!!dims.L;
+    const vol=hasDims ? calcRawMatVolume(rm.form,dims) : 0;
+    const massUnit=vol*density; // per single blank
+    const cost=rm.costUnit==='m2'&&dims.W
+      ? (parseFloat(dims.L)/1000)*(parseFloat(dims.W)/1000)*uc*p.tq
+      : massUnit*uc*p.tq;
+    h+='<tr style="border-bottom:1px solid rgba(100,110,140,.15)">'
+      +'<td style="padding:3px 8px;font-family:monospace;font-size:10px;color:var(--accent);overflow:hidden;text-overflow:ellipsis;max-width:130px;white-space:nowrap">'+escHtml(p.parentDesc)+'</td>'
+      +'<td style="padding:3px 8px;text-align:right">'+(hasDims?escHtml(String(dims.L)):'<span style="color:var(--text3)">—</span>')+'</td>'
+      +(isSheet?'<td style="padding:3px 8px;text-align:right">'+(hasDims&&dims.W?escHtml(String(dims.W)):'<span style="color:var(--text3)">—</span>')+'</td>':'')
+      +'<td style="padding:3px 8px;text-align:right;color:var(--text3)">×'+p.tq+'</td>'
+      +'<td style="padding:3px 8px;text-align:right;font-weight:600">'+(hasDims?(massUnit*1000).toFixed(1)+' g':'—')+'</td>'
+      +'<td style="padding:3px 8px;text-align:right;color:var(--accent2);font-weight:700">'+(hasDims?fmtC(cost):'<span style="color:var(--text3)">—</span>')+'</td>'
+      +'</tr>';
+  });
+  h+='</tbody></table></td></tr>';
+
+  const mainRow=document.getElementById('rmrow-'+rmId);
+  if(mainRow){ mainRow.insertAdjacentHTML('afterend',h); }
+  if(btn) btn.textContent='▼';
 }
 
 function _saveRawmatCost(pb, val) {
@@ -3874,10 +3970,44 @@ function _saveRawmatCost(pb, val) {
   localStorage.setItem(RM_STORAGE_KEY, JSON.stringify(rawMatData));
   computeTreeCosts(); refreshCostCells();
   const rmId='rm_'+pb.replace(/[^a-zA-Z0-9]/g,'_');
-  let agg={mass:0,cost:0};
-  try{ agg=computeARAggregate(pb)||agg; }catch(e){}
+  const IS_AR=/^(ar|a\/r)$/i;
+  let mass=0, cost=0;
+  const rm=rawMatData[pb]; const uom=rm._uom||'';
+  if(IS_AR.test(uom)){ try{ const a=computeARAggregate(pb)||{}; mass=a.mass||0; cost=a.cost||0; }catch(e){} }
+  else{ const tqEl=document.getElementById('rmrow-'+rmId); const tq=tqEl?parseFloat(tqEl.dataset.tq||0):0; mass=_computeLinearMass(rm,uom,tq); cost=mass*(parseFloat(rm.unitCost)||0); }
   const tc=document.getElementById('rmtotal-'+rmId);
-  if(tc) tc.innerHTML=agg.cost>0?fmtC(agg.cost):'—';
+  const tm=document.getElementById('rmmass-'+rmId);
+  if(tc) tc.innerHTML=cost>0?fmtC(cost):'—';
+  if(tm) tm.innerHTML=mass>0?mass.toFixed(2):'—';
+}
+
+function _rawmatFilter(q){
+  q=q.toLowerCase();
+  document.querySelectorAll('#rawmatTabTable .rm-row').forEach(function(tr){
+    const pb=(tr.dataset.pb||'').toLowerCase();
+    const desc=(tr.dataset.desc||'').toLowerCase();
+    tr.style.display=(pb.includes(q)||desc.includes(q))?'':'none';
+  });
+  document.getElementById('clearRawmatSearch').style.display=q?'block':'none';
+}
+
+// ── Column resize for rawmat table ──
+function _rmInitColResize(){
+  const table=document.getElementById('rawmatTabTable');
+  if(!table) return;
+  const cols=table.querySelectorAll('col');
+  table.querySelectorAll('thead th .rh').forEach(function(rh,i){
+    let drag=false,sx=0,sw=0;
+    rh.addEventListener('mousedown',function(e){
+      drag=true; sx=e.clientX; sw=cols[i]?cols[i].offsetWidth:120;
+      document.body.style.userSelect='none';
+      function mm(e){ if(!drag)return; const nw=Math.max(40,sw+e.clientX-sx)+'px'; if(cols[i]) cols[i].style.width=nw; }
+      function mu(){ drag=false; document.body.style.userSelect=''; document.removeEventListener('mousemove',mm); document.removeEventListener('mouseup',mu); }
+      document.addEventListener('mousemove',mm);
+      document.addEventListener('mouseup',mu);
+      e.stopPropagation(); e.preventDefault();
+    });
+  });
 }
 
 function _populateReportsTab() {
