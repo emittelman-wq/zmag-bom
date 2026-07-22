@@ -424,7 +424,7 @@ tr.row-disabled .badge,tr.row-disabled .proc-btn{opacity:.5}
 <div class="topbar">
   <div>
     <div class="topbar-title">ZMAG BOM Viewer</div>
-    <div class="topbar-sub">6910W021-001 Rev B &nbsp;<span id="verBadge" style="font-size:9px;opacity:0.45;font-family:monospace">v20260722.2900</span></div>
+    <div class="topbar-sub">6910W021-001 Rev B &nbsp;<span id="verBadge" style="font-size:9px;opacity:0.45;font-family:monospace">v20260722.3000</span></div>
   </div>
   <div class="sep"></div>
   <button class="auth-btn signed-out" id="loginBtn" onclick="msalLogin()" title="התחבר עם חשבון Microsoft לסנכרון JSON ב-SharePoint">🔑 התחבר</button>
@@ -2483,6 +2483,7 @@ function saveRawMat(pb) {
   document.getElementById('rawMatModal').style.display='none';
   computeTreeCosts(); refreshCostCells();
   buildTable(); applyFilters();
+  if(document.getElementById('mtp-rawmat')&&document.getElementById('mtp-rawmat').classList.contains('active')) _populateRawmatTab(true);
 }
 function deleteRawMat(pb) {
   delete rawMatData[pb];
@@ -2490,6 +2491,7 @@ function deleteRawMat(pb) {
   document.getElementById('rawMatModal').style.display='none';
   computeTreeCosts(); refreshCostCells();
   buildTable(); applyFilters();
+  if(document.getElementById('mtp-rawmat')&&document.getElementById('mtp-rawmat').classList.contains('active')) _populateRawmatTab(true);
 }
 
 // ─── AI Price Search ─────────────────────────────────────
@@ -3776,38 +3778,106 @@ function _refreshBuyTabStats(){
   st.textContent=rows.length+' פריטים · '+priced+' עם מחיר · '+fmtC(totalILS)+' סה"כ';
 }
 
-function _populateRawmatTab() {
+function _fmtDims(dims) {
+  if (!dims || typeof dims !== 'object') return String(dims || '—');
+  const parts = [];
+  ['L','W','T','D','OD','ID','TH'].forEach(function(k){ if (dims[k]) parts.push(k+':'+dims[k]); });
+  return parts.length ? parts.join(' ') : '—';
+}
+
+function _populateRawmatTab(force) {
   const el=document.getElementById('rawmatTabContent');
   const st=document.getElementById('rawmatTabStats');
   if(!el) return;
-  const pbs=Object.keys(rawMatData||{});
-  if(st) st.textContent=pbs.length+' חומרי גלם';
-  if(!pbs.length){ el.innerHTML='<div style="color:var(--text3);padding:30px;text-align:center">לא נטענו חומרי גלם</div>'; return; }
-  let h='<table style="width:100%;border-collapse:collapse;font-size:12px">';
-  h+='<thead><tr>';
-  ['PB / Part','Family','Grade','Form','Dims','Density (kg/m³)','Unit Cost','Cost Unit','Total Mass (kg)','Total Cost'].forEach(function(c){
-    h+='<th style="position:sticky;top:0;background:var(--header-bg);border-bottom:2px solid var(--border);padding:6px 10px;text-align:left;font-size:11px;font-weight:600;color:var(--text2);text-transform:uppercase;white-space:nowrap">'+c+'</th>';
+
+  // Collect ALL BOM raw-material items (UOM = M, M2, AR, A/R)
+  const RAW_UOM=/^(m2|m|ar|a\/r)$/i;
+  const aggMap={};
+  BOM.forEach(function(b){
+    if(b.type!=='Buy') return;
+    const uom=(b.uom||'').trim();
+    if(!RAW_UOM.test(uom)) return;
+    const pb=b.pb||b.pn;
+    if(!aggMap[pb]) aggMap[pb]={pb,desc:b.desc||'',uom,tq:0,occ:0};
+    aggMap[pb].tq+=b.tq||0;
+    aggMap[pb].occ++;
+  });
+  const rows=Object.values(aggMap).sort(function(a,b){ return a.pb.localeCompare(b.pb); });
+
+  // Stats
+  let configured=0, totalMass=0, totalCost=0;
+  rows.forEach(function(r){
+    if(rawMatData[r.pb]) configured++;
+    let agg={mass:0,cost:0};
+    try{ agg=computeARAggregate(r.pb)||agg; }catch(e){}
+    totalMass+=agg.mass||0; totalCost+=agg.cost||0;
+  });
+  if(st) st.textContent=rows.length+' חומרים · '+configured+' מוגדרים'+(totalMass>0?' · '+totalMass.toFixed(1)+' kg':'')+(totalCost>0?' · '+fmtC(totalCost):'');
+
+  if(!rows.length){ el.innerHTML='<div style="color:var(--text3);padding:30px;text-align:center">לא נמצאו חומרי גלם ב-BOM (M / M2 / AR)</div>'; return; }
+
+  const TH='position:sticky;top:0;background:var(--header-bg);border-bottom:2px solid var(--border);padding:6px 10px;text-align:left;font-size:11px;font-weight:600;color:var(--text2);text-transform:uppercase;white-space:nowrap';
+  let h='<table id="rawmatTabTable" style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr>';
+  ['PB / Part','תיאור','UOM','Qty','Form','Family · Grade','Density','עלות יחידה','ממדים','Total Mass (kg)','Total Cost',''].forEach(function(c){
+    h+='<th style="'+TH+'">'+c+'</th>';
   });
   h+='</tr></thead><tbody>';
-  pbs.forEach(function(pb){
-    const r=rawMatData[pb];
+
+  rows.forEach(function(r){
+    const rm=rawMatData[r.pb]||{};
+    const isConfigured=!!rawMatData[r.pb];
     let agg={mass:0,cost:0};
-    try{ agg=computeARAggregate(pb)||agg; }catch(e){}
-    h+='<tr style="border-bottom:1px solid var(--border)">';
-    h+='<td style="padding:5px 10px;font-family:monospace;color:var(--accent)">'+escHtml(pb)+'</td>';
-    h+='<td style="padding:5px 10px">'+escHtml(r.family||'')+'</td>';
-    h+='<td style="padding:5px 10px">'+escHtml(r.grade||'')+'</td>';
-    h+='<td style="padding:5px 10px">'+escHtml(r.form||'')+'</td>';
-    h+='<td style="padding:5px 10px;font-size:11px;color:var(--text2)">'+escHtml(r.dims||'')+'</td>';
-    h+='<td style="padding:5px 10px">'+escHtml(String(r.density||''))+'</td>';
-    h+='<td style="padding:5px 10px;font-family:monospace;color:var(--accent2)">'+(r.unitCost ? fmtC(parseFloat(r.unitCost)) : '')+'</td>';
-    h+='<td style="padding:5px 10px">'+escHtml(r.costUnit||'')+'</td>';
-    h+='<td style="padding:5px 10px;font-weight:600">'+(agg.mass>0 ? agg.mass.toFixed(2) : '—')+'</td>';
-    h+='<td style="padding:5px 10px;font-family:monospace;color:var(--accent2)">'+(agg.cost>0 ? fmtC(agg.cost) : '—')+'</td>';
+    try{ agg=computeARAggregate(r.pb)||agg; }catch(e){}
+    const safePb=r.pb.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+    const safeDesc=(r.desc||'').replace(/'/g,"\\'").slice(0,60);
+    const rmId='rm_'+r.pb.replace(/[^a-zA-Z0-9]/g,'_');
+    const rowBg=isConfigured?'':'background:rgba(245,166,35,.05)';
+
+    h+='<tr id="rmrow-'+rmId+'" style="border-bottom:1px solid var(--border);'+rowBg+'">';
+    h+='<td style="padding:5px 10px;font-family:monospace;color:var(--accent);white-space:nowrap">'+escHtml(r.pb)+'</td>';
+    h+='<td style="padding:5px 10px;color:var(--text2);max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+escHtml(r.desc)+'">'+escHtml(r.desc)+'</td>';
+    h+='<td style="padding:5px 10px;font-weight:700;color:var(--warn)">'+escHtml(r.uom)+'</td>';
+    h+='<td style="padding:5px 10px;text-align:right">'+r.tq+(r.occ>1?' <span style="color:var(--text3);font-size:10px">×'+r.occ+'</span>':'')+'</td>';
+    h+='<td style="padding:5px 10px;color:var(--text2)">'+escHtml(rm.form||'—')+'</td>';
+    h+='<td style="padding:5px 10px;color:var(--text2)">'+escHtml((rm.family||'')+(rm.grade&&rm.grade!=='generic'?' · '+rm.grade:''))+'</td>';
+    h+='<td style="padding:5px 10px;text-align:right;color:var(--text2)">'+escHtml(rm.density?rm.density+' kg/m³':'—')+'</td>';
+    // Inline unit cost
+    h+='<td style="padding:4px 8px;white-space:nowrap">';
+    if(isConfigured){
+      h+='<div style="display:flex;align-items:center;gap:4px">';
+      h+='<input type="number" id="rmcost-'+rmId+'" value="'+escHtml(String(rm.unitCost||''))+'" placeholder="0.00" min="0" step="0.01"'+
+         ' onchange="_saveRawmatCost(\''+safePb+'\',this.value)"'+
+         ' style="width:68px;padding:3px 5px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px;text-align:right">';
+      h+='<span style="font-size:10px;color:var(--text3)">₪/'+escHtml(rm.costUnit||'kg')+'</span>';
+      h+='</div>';
+    } else {
+      h+='<span style="font-size:11px;color:var(--text3);font-style:italic">לא מוגדר</span>';
+    }
+    h+='</td>';
+    h+='<td style="padding:5px 10px;font-size:11px;color:var(--text3);white-space:nowrap">'+escHtml(_fmtDims(rm.dims))+'</td>';
+    h+='<td id="rmmass-'+rmId+'" style="padding:5px 10px;font-weight:600;text-align:right">'+(agg.mass>0?agg.mass.toFixed(2):'—')+'</td>';
+    h+='<td id="rmtotal-'+rmId+'" style="padding:5px 10px;font-family:monospace;font-weight:700;color:var(--accent2);text-align:right;white-space:nowrap">'+(agg.cost>0?fmtC(agg.cost):'—')+'</td>';
+    h+='<td style="padding:4px 8px;white-space:nowrap">';
+    h+='<button class="btn" onclick="openRawMatEditor(\''+safePb+'\',\''+safeDesc+'\','+r.tq+')"'+
+       ' style="font-size:11px;padding:3px 10px'+(isConfigured?'':';border-color:var(--warn);color:var(--warn)')+'">'+
+       (isConfigured?'✏️ ערוך':'⚙ הגדר')+'</button>';
+    h+='</td>';
     h+='</tr>';
   });
   h+='</tbody></table>';
   el.innerHTML=h;
+}
+
+function _saveRawmatCost(pb, val) {
+  if(!rawMatData[pb]) return;
+  rawMatData[pb].unitCost = parseFloat(val)||0;
+  localStorage.setItem(RM_STORAGE_KEY, JSON.stringify(rawMatData));
+  computeTreeCosts(); refreshCostCells();
+  const rmId='rm_'+pb.replace(/[^a-zA-Z0-9]/g,'_');
+  let agg={mass:0,cost:0};
+  try{ agg=computeARAggregate(pb)||agg; }catch(e){}
+  const tc=document.getElementById('rmtotal-'+rmId);
+  if(tc) tc.innerHTML=agg.cost>0?fmtC(agg.cost):'—';
 }
 
 function _populateReportsTab() {
