@@ -424,7 +424,7 @@ tr.row-disabled .badge,tr.row-disabled .proc-btn{opacity:.5}
 <div class="topbar">
   <div>
     <div class="topbar-title">ZMAG BOM Viewer</div>
-    <div class="topbar-sub">6910W021-001 Rev B &nbsp;<span id="verBadge" style="font-size:9px;opacity:0.45;font-family:monospace">v20260722.3100</span></div>
+    <div class="topbar-sub">6910W021-001 Rev B &nbsp;<span id="verBadge" style="font-size:9px;opacity:0.45;font-family:monospace">v20260722.3101</span></div>
   </div>
   <div class="sep"></div>
   <button class="auth-btn signed-out" id="loginBtn" onclick="msalLogin()" title="התחבר עם חשבון Microsoft לסנכרון JSON ב-SharePoint">🔑 התחבר</button>
@@ -3686,9 +3686,9 @@ function _populateBuyTab(force) {
   rows.forEach(function(r){
     const bid=_btId(r.pb);
     const e=getPriceEntry(r.pb);
-    const safePb=r.pb.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
-    const safeDesc=(r.desc||'').replace(/'/g,"\\'").slice(0,60);
-    const safeCat =(r.cat||'').replace(/'/g,"\\'");
+    const safePb=r.pb.replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'&quot;');
+    const safeDesc=(r.desc||'').replace(/'/g,"\\'").replace(/"/g,'&quot;').slice(0,60);
+    const safeCat =(r.cat||'').replace(/'/g,"\\'").replace(/"/g,'&quot;');
     const priceVal=e ? e.p : '';
     const curVal  =e ? (e.currency||'USD') : 'USD';
     const totalILS_=e ? toILS(e.p,curVal)*(r.totalQty||0) : 0;
@@ -3871,8 +3871,8 @@ function _populateRawmatTab(force) {
       if(isAR){ try{ const a=computeARAggregate(r.pb)||{}; mass=a.mass||0; cost=a.cost||0; }catch(e){} }
       else{ mass=_computeLinearMass(rm,r.uom,r.tq); const uc=parseFloat(rm.unitCost)||0; cost=mass*uc; }
     }
-    const safePb=r.pb.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
-    const safeDesc=(r.desc||'').replace(/'/g,"\\'").slice(0,60);
+    const safePb=r.pb.replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'&quot;');
+    const safeDesc=(r.desc||'').replace(/'/g,"\\'").replace(/"/g,'&quot;').slice(0,60);
     const rmId='rm_'+r.pb.replace(/[^a-zA-Z0-9]/g,'_');
     const rowBg=isConfigured?'':'background:rgba(245,166,35,.04)';
 
