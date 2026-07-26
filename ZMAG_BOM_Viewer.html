@@ -628,10 +628,11 @@ let curSort = {col:null,asc:true};
 let filesOnly = false;
 let collapsed = new Set();
 let disabledRows = new Set(); // BOM indices that are unchecked
-// Returns true if row i should be excluded from all cost/hour computations:
-// either manually unchecked OR hidden by the visual filter (type/level/search)
+// Returns true if row i should be excluded from cost/hour computations.
+// Only respects the manual V-checkbox (disabledRows); visual type/level filters
+// are display-only and do NOT affect cost or hour totals.
 function isRowExcluded(i) {
-  return disabledRows.has(i) || !!(rows[i] && rows[i].classList.contains('hid'));
+  return disabledRows.has(i);
 }
 let flaggedRows = new Set();
 try{flaggedRows=new Set(JSON.parse(localStorage.getItem('zmag_flagged_6910W021')||'[]').map(Number));}catch(e){}
@@ -3451,11 +3452,8 @@ function applyFilters(){
 
   if(searchTerm) hlSearch(searchTerm); else clearHL();
   document.getElementById('emptyState').style.display=vis===0?'block':'none';
-  // Recompute costs+hours so header and tabs reflect filtered view
-  try { computeTreeCosts(); } catch(e) {}
-  try { buildCumulativeHours(); } catch(e) {}
   updateStats(vis);
-  // Rebuild buy/rawmat tabs if currently open (invalidate cache first)
+  // Rebuild buy/rawmat tabs if currently open so they respect the visual filter
   buyBuilt = false;
   const _bEl = document.getElementById('buyTabContent');
   if (_bEl) _bEl.dataset.built = '';
