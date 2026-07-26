@@ -1047,17 +1047,33 @@ function buildTable(){
       }
     } else if (item.type === 'Buy') {
       const pb = item.pb || item.pn;
-      const hasnotes = !!(buyNotes[pb] && (buyNotes[pb].notes || (buyNotes[pb].sub && buyNotes[pb].sub.pn)));
-      const notesBtn = document.createElement('button');
-      notesBtn.className = 'proc-btn' + (hasnotes ? ' proc-has' : '');
-      notesBtn.title = hasnotes ? 'הערות/חלופי — לחץ לעריכה' : 'הוסף הערות/חלופי';
-      notesBtn.textContent = hasnotes ? '📝' : '✎';
-      notesBtn.addEventListener('click', ev => { ev.stopPropagation(); openBuyNotesEditor(pb, item.desc); });
-      tdP.appendChild(notesBtn);
-    } else {
-      // Raw material items: M / M2 / AR / A/R
-      const _rmUom = (item.uom || '').trim().toLowerCase();
+      const _rmUom = (item.uom || '').trim();
+      // Raw material Buy items (M, M2, AR) → 🧱 button
       if (/^(m|m2|a[\/\\]?r)$/i.test(_rmUom)) {
+        const isConfigured = !!rawMatData[pb];
+        const rmBtn = document.createElement('button');
+        rmBtn.className = 'proc-btn' + (isConfigured ? ' proc-has' : '');
+        rmBtn.title = isConfigured ? '\u05d7\u05d5\u05de\u05e8 \u05d2\u05dc\u05dd \u05de\u05d5\u05d2\u05d3\u05e8 \u2014 \u05dc\u05d7\u05e5 \u05dc\u05e2\u05e8\u05d9\u05db\u05d4' : '\u05d4\u05d2\u05d3\u05e8 \u05d7\u05d5\u05de\u05e8 \u05d2\u05dc\u05dd';
+        rmBtn.textContent = '\ud83e\uddf1';
+        rmBtn.addEventListener('click', ev => {
+          ev.stopPropagation();
+          openRawMatEditor(pb, item.desc, item.tq || 1);
+        });
+        tdP.appendChild(rmBtn);
+      } else {
+        // Regular Buy item → ✎ notes button
+        const hasnotes = !!(buyNotes[pb] && (buyNotes[pb].notes || (buyNotes[pb].sub && buyNotes[pb].sub.pn)));
+        const notesBtn = document.createElement('button');
+        notesBtn.className = 'proc-btn' + (hasnotes ? ' proc-has' : '');
+        notesBtn.title = hasnotes ? '\u05d4\u05e2\u05e8\u05d5\u05ea/\u05d7\u05dc\u05d5\u05e4\u05d9 \u2014 \u05dc\u05d7\u05e5 \u05dc\u05e2\u05e8\u05d9\u05db\u05d4' : '\u05d4\u05d5\u05e1\u05e3 \u05d4\u05e2\u05e8\u05d5\u05ea/\u05d7\u05dc\u05d5\u05e4\u05d9';
+        notesBtn.textContent = hasnotes ? '\ud83d\udcdd' : '\u270e';
+        notesBtn.addEventListener('click', ev => { ev.stopPropagation(); openBuyNotesEditor(pb, item.desc); });
+        tdP.appendChild(notesBtn);
+      }
+    } else {
+      // Other non-Buy non-ELTDesign items (EAtype raw mat codes: S, T, TR, D…)
+      const _rmUom2 = (item.uom || '').trim();
+      if (/^(m|m2|a[\/\\]?r)$/i.test(_rmUom2)) {
         const pb = item.pb || item.pn;
         const isConfigured = !!rawMatData[pb];
         const rmBtn = document.createElement('button');
