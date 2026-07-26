@@ -1054,6 +1054,22 @@ function buildTable(){
       notesBtn.textContent = hasnotes ? '📝' : '✎';
       notesBtn.addEventListener('click', ev => { ev.stopPropagation(); openBuyNotesEditor(pb, item.desc); });
       tdP.appendChild(notesBtn);
+    } else {
+      // Raw material items: M / M2 / AR / A/R
+      const _rmUom = (item.uom || '').trim().toLowerCase();
+      if (/^(m|m2|a[\/\\]?r)$/i.test(_rmUom)) {
+        const pb = item.pb || item.pn;
+        const isConfigured = !!rawMatData[pb];
+        const rmBtn = document.createElement('button');
+        rmBtn.className = 'proc-btn' + (isConfigured ? ' proc-has' : '');
+        rmBtn.title = isConfigured ? '\u05d7\u05d5\u05de\u05e8 \u05d2\u05dc\u05dd \u05de\u05d5\u05d2\u05d3\u05e8 \u2014 \u05dc\u05d7\u05e5 \u05dc\u05e2\u05e8\u05d9\u05db\u05d4' : '\u05d4\u05d2\u05d3\u05e8 \u05d7\u05d5\u05de\u05e8 \u05d2\u05dc\u05dd';
+        rmBtn.textContent = '\ud83e\uddf1';
+        rmBtn.addEventListener('click', ev => {
+          ev.stopPropagation();
+          openRawMatEditor(pb, item.desc, item.tq || 1);
+        });
+        tdP.appendChild(rmBtn);
+      }
     }
     tr.appendChild(tdP);
 
@@ -2108,6 +2124,19 @@ function estimateARDims(form, bbox) {
 }
 
 // ─── Raw Material Editor ─────────────────────────────────
+// Navigate to a parent item in the main BOM tab
+function jumpToParentInBOM(parentPb) {
+  if (!parentPb || !BOM) return;
+  const idx = BOM.findIndex(function(it){ return (it.pb || it.pn) === parentPb; });
+  if (idx < 0) return;
+  switchMainTab('main');
+  setTimeout(function() {
+    selectRow(idx);
+    const tr = rows[idx];
+    if (tr) tr.scrollIntoView({block:'center', behavior:'smooth'});
+  }, 100);
+}
+
 function openRawMatEditor(pb, desc, tq) {
   const existing = rawMatData[pb] || {};
   const isNew = !rawMatData[pb];
@@ -2157,7 +2186,7 @@ function openRawMatEditor(pb, desc, tq) {
       const stpEsc = p.stpPath ? p.stpPath.replace(/"/g,'&quot;') : '';
       const hasStep = !!p.stpPath;
       return '<tr id="ar-prow-'+i+'" data-ppb="'+safePP+'" data-tq="'+p.tq+'">'+
-        '<td style="font-size:10px;color:var(--text2);max-width:110px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:2px 4px" title="'+p.parentPb+'">'+p.parentDesc+'</td>'+
+        '<td style="font-size:10px;color:var(--text2);max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:2px 4px;cursor:pointer" title="'+p.parentPb+' — \u05dc\u05d7\u05e5 \u05dc\u05e0\u05d5\u05d5\u05d8 \u05d1\u05d2\u05d9\u05dc\u05d9\u05d5\u05df" onclick="jumpToParentInBOM(\'' + safePP + '\')">\u{1F441}\uFE0F '+p.parentDesc+'</td>'+
         '<td style="padding:1px 2px"><input class="ar-pdim" data-dim="L" data-ppb="'+safePP+'" data-row="'+i+'" value="'+Lval+'" placeholder="mm" type="number" min="0" step="1" '+
           'style="width:60px;padding:2px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px;font-size:11px" '+
           'oninput="arParentDimChanged(\''+safePb+'\',this,'+i+')"></td>'+
@@ -2523,6 +2552,17 @@ async function runARStepEstimateForParent(pb, rowIdx, btn) {
       if (!rawMatData[pb].perParent[parentPb]) rawMatData[pb].perParent[parentPb] = {dims:{}};
       rawMatData[pb].perParent[parentPb].dims.L = String(est.L);
       if (est.W) rawMatData[pb].perParent[parentPb].dims.W = String(est.W);
+      // Also persist cross-section hints to stock dims (only fills zeros, won't overwrite manual values)
+      if (est.stockHints && Object.keys(est.stockHints).length) {
+        if (!rawMatData[pb].dims) rawMatData[pb].dims = {};
+        Object.keys(est.stockHints).forEach(function(key) {
+          var cur = rawMatData[pb].dims[key];
+          if (!cur || parseFloat(cur) === 0) {
+            rawMatData[pb].dims[key] = String(est.stockHints[key]);
+          }
+        });
+      }
+      localStorage.setItem(RM_STORAGE_KEY, JSON.stringify(rawMatData));
     }
     arRefreshRow(pb, rowIdx);
     arRefreshAggregate(pb);
@@ -4306,7 +4346,7 @@ function _toggleRawmatExpand(pb) {
 
     const hasStep=!!p.stpPath;
     h+='<tr style="border-bottom:1px solid rgba(100,110,140,.15)">'
-      +'<td style="padding:3px 8px;font-size:10px;color:var(--accent);overflow:hidden;text-overflow:ellipsis;max-width:140px;white-space:nowrap" title="'+escHtml(p.parentPb)+'">'+escHtml(p.parentDesc)+'</td>'
+      +'<td style="padding:3px 8px;font-size:10px;color:var(--accent);overflow:hidden;text-overflow:ellipsis;max-width:140px;white-space:nowrap;cursor:pointer" title="'+escHtml(p.parentPb)+' \u2014 \u05dc\u05d7\u05e5 \u05dc\u05e0\u05d5\u05d5\u05d8" onclick="jumpToParentInBOM(\'' + p.parentPb.replace(/\\/g,'\\\\').replace(/'/g,"\\'") + '\')">\u{1F441}\uFE0F '+escHtml(p.parentDesc)+'</td>'
       +dimsHtml
       +tqHtml
       +'<td style="padding:3px 8px;text-align:right;font-weight:600">'+(mass>0?mass.toFixed(3):'—')+'</td>'
