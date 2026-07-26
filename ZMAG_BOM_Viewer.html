@@ -4434,6 +4434,8 @@ updateStats();
     </div>
     <div style="padding:10px 16px;border-top:1px solid var(--border);display:flex;align-items:center;gap:10px;flex-shrink:0">
       <button onclick="tmAddRow()" style="background:var(--accent);color:#fff;border:none;border-radius:6px;padding:6px 14px;font-size:13px;cursor:pointer">＋ הוסף סוג</button>
+      <button onclick="tmExportXls()" style="background:var(--surface2);color:var(--text2);border:1px solid var(--border);border-radius:6px;padding:6px 12px;font-size:12px;cursor:pointer" title="ייצוא לקובץ Excel">📤 XLS</button>
+      <label style="background:var(--surface2);color:var(--text2);border:1px solid var(--border);border-radius:6px;padding:6px 12px;font-size:12px;cursor:pointer" title="קליטה מקובץ Excel">📥 XLS<input type="file" accept=".xlsx,.xls" style="display:none" onchange="tmImportXls(this)"></label>
       <span id="tmWarn" style="color:var(--danger,#f66);font-size:12px;flex:1"></span>
       <button onclick="saveTypesManager()" style="background:var(--accent2,#38c96e);color:#fff;border:none;border-radius:6px;padding:6px 18px;font-size:13px;cursor:pointer;font-weight:600">💾 שמור</button>
       <button onclick="closeTypesManager()" style="background:var(--surface2);color:var(--text2);border:1px solid var(--border);border-radius:6px;padding:6px 14px;font-size:13px;cursor:pointer">ביטול</button>
@@ -5261,22 +5263,22 @@ const PROC_TYPE_COST_DEFAULTS = {
   'other': {cost:0, costUnit:'h'}
 };
 const DEFAULT_PROC_TYPES = [
-  {id:'assembly',   label:'הרכבה',        en:'Assembly', cost:0, costUnit:'h'},
-  {id:'welding',    label:'ריתוך',         en:'Welding', cost:0, costUnit:'h'},
-  {id:'cutting',    label:'חיתוך',         en:'Cutting', cost:0, costUnit:'m'},
-  {id:'bending',    label:'כיפוך',         en:'Bending', cost:0, costUnit:'pcs'},
-  {id:'coating',    label:'ציפוי',         en:'Coating', cost:0, costUnit:'m2'},
-  {id:'painting',   label:'צבע',           en:'Painting', cost:0, costUnit:'m2'},
-  {id:'cnc',        label:'CNC כרסום',     en:'CNC Milling', cost:0, costUnit:'h'},
-  {id:'drilling',   label:'קדיחה',         en:'Drilling', cost:0, costUnit:'pcs'},
-  {id:'grinding',   label:'השחזה',         en:'Grinding', cost:0, costUnit:'h'},
-  {id:'pressing',   label:'כבישה/פרזול',   en:'Pressing', cost:0, costUnit:'pcs'},
-  {id:'laser',      label:'חיתוך לייזר',   en:'Laser Cutting', cost:0, costUnit:'m'},
-  {id:'marking',    label:'סימון',         en:'Marking', cost:0, costUnit:'pcs'},
-  {id:'deburring',  label:'הכהה פינות',    en:'Deburring', cost:0, costUnit:'pcs'},
-  {id:'inspection', label:'בדיקה / QC',    en:'Inspection', cost:0, costUnit:'h'},
-  {id:'packing',    label:'אריזה',         en:'Packing', cost:0, costUnit:'pcs'},
-  {id:'other',      label:'אחר',           en:'Other', cost:0, costUnit:'h'},
+  {id:'assembly',   label:'הרכבה',        he:'הרכבה',        en:'Assembly',     cost:0, costUnit:'h'},
+  {id:'welding',    label:'ריתוך',         he:'ריתוך',         en:'Welding',      cost:0, costUnit:'h'},
+  {id:'cutting',    label:'חיתוך',         he:'חיתוך',         en:'Cutting',      cost:0, costUnit:'m'},
+  {id:'bending',    label:'כיפוך',         he:'כיפוך',         en:'Bending',      cost:0, costUnit:'pcs'},
+  {id:'coating',    label:'ציפוי',         he:'ציפוי',         en:'Coating',      cost:0, costUnit:'m2'},
+  {id:'painting',   label:'צבע',           he:'צבע',           en:'Painting',     cost:0, costUnit:'m2'},
+  {id:'cnc',        label:'CNC כרסום',     he:'CNC כרסום',     en:'CNC Milling',  cost:0, costUnit:'h'},
+  {id:'drilling',   label:'קדיחה',         he:'קדיחה',         en:'Drilling',     cost:0, costUnit:'pcs'},
+  {id:'grinding',   label:'השחזה',         he:'השחזה',         en:'Grinding',     cost:0, costUnit:'h'},
+  {id:'pressing',   label:'כבישה/פרזול',   he:'כבישה/פרזול',   en:'Pressing',     cost:0, costUnit:'pcs'},
+  {id:'laser',      label:'חיתוך לייזר',   he:'חיתוך לייזר',   en:'Laser Cutting',cost:0, costUnit:'m'},
+  {id:'marking',    label:'סימון',         he:'סימון',         en:'Marking',      cost:0, costUnit:'pcs'},
+  {id:'deburring',  label:'הכהה פינות',    he:'הכהה פינות',    en:'Deburring',    cost:0, costUnit:'pcs'},
+  {id:'inspection', label:'בדיקה / QC',    he:'בדיקה / QC',    en:'Inspection',   cost:0, costUnit:'h'},
+  {id:'packing',    label:'אריזה',         he:'אריזה',         en:'Packing',      cost:0, costUnit:'pcs'},
+  {id:'other',      label:'אחר',           he:'אחר',           en:'Other',        cost:0, costUnit:'h'},
 ];
 let PROC_TYPES = DEFAULT_PROC_TYPES.slice(); // mutable — can be extended by user
 
@@ -6173,7 +6175,7 @@ function renderTypesManager() {
     tr.innerHTML =
       '<td style="padding:5px 8px;color:var(--text3);font-size:12px">' + (i+1) + '</td>' +
       '<td style="padding:4px 6px"><input style="width:100%;padding:3px 6px;border:1px solid var(--border);border-radius:4px;background:var(--surface2);color:var(--text1);font-size:12px"' +
-        ' value="' + esc(pt.he) + '" oninput="PROC_TYPES[' + i + '].he=this.value"></td>' +
+        ' value="' + esc(pt.he || pt.label || '') + '" oninput="PROC_TYPES[' + i + '].he=this.value"></td>' +
       '<td style="padding:4px 6px"><input style="width:100%;padding:3px 6px;border:1px solid var(--border);border-radius:4px;background:var(--surface2);color:var(--text1);font-size:12px"' +
         ' value="' + esc(pt.en) + '" oninput="PROC_TYPES[' + i + '].en=this.value"></td>' +
       '<td style="padding:5px 8px;color:var(--text3);font-size:11px;font-family:monospace">' + (pt.id||'') + '</td>' +
@@ -6194,10 +6196,110 @@ function tmAddRow() {
 }
 function tmDelRow(i) { PROC_TYPES.splice(i,1); renderTypesManager(); }
 function saveTypesManager() {
+  // Flush any he/label sync before saving
+  PROC_TYPES.forEach(function(pt){ if (!pt.he && pt.label) pt.he = pt.label; });
   try { localStorage.setItem(TYPES_STORAGE_KEY, JSON.stringify(PROC_TYPES)); } catch(e) {}
   const warn = document.getElementById('tmWarn');
   if (warn) { warn.textContent = '✓ נשמר'; setTimeout(()=>{ warn.textContent=''; }, 1500); }
   closeTypesManager();
+}
+
+// ── XLS export / import for process types ────────────────────────────────────
+async function tmExportXls() {
+  const warn = document.getElementById('tmWarn');
+  if (typeof ExcelJS === 'undefined') {
+    try {
+      await new Promise(function(resolve, reject) {
+        const s = document.createElement('script');
+        s.src = 'https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.3.0/exceljs.min.js';
+        s.onload = resolve; s.onerror = reject;
+        document.head.appendChild(s);
+      });
+    } catch(e) { if (warn) warn.textContent = '⚠ לא ניתן לטעון ExcelJS'; return; }
+  }
+  const wb = new ExcelJS.Workbook();
+  const ws = wb.addWorksheet('Process Types');
+  ws.columns = [
+    {header:'שם עברית',  key:'he',       width:20},
+    {header:'English',   key:'en',       width:22},
+    {header:'ID',        key:'id',       width:20},
+    {header:'Cost/Unit', key:'cost',     width:12},
+    {header:'Unit',      key:'costUnit', width:10},
+  ];
+  // Style header row
+  ws.getRow(1).eachCell(function(cell){
+    cell.font = {bold:true, color:{argb:'FFFFFFFF'}};
+    cell.fill  = {type:'pattern', pattern:'solid', fgColor:{argb:'FF2C5282'}};
+    cell.alignment = {horizontal:'center'};
+  });
+  PROC_TYPES.forEach(function(pt){
+    ws.addRow({he: pt.he||pt.label||'', en: pt.en||'', id: pt.id||'', cost: pt.cost||0, costUnit: pt.costUnit||'h'});
+  });
+  ws.getRow(1).height = 20;
+  const buf = await wb.xlsx.writeBuffer();
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([buf], {type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}));
+  a.download = 'ProcessTypes_ZMAG.xlsx';
+  a.click();
+  if (warn) { warn.textContent = '✓ יוצא'; setTimeout(function(){ warn.textContent=''; }, 1500); }
+}
+
+async function tmImportXls(input) {
+  const file = input.files[0];
+  if (!file) return;
+  input.value = '';
+  const warn = document.getElementById('tmWarn');
+  if (typeof ExcelJS === 'undefined') {
+    try {
+      await new Promise(function(resolve, reject) {
+        const s = document.createElement('script');
+        s.src = 'https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.3.0/exceljs.min.js';
+        s.onload = resolve; s.onerror = reject;
+        document.head.appendChild(s);
+      });
+    } catch(e) { if (warn) warn.textContent = '⚠ לא ניתן לטעון ExcelJS'; return; }
+  }
+  try {
+    const buf = await file.arrayBuffer();
+    const wb  = new ExcelJS.Workbook();
+    await wb.xlsx.load(buf);
+    const ws = wb.worksheets[0];
+    if (!ws) throw new Error('גיליון ריק');
+    // Read header row to map columns
+    const headers = {};
+    ws.getRow(1).eachCell(function(cell, col){ headers[(cell.value||'').toString().toLowerCase().trim()] = col; });
+    const colHe   = headers['שם עברית'] || headers['he'] || headers['hebrew'] || 1;
+    const colEn   = headers['english']  || headers['en'] || 2;
+    const colId   = headers['id']       || 3;
+    const colCost = headers['cost/unit']|| headers['cost'] || 4;
+    const colUnit = headers['unit']     || headers['costunit'] || 5;
+    const imported = [];
+    ws.eachRow(function(row, rowNum) {
+      if (rowNum === 1) return; // skip header
+      const id   = (row.getCell(colId).value   ||'').toString().trim();
+      const he   = (row.getCell(colHe).value   ||'').toString().trim();
+      const en   = (row.getCell(colEn).value   ||'').toString().trim();
+      const cost = parseFloat(row.getCell(colCost).value) || 0;
+      const unit = (row.getCell(colUnit).value ||'h').toString().trim();
+      if (!he && !en) return; // skip empty rows
+      imported.push({
+        id:       id || ('proc_' + Date.now() + '_' + rowNum),
+        label:    he || en,
+        he:       he,
+        en:       en,
+        cost:     cost,
+        costUnit: unit
+      });
+    });
+    if (!imported.length) throw new Error('לא נמצאו שורות');
+    if (!confirm('קליטה תחליף ' + PROC_TYPES.length + ' סוגים קיימים ב-' + imported.length + ' שורות מהקובץ. להמשיך?')) return;
+    PROC_TYPES.length = 0;
+    imported.forEach(function(t){ PROC_TYPES.push(t); });
+    renderTypesManager();
+    if (warn) { warn.textContent = '✓ נקלטו '+imported.length+' סוגים'; setTimeout(function(){ warn.textContent=''; }, 2500); }
+  } catch(e) {
+    if (warn) warn.textContent = '⚠ שגיאה: ' + e.message;
+  }
 }
 
 // ── Export / Import ───────────────────────────────────────
