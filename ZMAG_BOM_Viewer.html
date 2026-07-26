@@ -424,7 +424,7 @@ tr.row-disabled .badge,tr.row-disabled .proc-btn{opacity:.5}
 <div class="topbar">
   <div>
     <div class="topbar-title">ZMAG BOM Viewer</div>
-    <div class="topbar-sub">6910W021-001 Rev B &nbsp;<span id="verBadge" style="font-size:9px;opacity:0.45;font-family:monospace">v20260722.3210</span></div>
+    <div class="topbar-sub">6910W021-001 Rev B &nbsp;<span id="verBadge" style="font-size:9px;opacity:0.45;font-family:monospace">v20260722.3212</span></div>
   </div>
   <div class="sep"></div>
   <button class="auth-btn signed-out" id="loginBtn" onclick="msalLogin()" title="התחבר עם חשבון Microsoft לסנכרון JSON ב-SharePoint">🔑 התחבר</button>
@@ -2253,10 +2253,10 @@ function openRawMatEditor(pb, desc, tq) {
     '</div>';
   m.style.display='flex';
   m.dataset.tq = tq || 1;
-  m.dataset.arPb = bomInfo.isAR ? pb : '';
+  m.dataset.arPb = _isRawMatItem ? pb : '';
   setTimeout(function(){
     rmUpdateCalc();
-    if (bomInfo.isAR) arInitRowDisplays(pb);
+    if (_isRawMatItem && window._arParents && window._arParents.length) arInitRowDisplays(pb);
   }, 50);
 }
 
@@ -2531,7 +2531,7 @@ function rmUpdateCalc() {
     '<div><span style="color:var(--text2)">משקל/יחידה: </span><strong>'+(mass*1000).toFixed(1)+' ג'+'</strong></div>'+
     '<div><span style="color:var(--text2)">עלות/יחידה: </span><strong>'+fmtC(costPer)+'</strong></div>'+
     (_arPb
-      ? '<div style="color:var(--text3);font-size:10px">סה"כ AR — ראה טבלת פריטי אב ↑</div>'
+      ? '<div style="color:var(--text3);font-size:10px">סה"כ — ראה טבלת פריטי אב ↑</div>'
       : '<div><span style="color:var(--text2)">סה"כ TQ='+tq+': </span><strong style="color:var(--accent2)">'+fmtC(costPer*tq)+'</strong></div>')+
     '</div>';
   if (_arPb) {
@@ -2917,7 +2917,16 @@ async function exportRawMaterials() {
 
   if (!items.length) { alert('אין חומרי גלם מוגדרים בBOM'); return; }
 
-  if (typeof ExcelJS === 'undefined') { alert('ExcelJS לא זמין'); return; }
+  if (typeof ExcelJS === 'undefined') {
+    try {
+      await new Promise(function(resolve, reject) {
+        const s = document.createElement('script');
+        s.src = 'https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.3.0/exceljs.min.js';
+        s.onload = resolve; s.onerror = reject;
+        document.head.appendChild(s);
+      });
+    } catch(e) { alert('לא ניתן לטעון ExcelJS — בדוק חיבור לאינטרנט'); return; }
+  }
   const wb = new ExcelJS.Workbook();
   wb.views = [{rightToLeft:true}];
 
