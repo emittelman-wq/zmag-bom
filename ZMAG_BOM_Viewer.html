@@ -1928,7 +1928,7 @@ function getARDimsForParent(pb, parentPb) {
   return base;
 }
 
-// Generic: collect unique parent PBs for ANY raw-material (M / M2 / AR), with total BOM tq + STEP path
+// Generic: collect unique parent PBs for ANY raw-material (M / M2 / AR), with total BOM tq + STEP + PL PDF paths
 function getParentsForRawMat(pb) {
   const map = new Map();
   const RAW_UOM = /^(m2|m|ar|a\/r)$/i;
@@ -1939,13 +1939,20 @@ function getParentsForRawMat(pb) {
     for (let j = idx - 1; j >= 0; j--) {
       if (BOM[j].lv < item.lv) {
         const parentPb = BOM[j].pb || BOM[j].pn;
-        const stpFiles = (BOM[j].cads || []).filter(function(c){ return /\.stp$|\.step$/i.test(c); });
+        const allFiles = BOM[j].cads || [];
+        const stpFiles = allFiles.filter(function(c){ return /\.stp$|\.step$/i.test(c); });
+        // PL PDFs: files whose basename starts with "PL" (case-insensitive)
+        const plFiles  = allFiles.filter(function(c){
+          const base = c.split(/[\/]/).pop() || '';
+          return /^PL/i.test(base) && /\.pdf$/i.test(c);
+        });
         if (!map.has(parentPb)) {
           map.set(parentPb, {
-            parentPb: parentPb,
+            parentPb:   parentPb,
             parentDesc: (BOM[j].desc || BOM[j].pn || '').slice(0, 32),
-            tq: 0,
-            stpPath: stpFiles[0] || null
+            tq:         0,
+            stpPath:    stpFiles[0] || null,
+            plPdfPath:  plFiles[0]  || null
           });
         }
         map.get(parentPb).tq += tq;
@@ -2167,6 +2174,10 @@ function openRawMatEditor(pb, desc, tq) {
             ? '<button onclick="runARStepEstimateForParent(\''+safePb+'\','+i+',this)" data-stp="'+stpEsc+'" '+
               'style="padding:2px 6px;background:#ed8936;color:#fff;border:none;border-radius:3px;cursor:pointer;font-size:10px" title="'+stpEsc+'">📐</button>'
             : '<span style="font-size:9px;color:var(--text3)">—</span>')+
+          (p.plPdfPath
+            ? ' <button onclick="runPLPdfLookup(\''+safePb+'\','+i+',this)" data-pdf="'+(p.plPdfPath||'').replace(/"/g,'&quot;')+'" '+
+              'style="padding:2px 5px;background:#2b6cb0;color:#fff;border:none;border-radius:3px;cursor:pointer;font-size:10px" title="קליטת מידע מ-PL PDF">📄</button>'
+            : '')+
           '<span id="ar-presult-'+i+'" style="font-size:9px;margin-left:2px"></span>'+
         '</td>'+
       '</tr>';
@@ -2341,11 +2352,14 @@ function arParentDimChanged(pb, inp, rowIdx) {
   const parentPb = inp.dataset.ppb;
   const dimKey   = inp.dataset.dim;
   const val      = inp.value;
-  if (!rawMatData[pb]) return;
-  if (!rawMatData[pb].perParent) rawMatData[pb].perParent = {};
-  if (!rawMatData[pb].perParent[parentPb]) rawMatData[pb].perParent[parentPb] = {dims:{}};
-  if (!rawMatData[pb].perParent[parentPb].dims) rawMatData[pb].perParent[parentPb].dims = {};
-  rawMatData[pb].perParent[parentPb].dims[dimKey] = val;
+  // Persist to rawMatData if item already saved
+  if (rawMatData[pb]) {
+    if (!rawMatData[pb].perParent) rawMatData[pb].perParent = {};
+    if (!rawMatData[pb].perParent[parentPb]) rawMatData[pb].perParent[parentPb] = {dims:{}};
+    if (!rawMatData[pb].perParent[parentPb].dims) rawMatData[pb].perParent[parentPb].dims = {};
+    rawMatData[pb].perParent[parentPb].dims[dimKey] = val;
+  }
+  // Always refresh (reads from DOM inputs for unsaved items)
   arRefreshRow(pb, rowIdx);
   arRefreshAggregate(pb);
 }
@@ -2369,6 +2383,10 @@ function arRefreshRow(pb, rowIdx) {
   const uom     = (window._arUom||'').toLowerCase();
   // Merge per-parent dims on top of base dims
   const dims    = getARDimsForParent(pb, parentPb);  // base + perParent
+  // Supplement dims from the DOM inputs in this row (captures values not yet saved)
+  row.querySelectorAll('.ar-pdim').forEach(function(inp) {
+    if (inp.value && inp.dataset.dim && !dims[inp.dataset.dim]) dims[inp.dataset.dim] = inp.value;
+  });
 
   if (isARUnit(uom)) {
     // AR: tqRaw = number of blanks. Per-blank dims required.
@@ -2516,6 +2534,119 @@ async function runARStepEstimateForParent(pb, rowIdx, btn) {
   }
 }
 
+// ─── PL PDF Purchasing Info Lookup ───────────────────────────────────────────
+// Reads a Part-List PDF associated with the parent item, extracts the row
+// matching this raw material (pb), and fills in catalog number + full spec.
+const _pdfJsWorkerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+async function _loadPdfJs() {
+  if (window.pdfjsLib) return window.pdfjsLib;
+  await new Promise(function(resolve, reject) {
+    const s = document.createElement('script');
+    s.src = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
+    s.onload = resolve; s.onerror = reject;
+    document.head.appendChild(s);
+  });
+  window.pdfjsLib.GlobalWorkerOptions.workerSrc = _pdfJsWorkerSrc;
+  return window.pdfjsLib;
+}
+
+async function _extractPdfText(buf) {
+  const pdfjs = await _loadPdfJs();
+  const pdf   = await pdfjs.getDocument({data: buf}).promise;
+  let text = '';
+  for (let p = 1; p <= pdf.numPages; p++) {
+    const page  = await pdf.getPage(p);
+    const tc    = await page.getTextContent();
+    text += tc.items.map(function(i){ return i.str; }).join(' ') + '\n';
+  }
+  return text;
+}
+
+// Parse a Part-List text body for a row matching the raw-material PN.
+// Returns {catalogNo, fullDesc, spec, qty, uom} or null.
+function _parsePlRowForPb(text, pb) {
+  const pbNorm = (pb||'').toUpperCase().replace(/\s+/g,' ').trim();
+  const lines  = text.split(/\n/);
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].toUpperCase();
+    if (!line.includes(pbNorm.slice(0, 8))) continue; // quick pre-filter
+
+    // Collect surrounding lines as one logical row (PL tables can wrap)
+    const block = lines.slice(Math.max(0,i-1), Math.min(lines.length,i+4)).join(' ');
+
+    // Catalog number: long numeric sequence (6-12 digits) near the PN
+    const catMatch = block.match(/\b(\d{6,12})\b/);
+    const catalogNo = catMatch ? catMatch[1] : '';
+
+    // Full description: everything after the catalog number until a numeric qty
+    let fullDesc = block
+      .replace(/^.*?'+pbNorm.slice(0,8)+'/, '').trim()
+      .replace(/^[\d\s]+/, '').trim()
+      .slice(0, 120);
+
+    // Standard spec: AMS-xxxx, MIL-xxxx, ASTM-xxxx, DIN-xxxx etc.
+    const specMatch = block.match(/\b(AMS[\-\s][A-Z0-9\-]+|MIL[\-\s][A-Z0-9\-]+|ASTM[\s][A-Z][0-9\-]+|DIN[\s][0-9]+|ISO[\s][0-9]+)/i);
+    const spec = specMatch ? specMatch[0].trim() : '';
+
+    // Qty + UOM
+    const qtyMatch = block.match(/([\d.]+)\s*(M\b|M2\b|KG\b|EA\b|PC\b)/i);
+    const qty = qtyMatch ? parseFloat(qtyMatch[1]) : null;
+    const uom = qtyMatch ? qtyMatch[2].toUpperCase() : '';
+
+    if (catalogNo || fullDesc) {
+      return {catalogNo, fullDesc: fullDesc.trim(), spec, qty, uom};
+    }
+  }
+  return null;
+}
+
+async function runPLPdfLookup(pb, rowIdx, btn) {
+  const pdfPath = btn.dataset.pdf || '';
+  const row     = document.getElementById('ar-prow-'+rowIdx);
+  const resEl   = document.getElementById('ar-presult-'+rowIdx);
+  if (!pdfPath || !row) return;
+  const origTxt = btn.textContent;
+  btn.disabled  = true;
+  btn.textContent = '⟳';
+  if (resEl) resEl.textContent = '';
+  try {
+    if (!rootDirHandle && !(_graphMode && _msalAcct))
+      throw new Error('נדרשת כניסה לטעינת PDF');
+    const buf  = await getFileBuffer(pdfPath);
+    const text = await _extractPdfText(buf);
+    const info = _parsePlRowForPb(text, pb);
+    if (!info) throw new Error('לא נמצא פריט בPL');
+
+    // Build info tooltip + show in result span
+    const parts = [];
+    if (info.catalogNo) parts.push('קטלוג: '+info.catalogNo);
+    if (info.spec)      parts.push('תקן: '+info.spec);
+    if (info.qty && info.uom) parts.push(info.qty+' '+info.uom);
+    if (resEl) resEl.innerHTML =
+      '<span style="color:#63b3ed;cursor:help;font-size:9px" title="'+
+      (info.fullDesc||'').replace(/"/g,'&quot;')+'">' +
+      (parts.join(' · ') || info.fullDesc.slice(0,30)) +
+      '</span>';
+
+    // Persist to rawMatData if item saved; else store in _plInfoCache
+    window._plInfoCache = window._plInfoCache || {};
+    window._plInfoCache[pb] = info;
+    if (rawMatData[pb]) {
+      rawMatData[pb].catalogNo = info.catalogNo || rawMatData[pb].catalogNo;
+      rawMatData[pb].spec      = info.spec      || rawMatData[pb].spec;
+      localStorage.setItem(RM_STORAGE_KEY, JSON.stringify(rawMatData));
+    }
+  } catch(e) {
+    if (resEl) resEl.innerHTML =
+      '<span style="color:#fc8181;cursor:help;font-size:9px" title="'+e.message+'">⚠</span>';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = origTxt;
+  }
+}
+
 function rmFamilyChanged() {
   const fam = document.getElementById('rmFamily').value;
   const fd = MATERIAL_DB[fam]||MATERIAL_DB.aluminum;
@@ -2588,53 +2719,43 @@ function rmUpdateCalc() {
                 ' · <strong style="color:#68d391">' + fmtMass(mass) + '</strong>';
       break;
     }
-    case 'bar_round': {
-      summary = '<span style="color:var(--text3)">●</span>' +
-                ' <strong>⌀' + qm('D') + ' mm</strong>' +
-                ' · L=' + qm('L') + ' mm' +
-                ' · <strong style="color:#68d391">' + fmtMass(mass) + '</strong>';
-      break;
-    }
-    case 'tube_round': {
-      summary = '<span style="color:var(--text3)">◎</span>' +
-                ' <strong>⌀' + qm('D') + ' / ⌀' + qm('d') + ' mm</strong>' +
-                ' · L=' + qm('L') + ' mm' +
-                ' · <strong style="color:#68d391">' + fmtMass(mass) + '</strong>';
-      break;
-    }
-    case 'bar_square': {
-      summary = '<span style="color:var(--text3)">▬</span>' +
-                ' <strong>' + qm('S') + ' × ' + (m('S2') || qm('S')) + ' mm</strong>' +
-                ' · L=' + qm('L') + ' mm' +
-                ' · <strong style="color:#68d391">' + fmtMass(mass) + '</strong>';
-      break;
-    }
-    case 'tube_square': {
-      summary = '<span style="color:var(--text3)">□</span>' +
-                ' <strong>□' + qm('S') + ' × t=' + qm('t') + ' mm</strong>' +
-                ' · L=' + qm('L') + ' mm' +
-                ' · <strong style="color:#68d391">' + fmtMass(mass) + '</strong>';
-      break;
-    }
-    case 'tube_rect': {
-      summary = '<span style="color:var(--text3)">▭</span>' +
-                ' <strong>' + qm('W') + ' × ' + qm('H') + ' × t=' + qm('t') + ' mm</strong>' +
-                ' · L=' + qm('L') + ' mm' +
-                ' · <strong style="color:#68d391">' + fmtMass(mass) + '</strong>';
-      break;
-    }
-    case 'angle': {
-      summary = '<span style="color:var(--text3)">∟</span>' +
-                ' <strong>' + qm('W') + ' × ' + (m('W2') || qm('W')) + ' × T=' + qm('T') + ' mm</strong>' +
-                ' · L=' + qm('L') + ' mm' +
-                ' · <strong style="color:#68d391">' + fmtMass(mass) + '</strong>';
-      break;
-    }
+    case 'bar_round':
+    case 'tube_round':
+    case 'bar_square':
+    case 'tube_square':
+    case 'tube_rect':
+    case 'angle':
     case 'profile': {
-      summary = '<span style="color:var(--text3)">⬡</span>' +
-                ' <strong>A=' + qm('A') + ' mm²</strong>' +
-                ' · L=' + qm('L') + ' mm' +
-                ' · <strong style="color:#68d391">' + fmtMass(mass) + '</strong>';
+      // For linear M-type materials: if L not set, show per-meter rate
+      const _isM  = (window._arUom||'').toUpperCase() === 'M';
+      const _hasL = m('L') > 0;
+      const _icon = {bar_round:'●', tube_round:'◎', bar_square:'▬', tube_square:'□', tube_rect:'▭', angle:'∟', profile:'⬡'}[form] || '▬';
+      // Cross-section description
+      const _xsec = (function(){
+        switch(form){
+          case 'bar_round':  return '⌀'+qm('D')+' mm';
+          case 'tube_round': return '⌀'+qm('D')+'/⌀'+qm('d')+' mm';
+          case 'bar_square': return qm('S')+'×'+(m('S2')||qm('S'))+' mm';
+          case 'tube_square':return '□'+qm('S')+'×t='+qm('t')+' mm';
+          case 'tube_rect':  return qm('W')+'×'+qm('H')+'×t='+qm('t')+' mm';
+          case 'angle':      return qm('W')+'×'+(m('W2')||qm('W'))+'×T='+qm('T')+' mm';
+          case 'profile':    return 'A='+qm('A')+' mm²';
+          default: return '';
+        }
+      })();
+      if (_isM && !_hasL) {
+        // Per-meter mass rate (set L=1000 for reference)
+        const _ndM = Object.assign({}, dims, {L:'1000'});
+        const _massPerM = calcRawMatVolume(form, _ndM) * density;
+        summary = '<span style="color:var(--text3)">'+_icon+'</span>' +
+                  ' <strong>'+_xsec+'</strong>' +
+                  ' · <strong style="color:#68d391">'+fmtMass(_massPerM)+'/m</strong>';
+      } else {
+        summary = '<span style="color:var(--text3)">'+_icon+'</span>' +
+                  ' <strong>'+_xsec+'</strong>' +
+                  ' · L='+qm('L')+' mm' +
+                  ' · <strong style="color:#68d391">'+fmtMass(mass)+'</strong>';
+      }
       break;
     }
     default: {
