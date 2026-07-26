@@ -628,6 +628,11 @@ let curSort = {col:null,asc:true};
 let filesOnly = false;
 let collapsed = new Set();
 let disabledRows = new Set(); // BOM indices that are unchecked
+// Returns true if row i should be excluded from all cost/hour computations:
+// either manually unchecked OR hidden by the visual filter (type/level/search)
+function isRowExcluded(i) {
+  return disabledRows.has(i) || !!(rows[i] && rows[i].classList.contains('hid'));
+}
 let flaggedRows = new Set();
 try{flaggedRows=new Set(JSON.parse(localStorage.getItem('zmag_flagged_6910W021')||'[]').map(Number));}catch(e){}
 if(localStorage.getItem('zmag_theme')==='light'){document.body.classList.add('light-mode');}
@@ -960,6 +965,7 @@ function computeTreeCosts() {
   itemSetupCost = new Array(n).fill(0);
   cumSetupCosts = new Array(n).fill(0);
   for (let i = 0; i < n; i++) {
+    if (isRowExcluded(i)) { unitCosts[i] = 0; itemSetupCost[i] = 0; continue; }
     unitCosts[i]    = getItemUnitCost(BOM[i], i);
     itemSetupCost[i] = getItemSetupCost(BOM[i]);
   }
@@ -1266,6 +1272,7 @@ function buildCumulativeHours() {
   directCycleH = new Array(n).fill(0);
   cumCycleH    = new Array(n).fill(0);
   BOM.forEach((item, idx) => {
+    if (isRowExcluded(idx)) return;
     if (item.type !== 'ELTDesign') return;
     const pb = item.pb || item.pn;
     const procs = procData[pb];
@@ -1965,6 +1972,7 @@ function getParentsForRawMat(pb) {
   const map = new Map();
   const RAW_UOM = /^(m2|m|ar|a\/r)$/i;
   BOM.forEach(function(item, idx) {
+    if (isRowExcluded(idx)) return;
     if ((item.pb || item.pn) !== pb) return;
     if (!RAW_UOM.test((item.uom||'').trim())) return;
     const tq = item.tq || 0;
@@ -2030,6 +2038,7 @@ function computeARAggregate(pb) {
   const uc = parseFloat(rm.unitCost) || 0;
   let totalMass = 0, totalArea = 0, count = 0;
   BOM.forEach(function(item, idx) {
+    if (isRowExcluded(idx)) return;
     if ((item.pb || item.pn) !== pb) return;
     if (!isARUnit(item.uom)) return;
     const tq = item.tq || 0;
@@ -3442,7 +3451,18 @@ function applyFilters(){
 
   if(searchTerm) hlSearch(searchTerm); else clearHL();
   document.getElementById('emptyState').style.display=vis===0?'block':'none';
+  // Recompute costs+hours so header and tabs reflect filtered view
+  try { computeTreeCosts(); } catch(e) {}
+  try { buildCumulativeHours(); } catch(e) {}
   updateStats(vis);
+  // Rebuild buy/rawmat tabs if currently open (invalidate cache first)
+  buyBuilt = false;
+  const _bEl = document.getElementById('buyTabContent');
+  if (_bEl) _bEl.dataset.built = '';
+  if (document.getElementById('mtp-buy') && document.getElementById('mtp-buy').classList.contains('active'))
+    _populateBuyTab(true);
+  if (document.getElementById('mtp-rawmat') && document.getElementById('mtp-rawmat').classList.contains('active'))
+    _populateRawmatTab(true);
   saveFilterState();
 }
 
@@ -3510,7 +3530,15 @@ function toggleRowCheck(idx){
     else           { disabledRows.delete(i); rows[i] && rows[i].classList.remove('vhid'); }
   });
   updateRowCheckVisuals();
-  buyBuilt=false; // invalidate buy cache
+  buyBuilt=false; // invalidate buy data cache
+  // Invalidate HTML caches so tabs rebuild on next view
+  const _buyEl=document.getElementById('buyTabContent');
+  if(_buyEl) _buyEl.dataset.built='';
+  // Immediately refresh whichever tab is currently open
+  if(document.getElementById('mtp-buy')&&document.getElementById('mtp-buy').classList.contains('active'))
+    _populateBuyTab(true);
+  if(document.getElementById('mtp-rawmat')&&document.getElementById('mtp-rawmat').classList.contains('active'))
+    _populateRawmatTab(true);
   // session-only — do NOT saveFilterState for disabledRows
 }
 function updateRowCheckVisuals(){
@@ -3520,6 +3548,8 @@ function updateRowCheckVisuals(){
     if(cb) cb.checked=enabled;
     tr.classList.toggle('row-disabled',!enabled);
   });
+  try { computeTreeCosts(); } catch(e) {}
+  try { buildCumulativeHours(); } catch(e) {}
   updateStats();
 }
 function setProjectQty(v) {
@@ -4198,7 +4228,8 @@ function _populateRawmatTab(force) {
   const RAW_UOM=/^(m2|m|ar|a\/r)$/i;
   const IS_AR=/^(ar|a\/r)$/i;
   const aggMap={};
-  BOM.forEach(function(b){
+  BOM.forEach(function(b, _idx){
+    if(isRowExcluded(_idx)) return;
     if(b.type!=='Buy') return;
     const uom=(b.uom||'').trim();
     if(!RAW_UOM.test(uom)) return;
@@ -4830,7 +4861,7 @@ function buildBuyData() {
   const map = new Map();
   BOM.forEach((item, idx) => {
     if (item.type !== 'Buy') return;
-    if (disabledRows.has(idx)) return;
+    if (isRowExcluded(idx)) return;
     const key = item.pb || item.pn;
     if (!map.has(key)) {
       map.set(key, {
