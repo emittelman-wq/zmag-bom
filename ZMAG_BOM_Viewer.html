@@ -2336,15 +2336,20 @@ function arRefreshRow(pb, rowIdx) {
   const massTd = document.getElementById('ar-pmass-'+rowIdx);
   const subTd  = document.getElementById('ar-psub-'+rowIdx);
   if (!massTd) return;
-  const rm = rawMatData[pb];
-  if (!rm) return;
   const row = document.getElementById('ar-prow-'+rowIdx);
   if (!row) return;
   const parentPb = row.dataset.ppb;
   const tqRaw  = parseFloat(row.dataset.tq) || 1;
-  const form    = document.getElementById('rmForm')?.value || rm.form || 'sheet';
-  const density = parseFloat(document.getElementById('rmDensity')?.value) || parseFloat(rm.density) || 2700;
+  // Build effective rm: saved or fall back to editor inputs
+  let rm = rawMatData[pb];
+  const edDims = {};
+  document.querySelectorAll('#rawMatModal .rm-dim').forEach(function(inp){ if (inp.value) edDims[inp.dataset.key] = inp.value; });
+  const form    = document.getElementById('rmForm')?.value || (rm||{}).form || 'sheet';
+  const density = parseFloat(document.getElementById('rmDensity')?.value) || parseFloat((rm||{}).density) || 2700;
+  if (!rm) rm = {dims: edDims, density: density, form: form};
+  else if (Object.keys(edDims).length) rm = Object.assign({}, rm, {dims: Object.assign({}, rm.dims||{}, edDims)});
   const uom     = (window._arUom||'').toLowerCase();
+  // Merge per-parent dims on top of base dims
   const dims    = getARDimsForParent(pb, parentPb);  // base + perParent
 
   if (isARUnit(uom)) {
@@ -2373,13 +2378,19 @@ function arRefreshRow(pb, rowIdx) {
 function arRefreshAggregate(pb) {
   const aggEl = document.getElementById('arAggRow');
   if (!aggEl) return;
-  const rm = rawMatData[pb];
-  if (!rm) { aggEl.textContent = ''; return; }
-  localStorage.setItem(RM_STORAGE_KEY, JSON.stringify(rawMatData));
-  const density  = parseFloat(document.getElementById('rmDensity')?.value) || parseFloat(rm.density) || 2700;
-  const form     = document.getElementById('rmForm')?.value || rm.form || 'sheet';
-  const uc       = parseFloat(document.getElementById('rmUnitCost')?.value) || parseFloat(rm.unitCost) || 0;
-  const costUnit = document.getElementById('rmCostUnit')?.value || rm.costUnit || 'kg';
+  // Build effective rm: saved data if available, else read current editor values
+  let rm = rawMatData[pb];
+  const edDims = {};
+  document.querySelectorAll('#rawMatModal .rm-dim').forEach(function(inp){ if (inp.value) edDims[inp.dataset.key] = inp.value; });
+  const density  = parseFloat(document.getElementById('rmDensity')?.value) || parseFloat((rm||{}).density) || 2700;
+  const form     = document.getElementById('rmForm')?.value || (rm||{}).form || 'sheet';
+  const uc       = parseFloat(document.getElementById('rmUnitCost')?.value) || parseFloat((rm||{}).unitCost) || 0;
+  const costUnit = document.getElementById('rmCostUnit')?.value || (rm||{}).costUnit || 'kg';
+  // For mass calculation: merge saved dims with editor dims (editor takes precedence for unsaved items)
+  const effectiveRm = rm ? rm : {dims: edDims, density: density, form: form};
+  if (!rm) rm = effectiveRm; // use editor values for the BOM loop below
+  if (rm && Object.keys(edDims).length) rm = Object.assign({}, rm, {dims: Object.assign({}, rm.dims||{}, edDims)});
+  if (rm) localStorage.setItem(RM_STORAGE_KEY, JSON.stringify(rawMatData));
   const uom      = (window._arUom||'').toLowerCase();
   const RAW_UOM  = /^(m2|m|ar|a\/r)$/i;
   let totalMass = 0, totalArea = 0, counted = 0;
@@ -2452,18 +2463,21 @@ async function runARStepEstimateForParent(pb, rowIdx, btn) {
     const form = document.getElementById('rmForm')?.value || (rawMatData[pb]||{}).form || 'sheet';
     const est  = estimateARDims(form, bbox);
     if (!est) throw new Error('צורה לא נתמכת');
-    if (!rawMatData[pb]) return;
-    if (!rawMatData[pb].perParent) rawMatData[pb].perParent = {};
-    if (!rawMatData[pb].perParent[parentPb]) rawMatData[pb].perParent[parentPb] = {dims:{}};
-    rawMatData[pb].perParent[parentPb].dims.L = String(est.L);
-    if (est.W) rawMatData[pb].perParent[parentPb].dims.W = String(est.W);
+    // Always update UI inputs — works even for items not yet saved to rawMatData
     row.querySelectorAll('.ar-pdim').forEach(function(inp) {
       if (inp.dataset.dim === 'L') inp.value = est.L;
       if (inp.dataset.dim === 'W' && est.W) inp.value = est.W;
     });
+    if (resultEl) resultEl.innerHTML = '<span style="color:#68d391;cursor:help" title="'+est.note.replace(/"/g,'&quot;')+'">\u2713</span>';
+    // Persist to rawMatData only if item already saved
+    if (rawMatData[pb]) {
+      if (!rawMatData[pb].perParent) rawMatData[pb].perParent = {};
+      if (!rawMatData[pb].perParent[parentPb]) rawMatData[pb].perParent[parentPb] = {dims:{}};
+      rawMatData[pb].perParent[parentPb].dims.L = String(est.L);
+      if (est.W) rawMatData[pb].perParent[parentPb].dims.W = String(est.W);
+    }
     arRefreshRow(pb, rowIdx);
     arRefreshAggregate(pb);
-    if (resultEl) resultEl.innerHTML = '<span style="color:#68d391;cursor:help" title="'+est.note.replace(/"/g,'&quot;')+'">\u2713</span>';
   } catch(e) {
     if (resultEl) resultEl.innerHTML = '<span style="color:#fc8181;cursor:help" title="'+e.message+'">⚠</span>';
   } finally {
