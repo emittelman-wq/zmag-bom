@@ -2059,6 +2059,7 @@ function getBBoxFromMeshData(meshData) {
 // For SHEET: bbox gives [long, mid, depth].
 //   Flat blank = (long + 2×depth) × (mid + 2×depth) — accounts for folded flanges.
 //   If depth < ~5mm (thin flat plate, no bends) the term is negligible anyway.
+// Returns stockHints: cross-section dim suggestions for the main stock dim fields.
 function estimateARDims(form, bbox) {
   if(!bbox) return null;
   const s=[bbox.dx,bbox.dy,bbox.dz].sort(function(a,b){return b-a;});
@@ -2075,11 +2076,28 @@ function estimateARDims(form, bbox) {
       ' × '+
       mid.toFixed(0)+'+'+'2×'+depth.toFixed(0)+'='+Wraw.toFixed(0)+
       ' +10% → '+L+'×'+W+' mm = '+((L/1000)*(W/1000)).toFixed(4)+' M²';
-    return {L, W, unit:'M²', note};
+    // T hint: smallest bbox dim ≈ part face thickness (valid for flat parts, not bent sheet)
+    const Th = Math.round(depth * 10) / 10;
+    return {L, W, unit:'M²', note, stockHints: Th > 0 ? {T: Th} : {}};
   }
-  // Linear forms: longest bbox dimension (the profile runs along it)
-  const L=Math.ceil(long*M);
-  return {L, unit:'M', note:long.toFixed(0)+' mm +10% → '+L+' mm = '+(L/1000).toFixed(3)+' M'};
+  // Linear forms: longest bbox dimension is blank cut length
+  const L = Math.ceil(long * M);
+  // Cross-section hints from mid × depth (estimate stock section from part bbox)
+  const r1 = function(v){ return Math.round(v * 10) / 10; };
+  const stockHints = (function() {
+    const D = r1(Math.max(mid, depth));  // for round/tube
+    switch(form) {
+      case 'bar_round':   return {D: D};
+      case 'bar_square':  return {S: r1(mid), S2: r1(depth)};
+      case 'tube_round':  return {D: D};
+      case 'tube_square': return {S: r1(mid)};
+      case 'tube_rect':   return {W: r1(mid), H: r1(depth)};
+      case 'angle':       return {W: r1(mid), T: r1(depth)};
+      case 'profile':     return {A: Math.round(mid * depth)};
+      default:            return {W: r1(mid), T: r1(depth)};
+    }
+  })();
+  return {L, unit:'M', note:long.toFixed(0)+' mm +10% → '+L+' mm = '+(L/1000).toFixed(3)+' M', stockHints: stockHints};
 }
 
 // ─── Raw Material Editor ─────────────────────────────────
@@ -2468,6 +2486,18 @@ async function runARStepEstimateForParent(pb, rowIdx, btn) {
       if (inp.dataset.dim === 'L') inp.value = est.L;
       if (inp.dataset.dim === 'W' && est.W) inp.value = est.W;
     });
+    // Fill main stock dim fields that are still 0 with cross-section hints from bbox
+    if (est.stockHints) {
+      var anyFilled = false;
+      Object.keys(est.stockHints).forEach(function(key) {
+        var inp = document.querySelector('#rawMatModal .rm-dim[data-key="'+key+'"]');
+        if (inp && (!inp.value || parseFloat(inp.value) === 0)) {
+          inp.value = est.stockHints[key];
+          inp.dispatchEvent(new Event('input')); // triggers rmUpdateCalc
+          anyFilled = true;
+        }
+      });
+    }
     if (resultEl) resultEl.innerHTML = '<span style="color:#68d391;cursor:help" title="'+est.note.replace(/"/g,'&quot;')+'">\u2713</span>';
     // Persist to rawMatData only if item already saved
     if (rawMatData[pb]) {
@@ -2521,28 +2551,106 @@ function rmGetDims() {
   return dims;
 }
 function rmUpdateCalc() {
-  const form = document.getElementById('rmForm')?.value||'sheet';
-  const density = parseFloat(document.getElementById('rmDensity')?.value)||1000;
-  const dims = rmGetDims();
-  const vol = calcRawMatVolume(form, dims);
-  const mass = vol * density;
-  const uc = parseFloat(document.getElementById('rmUnitCost')?.value)||0;
-  const costUnit = document.getElementById('rmCostUnit')?.value||'kg';
-  const tq = parseInt(document.getElementById('rawMatModal')?.dataset.tq)||1;
+  const form    = document.getElementById('rmForm')?.value || 'sheet';
+  const density = parseFloat(document.getElementById('rmDensity')?.value) || 1000;
+  const dims    = rmGetDims();
+  const vol     = calcRawMatVolume(form, dims);
+  const mass    = vol * density;
+  const uc      = parseFloat(document.getElementById('rmUnitCost')?.value) || 0;
+  const costUnit= document.getElementById('rmCostUnit')?.value || 'kg';
+  const tq      = parseInt(document.getElementById('rawMatModal')?.dataset.tq) || 1;
+  const m       = function(k){ return parseFloat(dims[k]) || 0; };
 
   let costPer = 0;
   switch(costUnit) {
-    case 'kg': costPer = mass*uc; break;
-    case 'm':  costPer = (parseFloat(dims.L)||0)/1000*uc; break;
-    case 'm2': costPer = ((parseFloat(dims.L)||0)/1000)*((parseFloat(dims.W)||0)/1000)*uc; break;
+    case 'kg': costPer = mass * uc; break;
+    case 'm':  costPer = m('L') / 1000 * uc; break;
+    case 'm2': costPer = (m('L') / 1000) * (m('W') / 1000) * uc; break;
+    default:   costPer = mass * uc;
   }
+
+  // Format mass: g if < 1 kg, else kg
+  const fmtMass = function(v) {
+    return v >= 1 ? v.toFixed(3) + ' kg' : (v * 1000).toFixed(1) + ' g';
+  };
+  const qm = function(k){ return m(k) ? m(k) : '?'; };
+
+  // Form-specific summary line
+  let summary = '';
+  switch(form) {
+    case 'sheet': {
+      const area = (m('L') / 1000) * (m('W') / 1000);
+      const areaStr = (m('L') && m('W'))
+        ? m('L').toFixed(0) + ' × ' + m('W').toFixed(0) + ' mm = ' + area.toFixed(4) + ' m²'
+        : '? × ? mm';
+      summary = '<span style="color:var(--text3)">⬛</span> ' + areaStr +
+                ' · <strong>T=' + qm('T') + ' mm</strong>' +
+                ' · <strong style="color:#68d391">' + fmtMass(mass) + '</strong>';
+      break;
+    }
+    case 'bar_round': {
+      summary = '<span style="color:var(--text3)">●</span>' +
+                ' <strong>⌀' + qm('D') + ' mm</strong>' +
+                ' · L=' + qm('L') + ' mm' +
+                ' · <strong style="color:#68d391">' + fmtMass(mass) + '</strong>';
+      break;
+    }
+    case 'tube_round': {
+      summary = '<span style="color:var(--text3)">◎</span>' +
+                ' <strong>⌀' + qm('D') + ' / ⌀' + qm('d') + ' mm</strong>' +
+                ' · L=' + qm('L') + ' mm' +
+                ' · <strong style="color:#68d391">' + fmtMass(mass) + '</strong>';
+      break;
+    }
+    case 'bar_square': {
+      summary = '<span style="color:var(--text3)">▬</span>' +
+                ' <strong>' + qm('S') + ' × ' + (m('S2') || qm('S')) + ' mm</strong>' +
+                ' · L=' + qm('L') + ' mm' +
+                ' · <strong style="color:#68d391">' + fmtMass(mass) + '</strong>';
+      break;
+    }
+    case 'tube_square': {
+      summary = '<span style="color:var(--text3)">□</span>' +
+                ' <strong>□' + qm('S') + ' × t=' + qm('t') + ' mm</strong>' +
+                ' · L=' + qm('L') + ' mm' +
+                ' · <strong style="color:#68d391">' + fmtMass(mass) + '</strong>';
+      break;
+    }
+    case 'tube_rect': {
+      summary = '<span style="color:var(--text3)">▭</span>' +
+                ' <strong>' + qm('W') + ' × ' + qm('H') + ' × t=' + qm('t') + ' mm</strong>' +
+                ' · L=' + qm('L') + ' mm' +
+                ' · <strong style="color:#68d391">' + fmtMass(mass) + '</strong>';
+      break;
+    }
+    case 'angle': {
+      summary = '<span style="color:var(--text3)">∟</span>' +
+                ' <strong>' + qm('W') + ' × ' + (m('W2') || qm('W')) + ' × T=' + qm('T') + ' mm</strong>' +
+                ' · L=' + qm('L') + ' mm' +
+                ' · <strong style="color:#68d391">' + fmtMass(mass) + '</strong>';
+      break;
+    }
+    case 'profile': {
+      summary = '<span style="color:var(--text3)">⬡</span>' +
+                ' <strong>A=' + qm('A') + ' mm²</strong>' +
+                ' · L=' + qm('L') + ' mm' +
+                ' · <strong style="color:#68d391">' + fmtMass(mass) + '</strong>';
+      break;
+    }
+    default: {
+      summary = '<strong style="color:#68d391">' + fmtMass(mass) + '</strong>' +
+                ' · נפח=' + (vol * 1e6).toFixed(2) + ' cm³';
+    }
+  }
+
   const resEl = document.getElementById('rmCalcResult');
   if (!resEl) return;
   const _arPb = document.getElementById('rawMatModal')?.dataset.arPb || '';
   resEl.innerHTML =
-    '<div style="display:flex;gap:20px;flex-wrap:wrap">'+
-    '<div><span style="color:var(--text2)">נפח: </span><strong>'+( vol*1e6).toFixed(2)+' cm³</strong></div>'+
-    '<div><span style="color:var(--text2)">משקל/יחידה: </span><strong>'+(mass*1000).toFixed(1)+' ג'+'</strong></div>'+
+    '<div style="font-size:12px;margin-bottom:6px;padding-bottom:6px;border-bottom:1px solid var(--border)">' + summary + '</div>' +
+    '<div style="display:flex;gap:16px;flex-wrap:wrap;font-size:12px">'+
+    '<div><span style="color:var(--text2)">נפח: </span><strong>'+(vol*1e6).toFixed(3)+' cm³</strong></div>'+
+    '<div><span style="color:var(--text2)">משקל/יחידה: </span><strong>'+fmtMass(mass)+'</strong></div>'+
     '<div><span style="color:var(--text2)">עלות/יחידה: </span><strong>'+fmtC(costPer)+'</strong></div>'+
     (_arPb
       ? '<div style="color:var(--text3);font-size:10px">סה"כ — ראה טבלת פריטי אב ↑</div>'
