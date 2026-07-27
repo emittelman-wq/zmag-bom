@@ -776,8 +776,13 @@ function computeTotalMassForPb(pb) {
     if (!tq) return;
     if (isARUnit(uom)) {
       const parentPb = getParentPbForBOMIndex(idx);
-      const dims = getARDimsForParent(pb, parentPb);
-      if (dims.L) totalMass += calcRawMatVolume(rm.form||'sheet', dims) * dens * tq;
+      const perP = rm.perParent && rm.perParent[parentPb];
+      if (perP && perP.useStepVolume && perP.meshVolume_m3 > 0) {
+        totalMass += perP.meshVolume_m3 * dens;
+      } else {
+        const dims = getARDimsForParent(pb, parentPb);
+        if (dims.L) totalMass += calcRawMatVolume(rm.form||'sheet', dims) * dens * tq;
+      }
     } else {
       totalMass += _computeLinearMass(rm, uom, tq);
     }
@@ -983,7 +988,8 @@ function importMatFamCSV(input) {
   const reader = new FileReader();
   reader.onload = function(e) {
     const text = (e.target.result||'').replace(/^﻿/,'');
-    const lines = text.split(/?
+    const lines = text.split(/
+?
 /).slice(1); // skip header
     let imported = 0;
     lines.forEach(function(line) {
@@ -1164,11 +1170,16 @@ function getItemUnitCost(item, bomIdx) {
       if (isARUnit(uom)) {
         // Per-parent: each BOM occurrence has a different parent assembly → different blank size
         const parentPb = getParentPbForBOMIndex(bomIdx);
-        const dims = getARDimsForParent(pb, parentPb);
-        if (!dims.L) return 0;
         const rm = rawMatData[pb];
         const density = parseFloat(rm.density) || (MATERIAL_DB[rm.family]||{}).density || 1000;
         const uc = parseFloat(rm.unitCost) || 0;
+        // If STEP volume was computed AND user chose to trust it → use exact mesh mass
+        const perP = rm.perParent && rm.perParent[parentPb];
+        if (perP && perP.useStepVolume && perP.meshVolume_m3 > 0) {
+          return perP.meshVolume_m3 * density * uc;
+        }
+        const dims = getARDimsForParent(pb, parentPb);
+        if (!dims.L) return 0;
         const vol = calcRawMatVolume(rm.form, dims);
         const mass = vol * density;
         if (rm.costUnit === 'm2' && dims.W)
@@ -1201,11 +1212,15 @@ function getItemUnitCost(item, bomIdx) {
       if (isARUnit(uom)) {
         // Per-parent blank cost (same logic as Buy above)
         const parentPb = getParentPbForBOMIndex(bomIdx);
-        const dims = getARDimsForParent(pb, parentPb);
-        if (!dims.L) return 0;
         const rm = rawMatData[pb];
         const density = parseFloat(rm.density) || (MATERIAL_DB[rm.family]||{}).density || 1000;
         const uc = parseFloat(rm.unitCost) || 0;
+        const perP = rm.perParent && rm.perParent[parentPb];
+        if (perP && perP.useStepVolume && perP.meshVolume_m3 > 0) {
+          return perP.meshVolume_m3 * density * uc;
+        }
+        const dims = getARDimsForParent(pb, parentPb);
+        if (!dims.L) return 0;
         const vol = calcRawMatVolume(rm.form, dims);
         const mass = vol * density;
         if (rm.costUnit === 'm2' && dims.W)
@@ -2855,6 +2870,24 @@ function arInitRowDisplays(pb) {
   arRefreshAggregate(pb);
 }
 
+// Toggle whether this per-parent BOM row uses STEP mesh volume or dims-based for cost
+function toggleStepVolume(pb, parentPb, btn) {
+  if (!rawMatData[pb] || !rawMatData[pb].perParent || !rawMatData[pb].perParent[parentPb]) return;
+  const perP = rawMatData[pb].perParent[parentPb];
+  if (!perP.meshVolume_m3) return;
+  perP.useStepVolume = !perP.useStepVolume;
+  localStorage.setItem(RM_STORAGE_KEY, JSON.stringify(rawMatData));
+  // Update button appearance
+  if (btn) {
+    btn.textContent = perP.useStepVolume ? 'STEP ☑' : 'STEP ☐';
+    btn.style.background = perP.useStepVolume ? 'rgba(56,161,105,.2)' : 'var(--surface2)';
+    btn.style.color = perP.useStepVolume ? '#68d391' : 'var(--text3)';
+    btn.title = perP.useStepVolume ? 'מחושב מנפח STEP' : 'מחושב ממידות';
+  }
+  // Recompute costs
+  try { computeTreeCosts(); buildCumulativeHours(); updateStats(); } catch(e){}
+}
+
 async function runARStepEstimateForParent(pb, rowIdx, btn) {
   const stpPath = btn.dataset.stp || '';
   const row = document.getElementById('ar-prow-'+rowIdx);
@@ -2902,9 +2935,14 @@ async function runARStepEstimateForParent(pb, rowIdx, btn) {
     }
     const _dens6 = parseFloat((rawMatData[pb]||{}).density) || ((MATERIAL_DB[(rawMatData[pb]||{}).family]||{}).density) || 1000;
     const _mass6_g = _meshVol_m3 * _dens6 * 1000;
+    var _curUseStep6 = rawMatData[pb] && rawMatData[pb].perParent && rawMatData[pb].perParent[parentPb] && rawMatData[pb].perParent[parentPb].useStepVolume;
+    var _massStr6 = _mass6_g>=1000?(_mass6_g/1000).toFixed(3)+' kg':_mass6_g.toFixed(1)+' g';
+    var _btnBg6 = _curUseStep6 ? 'rgba(56,161,105,.2)' : 'var(--surface2)';
+    var _btnCl6 = _curUseStep6 ? '#68d391' : 'var(--text3)';
+    var _btnTx6 = 'STEP '+(_curUseStep6 ? '\u2611' : '\u2610');
     if (resultEl) resultEl.innerHTML = '<span style="color:#68d391;cursor:help" title="'+est.note.replace(/"/g,'&quot;')+'">\u2713</span>'
-      + ' <span style="color:var(--text3);font-size:10px">'
-      + (_meshVol_mm3/1000).toFixed(1)+'cm³·'+(_mass6_g>=1000?(_mass6_g/1000).toFixed(2)+'kg':_mass6_g.toFixed(0)+'g')+'</span>';
+      + ' <span style="color:var(--text3);font-size:10px">' + (_meshVol_mm3/1000).toFixed(1)+'cm\u00b3 \u00b7 '+_massStr6+'</span>'
+      + ' <button onclick="toggleStepVolume(\''+pb+'\',\''+parentPb+'\',this)" title="'+(_curUseStep6?'מחושב מנפח STEP — לחץ לביטול':'לחץ לחישוב עלות מנפח STEP')+'" style="font-size:10px;padding:1px 6px;border-radius:3px;border:1px solid var(--border);cursor:pointer;background:'+_btnBg6+';color:'+_btnCl6+'">'+_btnTx6+'</button>';
     // Persist to rawMatData only if item already saved
     if (rawMatData[pb]) {
       if (!rawMatData[pb].perParent) rawMatData[pb].perParent = {};
