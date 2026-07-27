@@ -448,6 +448,7 @@ tr.row-disabled .badge,tr.row-disabled .proc-btn{opacity:.5}
   <button class="mtn-tab on" id="mtn-main"    onclick="switchMainTab('main')">📋 ראשי</button>
   <button class="mtn-tab"    id="mtn-buy"     onclick="switchMainTab('buy')">📦 רכש</button>
   <button class="mtn-tab"    id="mtn-rawmat"  onclick="switchMainTab('rawmat')">🧱 חומרי גלם</button>
+  <button class="mtn-tab"    id="mtn-matfam"  onclick="switchMainTab('matfam')">🏷️ מחירוני</button>
   <button class="mtn-tab"    id="mtn-reports" onclick="switchMainTab('reports')">📊 דוחות</button>
 </div>
 
@@ -579,6 +580,18 @@ tr.row-disabled .badge,tr.row-disabled .proc-btn{opacity:.5}
       <span class="stats" id="rawmatTabStats" style="margin-left:auto"></span>
     </div>
     <div id="rawmatTabContent" style="flex:1;overflow:auto"></div>
+  </div>
+
+  <!-- ══ מחירוני (Material Families) tab ══ -->
+  <div class="mtp" id="mtp-matfam">
+    <div class="tab-action-bar">
+      <button class="btn" onclick="exportMatFamCSV()" title="ייצוא טבלת משפחות">📥 ייצוא CSV</button>
+      <button class="btn" onclick="document.getElementById('matFamImportInput').click()" title="ייבוא מחירים">📤 ייבוא CSV</button>
+      <input type="file" id="matFamImportInput" accept=".csv" style="display:none" onchange="importMatFamCSV(this)">
+      <button class="btn" style="background:rgba(56,161,105,.12);border-color:#38a169;color:#38a169" onclick="applyAllFamilyPrices()">✅ החל כל המחירים</button>
+      <span class="stats" id="matFamStats" style="margin-left:auto"></span>
+    </div>
+    <div id="matFamContent" style="flex:1;overflow:auto;padding:12px 16px"></div>
   </div>
 
   <!-- ══ דוחות (Reports) tab ══ -->
@@ -740,6 +753,266 @@ let projectQty = 1;
 let buyNotes = {};
 let subData = {};
 let rawMatData = {};   // {pb: {family,grade,form,dims,density,unitCost,costUnit}}
+// ══ Material Family Prices ══════════════════════════════════════════════════
+const MAT_FAM_PRICE_KEY = 'zmag_mat_fam_prices_v1';
+let matFamPrices = {};
+(function(){ try { matFamPrices = JSON.parse(localStorage.getItem(MAT_FAM_PRICE_KEY)||'{}'); } catch(e){} })();
+
+function _famKey(rm) {
+  return (rm.family||'unknown')+'||'+(rm.grade||'generic')+'||'+(rm.form||'sheet');
+}
+
+// Total mass (kg) for one raw-material PB across all visible BOM rows
+function computeTotalMassForPb(pb) {
+  const rm = rawMatData[pb];
+  if (!rm) return 0;
+  const dens = parseFloat(rm.density)||(MATERIAL_DB[rm.family]||{}).density||1000;
+  let totalMass = 0;
+  BOM.forEach(function(item, idx) {
+    if ((item.pb||item.pn) !== pb) return;
+    if (isRowHiddenForTabs(idx)) return;
+    const uom = (item.uom||'').trim();
+    const tq  = item.tq || 0;
+    if (!tq) return;
+    if (isARUnit(uom)) {
+      const parentPb = getParentPbForBOMIndex(idx);
+      const dims = getARDimsForParent(pb, parentPb);
+      if (dims.L) totalMass += calcRawMatVolume(rm.form||'sheet', dims) * dens * tq;
+    } else {
+      totalMass += _computeLinearMass(rm, uom, tq);
+    }
+  });
+  return totalMass;
+}
+
+// Build aggregated map: famKey → {family,grade,form,density,pbs[],totalMass,bomRows}
+function _buildMatFamMap() {
+  const famMap = new Map();
+  Object.keys(rawMatData).forEach(function(pb) {
+    const rm = rawMatData[pb];
+    if (!rm || !rm.family) return;
+    const key = _famKey(rm);
+    if (!famMap.has(key)) {
+      famMap.set(key, {
+        key:key, family:rm.family, grade:rm.grade||'generic',
+        form:rm.form||'sheet',
+        density:parseFloat(rm.density)||(MATERIAL_DB[rm.family]||{}).density||1000,
+        pbs:[], totalMass:0, bomRows:0
+      });
+    }
+    const e = famMap.get(key);
+    e.pbs.push(pb);
+    e.totalMass += computeTotalMassForPb(pb);
+    BOM.forEach(function(item,idx){
+      if((item.pb||item.pn)===pb && !isRowHiddenForTabs(idx)) e.bomRows++;
+    });
+  });
+  return famMap;
+}
+
+function _populateMatFamTab() {
+  const el = document.getElementById('matFamContent');
+  const st = document.getElementById('matFamStats');
+  if (!el) return;
+  if (!BOM || !BOM.length || !Object.keys(rawMatData).length) {
+    el.innerHTML='<div style="padding:40px;text-align:center;color:var(--text3);font-size:13px">אין נתוני חומרי גלם מוגדרים</div>';
+    return;
+  }
+  const famMap = _buildMatFamMap();
+  const rows = [...famMap.values()].sort(function(a,b){ return b.totalMass - a.totalMass; });
+  let totalMass = 0, totalCost = 0;
+  rows.forEach(function(r){ totalMass += r.totalMass; });
+
+  var html = '<table style="width:100%;border-collapse:collapse;font-size:12px">';
+  html += '<thead><tr style="background:var(--header-bg);position:sticky;top:0;z-index:2">';
+  ['#','משפחה','סוג / Grade','צורה','צפיפות g/cc','שורות BOM','משקל כולל kg','₪ / ק"ג','עלות ₪',''].forEach(function(h){
+    html += '<th style="padding:7px 8px;text-align:right;border-bottom:2px solid var(--border);white-space:nowrap;color:var(--text2);font-size:11px">'+h+'</th>';
+  });
+  html += '</tr></thead><tbody>';
+
+  rows.forEach(function(r, idx) {
+    const famData  = MATERIAL_DB[r.family]||{label:r.family, color:'#888'};
+    const formData = MATERIAL_FORMS.find(function(f){ return f.id===r.form; })||{label:r.form};
+    const price    = matFamPrices[r.key] ? parseFloat(matFamPrices[r.key]) : 0;
+    const cost     = price && r.totalMass ? r.totalMass * price : 0;
+    if (cost) totalCost += cost;
+    const safeIdx  = idx;
+    const massTxt  = r.totalMass > 0 ? r.totalMass.toFixed(2) : '—';
+    const costTxt  = cost > 0 ? '₪'+cost.toFixed(0) : '—';
+    const densGcc  = (r.density/1000).toFixed(2);
+
+    html += '<tr style="border-bottom:1px solid var(--border)" class="matfam-row" data-key="'+escHtml(r.key)+'">';
+    html += '<td style="padding:5px 8px;color:var(--text3);font-size:11px">'+(idx+1)+'</td>';
+    html += '<td style="padding:5px 8px"><span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:'+famData.color+';margin-left:4px;vertical-align:middle"></span><span style="vertical-align:middle">'+famData.label+'</span></td>';
+    html += '<td style="padding:5px 8px;font-weight:600;font-family:monospace">'+escHtml(r.grade)+'</td>';
+    html += '<td style="padding:5px 8px;color:var(--text2)">'+escHtml(formData.label)+'</td>';
+    html += '<td style="padding:5px 8px;text-align:center;color:var(--text3)">'+densGcc+'</td>';
+    html += '<td style="padding:5px 8px;text-align:center">'+r.bomRows+'</td>';
+    html += '<td style="padding:5px 8px;text-align:right;font-weight:700">'+massTxt+'</td>';
+    html += '<td style="padding:5px 8px"><input type="number" min="0" step="0.5" class="matfam-price-inp"'
+      +' style="width:72px;padding:3px 6px;font-size:12px;border:1px solid var(--border);border-radius:4px;background:var(--surface2);color:var(--text1);text-align:right"'
+      +' value="'+(price||'')+'"'
+      +' data-key="'+escHtml(r.key)+'"'
+      +' data-idx="'+safeIdx+'"'
+      +' oninput="onMatFamPriceInput(this)"></td>';
+    html += '<td class="matfam-cost-cell" data-idx="'+safeIdx+'" style="padding:5px 8px;text-align:right;color:var(--accent2);font-weight:700">'+costTxt+'</td>';
+    html += '<td style="padding:5px 8px"><button class="btn" style="font-size:10px;padding:2px 8px;white-space:nowrap" onclick="applyFamilyPrice(''+escHtml(r.key)+'')">החל →</button></td>';
+    html += '</tr>';
+  });
+
+  html += '</tbody><tfoot><tr style="background:var(--header-bg);font-weight:700;border-top:2px solid var(--border)">';
+  html += '<td colspan="6" style="padding:7px 8px;color:var(--text2)">סה"כ</td>';
+  html += '<td style="padding:7px 8px;text-align:right">'+totalMass.toFixed(2)+' kg</td>';
+  html += '<td></td>';
+  html += '<td id="matfam-total-cost" style="padding:7px 8px;text-align:right;color:var(--accent2)">'+(totalCost?'₪'+totalCost.toFixed(0):'—')+'</td>';
+  html += '<td></td></tr></tfoot></table>';
+
+  el.innerHTML = html;
+  if (st) st.textContent = rows.length+' משפחות · '+totalMass.toFixed(1)+' kg';
+}
+
+// Live price input → save to matFamPrices + refresh cost cell + footer
+function onMatFamPriceInput(inp) {
+  const key   = inp.dataset.key;
+  const price = parseFloat(inp.value) || 0;
+  if (price > 0) matFamPrices[key] = price;
+  else            delete matFamPrices[key];
+  localStorage.setItem(MAT_FAM_PRICE_KEY, JSON.stringify(matFamPrices));
+
+  const idx = parseInt(inp.dataset.idx);
+  // Update cost cell for this row
+  const famMap = _buildMatFamMap();
+  const entry  = famMap.get(key);
+  const costCell = document.querySelector('.matfam-cost-cell[data-idx="'+idx+'"]');
+  if (costCell && entry) {
+    const cost = price && entry.totalMass ? entry.totalMass * price : 0;
+    costCell.textContent = cost > 0 ? '₪'+cost.toFixed(0) : '—';
+  }
+  // Refresh footer total
+  var newTotal = 0;
+  document.querySelectorAll('.matfam-price-inp').forEach(function(i2) {
+    const p2 = parseFloat(i2.value)||0;
+    if (!p2) return;
+    const k2 = i2.dataset.key;
+    const e2 = famMap.get(k2);
+    if (e2) newTotal += e2.totalMass * p2;
+  });
+  const ftCell = document.getElementById('matfam-total-cost');
+  if (ftCell) ftCell.textContent = newTotal > 0 ? '₪'+newTotal.toFixed(0) : '—';
+}
+
+// Apply one family's price to all matching rawMatData items
+function applyFamilyPrice(key) {
+  const price = matFamPrices[key];
+  if (!price || parseFloat(price) <= 0) {
+    alert('הזן מחיר לפני החלה'); return;
+  }
+  const p = parseFloat(price);
+  const [family, grade, form] = key.split('||');
+  let updated = 0;
+  Object.keys(rawMatData).forEach(function(pb) {
+    const rm = rawMatData[pb];
+    if (!rm) return;
+    if ((rm.family||'unknown')===family && (rm.grade||'generic')===grade && (rm.form||'sheet')===form) {
+      rm.unitCost = String(p);
+      rm.costUnit = 'kg';
+      updated++;
+    }
+  });
+  if (updated > 0) {
+    localStorage.setItem(RM_STORAGE_KEY, JSON.stringify(rawMatData));
+    try { computeTreeCosts(); buildCumulativeHours(); updateStats(); } catch(e){}
+    alert('עודכן מחיר ' + p + ' ₪/ק"ג עבור ' + updated + ' פריטים (משפחה: ' + key.split('||').join(' / ') + ')');
+  }
+}
+
+// Apply ALL stored family prices at once
+function applyAllFamilyPrices() {
+  let total = 0;
+  Object.keys(matFamPrices).forEach(function(key) {
+    const p = parseFloat(matFamPrices[key])||0;
+    if (!p) return;
+    const [family, grade, form] = key.split('||');
+    Object.keys(rawMatData).forEach(function(pb) {
+      const rm = rawMatData[pb];
+      if (!rm) return;
+      if ((rm.family||'unknown')===family && (rm.grade||'generic')===grade && (rm.form||'sheet')===form) {
+        rm.unitCost = String(p);
+        rm.costUnit = 'kg';
+        total++;
+      }
+    });
+  });
+  if (total > 0) {
+    localStorage.setItem(RM_STORAGE_KEY, JSON.stringify(rawMatData));
+    try { computeTreeCosts(); buildCumulativeHours(); updateStats(); } catch(e){}
+    _populateMatFamTab();
+    alert('עודכן מחיר עבור ' + total + ' פריטי חומר גלם');
+  } else {
+    alert('אין מחירים מוגדרים — הזן מחיר/ק"ג לכל משפחה');
+  }
+}
+
+// CSV Export: key, family, grade, form, density, bomRows, totalMass_kg, pricePerKg, totalCost
+function exportMatFamCSV() {
+  if (!BOM || !Object.keys(rawMatData).length) return;
+  const famMap = _buildMatFamMap();
+  const rows = [...famMap.values()].sort(function(a,b){ return b.totalMass-a.totalMass; });
+  var lines = [['key','משפחה','סוג/Grade','צורה','צפיפות kg/m3','שורות BOM','משקל kg','מחיר/קג','עלות']];
+  rows.forEach(function(r) {
+    const fD = MATERIAL_DB[r.family]||{label:r.family};
+    const fmD= MATERIAL_FORMS.find(function(f){ return f.id===r.form; })||{label:r.form};
+    const p  = matFamPrices[r.key] ? parseFloat(matFamPrices[r.key]) : '';
+    const cost= p ? (r.totalMass*p).toFixed(2) : '';
+    lines.push([r.key, fD.label, r.grade, fmD.label, r.density, r.bomRows, r.totalMass.toFixed(3), p, cost]);
+  });
+  const csv = '﻿' + lines.map(function(row){
+    return row.map(function(v){ return '"'+String(v===null||v===undefined?'':v).replace(/"/g,'""')+'"'; }).join(',');
+  }).join('
+');
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'}));
+  a.download = 'mat_families_prices.csv';
+  a.click();
+}
+
+// CSV Import: reads key (col 0) + pricePerKg (col 7) and stores to matFamPrices
+function importMatFamCSV(input) {
+  const file = input.files && input.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = function(e) {
+    const text = (e.target.result||'').replace(/^﻿/,'');
+    const lines = text.split(/?
+/).slice(1); // skip header
+    let imported = 0;
+    lines.forEach(function(line) {
+      if (!line.trim()) return;
+      // Parse CSV fields (simple split by comma, handle quoted fields)
+      const fields = [];
+      var cur='', inQ=false;
+      for (var ci=0;ci<line.length;ci++) {
+        var ch=line[ci];
+        if (ch==='"') { inQ=!inQ; continue; }
+        if (ch===',' && !inQ) { fields.push(cur); cur=''; continue; }
+        cur+=ch;
+      }
+      fields.push(cur);
+      const key   = (fields[0]||'').trim();
+      const price = parseFloat((fields[7]||'').trim());
+      if (key && !isNaN(price) && price > 0) {
+        matFamPrices[key] = price;
+        imported++;
+      }
+    });
+    localStorage.setItem(MAT_FAM_PRICE_KEY, JSON.stringify(matFamPrices));
+    _populateMatFamTab();
+    input.value = '';
+    alert('יובאו ' + imported + ' מחירי משפחה');
+  };
+  reader.readAsText(file, 'utf-8');
+}
+
 const RM_STORAGE_KEY = 'zmag_rawmat';
 try { rawMatData = JSON.parse(localStorage.getItem(RM_STORAGE_KEY)||'{}'); } catch(e) {}
 let anomalies = [];
@@ -4110,6 +4383,7 @@ function switchMainTab(id) {
   document.querySelectorAll('.mtp').forEach(function(p){ p.classList.toggle('active', p.id==='mtp-'+id); });
   if(id==='buy')     _populateBuyTab(true);
   if(id==='rawmat')  _populateRawmatTab(true);
+  if(id==='matfam')  _populateMatFamTab();
   if(id==='reports') _populateReportsTab();
 }
 
