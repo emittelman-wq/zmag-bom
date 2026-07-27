@@ -2144,13 +2144,24 @@ function computeMeshVolume(meshData) {
   var vol = 0;
   for (var mi = 0; mi < meshData.length; mi++) {
     var m = meshData[mi], pos = m.pos, idx = m.idx;
-    if (!pos || !idx) continue;
-    for (var ti = 0; ti < idx.length; ti += 3) {
-      var i0=idx[ti]*3, i1=idx[ti+1]*3, i2=idx[ti+2]*3;
-      var x0=pos[i0],y0=pos[i0+1],z0=pos[i0+2];
-      var x1=pos[i1],y1=pos[i1+1],z1=pos[i1+2];
-      var x2=pos[i2],y2=pos[i2+1],z2=pos[i2+2];
-      vol += x0*(y1*z2-y2*z1) + x1*(y2*z0-y0*z2) + x2*(y0*z1-y1*z0);
+    if (!pos || !pos.length) continue;
+    if (idx && idx.length) {
+      // Indexed mesh: each triple of indices = one triangle
+      for (var ti = 0; ti < idx.length; ti += 3) {
+        var i0=idx[ti]*3, i1=idx[ti+1]*3, i2=idx[ti+2]*3;
+        var x0=pos[i0],y0=pos[i0+1],z0=pos[i0+2];
+        var x1=pos[i1],y1=pos[i1+1],z1=pos[i1+2];
+        var x2=pos[i2],y2=pos[i2+1],z2=pos[i2+2];
+        vol += x0*(y1*z2-y2*z1) + x1*(y2*z0-y0*z2) + x2*(y0*z1-y1*z0);
+      }
+    } else {
+      // Non-indexed (flat list): every 9 floats = one triangle
+      for (var ti = 0; ti < pos.length; ti += 9) {
+        var x0=pos[ti],   y0=pos[ti+1], z0=pos[ti+2];
+        var x1=pos[ti+3], y1=pos[ti+4], z1=pos[ti+5];
+        var x2=pos[ti+6], y2=pos[ti+7], z2=pos[ti+8];
+        vol += x0*(y1*z2-y2*z1) + x1*(y2*z0-y0*z2) + x2*(y0*z1-y1*z0);
+      }
     }
   }
   return Math.abs(vol)/6;  // mm³
