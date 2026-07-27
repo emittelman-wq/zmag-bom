@@ -433,6 +433,9 @@ tr.row-disabled .badge,tr.row-disabled .proc-btn{opacity:.5}
   <button class="btn" id="folderBtn" onclick="grantAccess()" title="פתח תיקיית הפרויקט">📁 Select Folder</button>
   <button class="btn" id="syncBtn" onclick="syncProcFromFile()" title="סנכרן נתוני ייצור" style="display:none">🔄 Sync</button>
   <span id="fileSyncStatus" style="font-size:11px;color:var(--accent2);opacity:0;transition:opacity .5s;margin-right:4px"></span>
+  <button class="btn" id="exportBtn" onclick="exportBackup()" title="ייצוא גיבוי מלא (JSON)" style="font-size:13px;padding:2px 7px">📤</button>
+  <button class="btn" id="importBtn" onclick="importBackup()" title="ייבוא גיבוי (JSON)" style="font-size:13px;padding:2px 7px">📥</button>
+  <input type="file" id="importFileInput" accept=".json" style="display:none" onchange="_importFileSelected(event)">
   <button class="btn" id="themeBtn" onclick="toggleTheme()" title="Toggle light/dark mode">☀️</button>
   <span id="projectQtyWrap" style="font-size:11px;color:var(--text2);display:flex;align-items:center;gap:4px">
     ערכות:
@@ -777,12 +780,8 @@ function computeTotalMassForPb(pb) {
     if (isARUnit(uom)) {
       const parentPb = getParentPbForBOMIndex(idx);
       const perP = rm.perParent && rm.perParent[parentPb];
-      if (perP && perP.useStepVolume && perP.meshVolume_m3 > 0) {
-        totalMass += perP.meshVolume_m3 * dens;
-      } else {
-        const dims = getARDimsForParent(pb, parentPb);
-        if (dims.L) totalMass += calcRawMatVolume(rm.form||'sheet', dims) * dens * tq;
-      }
+      const dims = getARDimsForParent(pb, parentPb);
+      if (dims.L) totalMass += calcRawMatVolume(rm.form||'sheet', dims) * dens * tq;
     } else {
       totalMass += _computeLinearMass(rm, uom, tq);
     }
@@ -926,6 +925,7 @@ function applyFamilyPrice(key) {
   });
   if (updated > 0) {
     localStorage.setItem(RM_STORAGE_KEY, JSON.stringify(rawMatData));
+    saveProcToFile();
     try { computeTreeCosts(); buildCumulativeHours(); updateStats(); } catch(e){}
     alert('עודכן מחיר ' + p + ' ₪/ק"ג עבור ' + updated + ' פריטים (משפחה: ' + key.split('||').join(' / ') + ')');
   }
@@ -950,6 +950,7 @@ function applyAllFamilyPrices() {
   });
   if (total > 0) {
     localStorage.setItem(RM_STORAGE_KEY, JSON.stringify(rawMatData));
+    saveProcToFile();
     try { computeTreeCosts(); buildCumulativeHours(); updateStats(); } catch(e){}
     _populateMatFamTab();
     alert('עודכן מחיר עבור ' + total + ' פריטי חומר גלם');
@@ -1172,16 +1173,14 @@ function getItemUnitCost(item, bomIdx) {
         const uc = parseFloat(rm.unitCost) || 0;
         // If STEP volume was computed AND user chose to trust it → use exact mesh mass
         const perP = rm.perParent && rm.perParent[parentPb];
-        if (perP && perP.useStepVolume && perP.meshVolume_m3 > 0) {
-          return perP.meshVolume_m3 * density * uc;
-        }
         const dims = getARDimsForParent(pb, parentPb);
         if (!dims.L) return 0;
         const vol = calcRawMatVolume(rm.form, dims);
         const mass = vol * density;
+        const waste = 1 + (parseFloat(rm.wastePct)||0)/100;
         if (rm.costUnit === 'm2' && dims.W)
-          return (parseFloat(dims.L)/1000)*(parseFloat(dims.W)/1000)*uc;
-        return mass * uc;
+          return (parseFloat(dims.L)/1000)*(parseFloat(dims.W)/1000)*uc*waste;
+        return mass * uc * waste;
       }
       const rm = getRawMatCostPerUnit(pb, uom);
       return rm ? rm.cost : 0;
@@ -1213,9 +1212,6 @@ function getItemUnitCost(item, bomIdx) {
         const density = parseFloat(rm.density) || (MATERIAL_DB[rm.family]||{}).density || 1000;
         const uc = parseFloat(rm.unitCost) || 0;
         const perP = rm.perParent && rm.perParent[parentPb];
-        if (perP && perP.useStepVolume && perP.meshVolume_m3 > 0) {
-          return perP.meshVolume_m3 * density * uc;
-        }
         const dims = getARDimsForParent(pb, parentPb);
         if (!dims.L) return 0;
         const vol = calcRawMatVolume(rm.form, dims);
@@ -2111,6 +2107,32 @@ function calcRawMatVolume(form, dims) {
 }
 
 // ─── Auto-detect material + form + dims from PN / description ─
+
+// ─── Linear/area mass computation ────────────────────────────────────────────
+// Returns total gross mass (kg) for a raw-mat item given UOM and quantity.
+// For M:  mass per 1m × tq × waste
+// For M2: mass per 1m² × tq × waste
+// For other: volume × density × tq × waste
+function _computeLinearMass(rm, uom, tq) {
+  if (!rm) return 0;
+  const dens = parseFloat(rm.density) || (MATERIAL_DB[rm.family]||{}).density || 2700;
+  const waste = 1 + (parseFloat(rm.wastePct)||0) / 100;
+  const UOM = (uom||'').trim().toUpperCase();
+  if (UOM === 'M') {
+    const nd = Object.assign({}, rm.dims||{}, {L:'1000'});
+    const vol = calcRawMatVolume(rm.form||'bar_round', nd);
+    return vol * dens * tq * waste;
+  }
+  if (UOM === 'M2') {
+    const nd = Object.assign({}, rm.dims||{}, {L:'1000', W:'1000'});
+    const vol = calcRawMatVolume('sheet', nd);
+    return vol * dens * tq * waste;
+  }
+  // EA / AR / other: use stored dims as one piece
+  const vol = calcRawMatVolume(rm.form||'sheet', rm.dims||{});
+  return vol * dens * tq * waste;
+}
+
 function parseRawMatHints(pb, desc) {
   const src = ((pb||'') + ' ' + (desc||'')).toUpperCase().replace(/,/g,' ');
   const h = {};
@@ -2502,6 +2524,7 @@ function jumpToParentInBOM(parentPb) {
 }
 
 function openRawMatEditor(pb, desc, tq) {
+  window._curRmPb = pb;
   const existing = rawMatData[pb] || {};
   const isNew = !rawMatData[pb];
   const safePb = pb.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
@@ -2562,2313 +2585,319 @@ function openRawMatEditor(pb, desc, tq) {
         '<td id="ar-pmass-'+i+'" style="font-size:10px;color:var(--text3);text-align:right;padding:2px 4px"></td>'+
         '<td style="font-size:10px;color:var(--text3);text-align:center;padding:2px 3px">×'+p.tq+'</td>'+
         '<td id="ar-psub-'+i+'" style="font-size:10px;color:#68d391;text-align:right;padding:2px 4px;font-weight:600"></td>'+
-        '<td style="padding:1px 3px">'+
-          (hasStep
-            ? '<button onclick="runARStepEstimateForParent(\''+safePb+'\','+i+',this)" data-stp="'+stpEsc+'" '+
-              'style="padding:2px 6px;background:#ed8936;color:#fff;border:none;border-radius:3px;cursor:pointer;font-size:10px" title="'+stpEsc+'">📐</button>'
-            : '<input type="file" id="stepBrowse-'+i+'" accept=".stp,.step" style="display:none" '+'onchange="onManualStepSelected(\''+safePb+'\','+i+',this)">'+'<button onclick="document.getElementById(\'stepBrowse-'+i+'\').click()" '+'title="בחר קובץ STEP לחישוב נפח" '+'style="padding:2px 5px;background:var(--surface2);color:var(--text3);border:1px solid var(--border);border-radius:3px;cursor:pointer;font-size:10px">📂</button>')+
-          (p.plPdfPath
-            ? ' <button onclick="runPLPdfLookup(\''+safePb+'\','+i+',this)" data-pdf="'+(p.plPdfPath||'').replace(/"/g,'&quot;')+'" '+
-              'style="padding:2px 5px;background:#2b6cb0;color:#fff;border:none;border-radius:3px;cursor:pointer;font-size:10px" title="קליטת מידע מ-PL PDF">📄</button>'
-            : '')+
-          '<div id="ar-presult-'+i+'" style="font-size:9px;margin-top:2px;white-space:normal;max-width:110px"></div>'+
-        '</td>'+
-      '</tr>';
-    }).join('');
-    const _uomLabel = (window._arUom||'').toUpperCase();
-    const _uomTitle = bomInfo.isAR ? 'AR — As Required' : _uomLabel+' — חומר גלם';
-    return '<div style="background:rgba(237,137,54,.1);border:1px solid rgba(237,137,54,.4);border-radius:6px;padding:8px 10px">'+
-      '<div style="display:flex;align-items:center;gap:8px;margin-bottom:5px">'+'<span style="font-size:11px;font-weight:700;color:#ed8936">📐 '+_uomTitle+' · '+_arParents.length+' פריטי אב</span>'+'<span style="font-size:9px;color:#ed8936;opacity:.7;margin-right:auto" title="ערכי משקל/עלות מטור זה מוצגים בטבלה הראשית ובטבלת ח"ג"">→ טבלה ראשית + ח"ג</span>'+'</div>'+
-      '<div id="stepHelpPanel" style="display:none;background:rgba(66,153,225,.1);border:1px solid rgba(66,153,225,.3);border-radius:4px;padding:8px 10px;margin-bottom:6px;font-size:10px;line-height:1.5;direction:rtl">'+'<strong>מתי לסמן STEP ☑?</strong><br>'+'<b>☑ סמן STEP</b> — כאשר לפריט יש חיתוכים/חורים שמקטינים משמעותית את כמות החומר (לדוג\u0027: רשת קרינה, חלון מקושקש). הכלי משתמש בנפח המש המדויק.<br>'+'<b>☐ סגור (ברירת מחדל)</b> — כאשר הפריט מלא / כפוף ללא חיתוכים. הכלי משתמש במידות Bounding Box.<br>'+'<em style="color:var(--text3)">לחץ על כפתור הכתום 📐 כדי לטעון STEP, אחר כך לחץ STEP ☐/☑ לבחירת שיטת חישוב</em>'+'</div>'+'<div style="max-height:190px;overflow:auto;border:1px solid var(--border);border-radius:4px;direction:ltr">'+
-      '<table style="width:100%;border-collapse:collapse;direction:ltr;min-width:480px">'+
-      '<thead><tr style="background:var(--surface2);position:sticky;top:0;z-index:1">'+
-        '<th style="padding:3px 4px;text-align:right;font-size:10px;font-weight:600">פריט אב</th>'+
-        '<th style="padding:3px 4px;font-size:10px;font-weight:600">L (mm)</th>'+
-        (isSheet ? '<th style="padding:3px 4px;font-size:10px;font-weight:600">W (mm)</th>' : '<th></th>')+
-        '<th style="padding:3px 4px;font-size:10px;font-weight:600;text-align:right">g/blank</th>'+
-        '<th style="padding:3px 4px;font-size:10px;font-weight:600">כמות</th>'+
-        '<th style="padding:3px 4px;font-size:10px;font-weight:600;text-align:right">kg</th>'+
-        '<th style="padding:3px 4px;font-size:10px;font-weight:600">STEP <span onclick="document.getElementById(\'stepHelpPanel\').style.display=document.getElementById(\'stepHelpPanel\').style.display===\'none\'?\'block\':\'none\'" style="cursor:pointer;color:var(--text3);font-size:9px;text-decoration:underline dotted" title="מה זה STEP?">(?)</span></th>'+
-      '</tr></thead>'+
-      '<tbody>'+rowsHTML+'</tbody>'+
-      '</table></div>'+
-      '<div id="arAggRow" style="margin-top:6px;font-size:11px;color:var(--text2)">מחשב…</div>'+
-    '</div>';
+        +'</tr>';
+    });
+    const hdr =
+      '<th style="font-size:10px;padding:2px 4px;color:var(--text3);font-weight:600">הורה</th>'+
+      '<th style="font-size:10px;padding:2px 4px;color:var(--text3);font-weight:600">L (mm)</th>'+
+      (isSheet ? '<th style="font-size:10px;padding:2px 4px;color:var(--text3);font-weight:600">W (mm)</th>' : '<th></th>')+
+      '<th style="font-size:10px;padding:2px 4px;color:var(--text3);font-weight:600">משקל נטו</th>'+
+      '<th style="font-size:10px;padding:2px 4px;color:var(--text3);font-weight:600">×TQ</th>'+
+      '<th style="font-size:10px;padding:2px 4px;color:var(--text3);font-weight:600">גולמי</th>';
+    return '<div id="arBannerBox" style="margin:10px 0;background:rgba(66,153,225,.08);border:1px solid rgba(66,153,225,.35);border-radius:6px;padding:8px 10px">'+
+      '<div style="font-size:11px;font-weight:600;color:var(--accent2);margin-bottom:5px">📐 מידות לפי הורה ('+_arParents.length+' הורים) — יש להזין L'+(isSheet?' ו-W':'')+' לכל הורה</div>'+
+      '<table style="width:100%;border-collapse:collapse"><thead><tr>'+hdr+'</tr></thead><tbody id="arParentsBody">'+
+      rowsHTML.join('')+'</tbody></table>'+
+      '<div id="arAggRow" style="font-size:11px;color:var(--accent2);font-weight:600;margin-top:5px;text-align:right;padding:3px 0"></div>'+
+      '</div>';
   })() : '';
 
-  function famOpts() {
-    return Object.entries(MATERIAL_DB).map(function(e){
-      return '<option value="'+e[0]+'"'+(fam===e[0]?' selected':'')+'>'+ e[1].label+'</option>';
-    }).join('');
-  }
-  function gradeOpts(fd) {
-    return (fd.grades||[]).map(function(g){
-      return '<option value="'+g.id+'"'+(grade===g.id?' selected':'')+'>'+ g.label+'</option>';
-    }).join('');
-  }
-  function formOpts() {
-    return MATERIAL_FORMS.map(function(f){
-      return '<option value="'+f.id+'"'+(formId===f.id?' selected':'')+'>'+f.label+'</option>';
-    }).join('');
-  }
-  function dimFields(fd) {
-    return fd.dims.map(function(d){
-      const val = mergedDims[d.k] || '';
-      const isDetected = isNew && hints.dims && hints.dims[d.k];
-      return '<div style="display:flex;flex-direction:column;gap:2px">'+
-        '<label style="font-size:10px;color:'+(isDetected?'#38a169':'var(--text2)')+'">'+d.ph+' ('+d.u+')'+(isDetected?' ✓':'')+'</label>'+
-        '<input class="rm-dim" data-key="'+d.k+'" type="number" min="0" step="0.1" value="'+val+'" placeholder="0"'+
-        ' style="width:70px;padding:3px 5px;background:var(--surface2);border:1px solid '+(isDetected?'rgba(56,161,105,.6)':'var(--border)')+';color:var(--text);border-radius:4px;font-size:12px"'+
-        ' oninput="rmUpdateCalc()"></div>';
-    }).join('');
-  }
-
-  m.innerHTML =
-    '<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;width:580px;max-height:90vh;display:flex;flex-direction:column;overflow:hidden">'+
-      '<div style="padding:12px 16px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">'+
-        '<div><div style="font-weight:700;font-size:13px">🧱 חומר גלם</div>'+
-          '<div style="font-size:11px;color:var(--text2);font-family:monospace">'+pb+'</div>'+
-          '<div style="font-size:11px;color:var(--text2)">'+desc+'</div></div>'+
-        '<button onclick="document.getElementById(\'rawMatModal\').style.display=\'none\'" style="padding:4px 10px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;cursor:pointer">✕</button>'+
-      '</div>'+
-      '<div style="overflow:auto;flex:1;padding:14px;display:flex;flex-direction:column;gap:12px">'+
-        arBanner+
-        detectedBanner+
-        // Family + grade
-        '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">'+
-          '<div><label style="font-size:11px;font-weight:600;color:var(--text2);display:block;margin-bottom:4px">משפחת חומר</label>'+
-            '<select id="rmFamily" onchange="rmFamilyChanged()" style="width:100%;padding:5px 6px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:13px">'+famOpts()+'</select></div>'+
-          '<div><label style="font-size:11px;font-weight:600;color:var(--text2);display:block;margin-bottom:4px">סגסוגת / סוג</label>'+
-            '<select id="rmGrade" onchange="rmGradeChanged()" style="width:100%;padding:5px 6px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:13px">'+gradeOpts(famData)+'</select></div>'+
-        '</div>'+
-        // Form + density
-        '<div style="display:grid;grid-template-columns:2fr 1fr;gap:10px">'+
-          '<div><label style="font-size:11px;font-weight:600;color:var(--text2);display:block;margin-bottom:4px">צורת חתך</label>'+
-            '<select id="rmForm" onchange="rmFormChanged()" style="width:100%;padding:5px 6px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:13px">'+formOpts()+'</select></div>'+
-          '<div><label style="font-size:11px;font-weight:600;color:var(--text2);display:block;margin-bottom:4px">צפיפות (kg/m³)</label>'+
-            '<input id="rmDensity" type="number" min="100" step="10" value="'+curDens+'" oninput="rmUpdateCalc()" style="width:100%;padding:5px 6px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:13px"></div>'+
-        '</div>'+
-        // Dimension fields (dynamic)
-        '<div><label style="font-size:11px;font-weight:600;color:var(--text2);display:block;margin-bottom:6px">מידות</label>'+
-          '<div id="rmDimFields" style="display:flex;flex-wrap:wrap;gap:8px">'+dimFields(formData)+'</div></div>'+
-        // Cost unit + unit cost
-        '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">'+
-          '<div><label style="font-size:11px;font-weight:600;color:var(--text2);display:block;margin-bottom:4px">יחידת מחיר</label>'+
-            '<select id="rmCostUnit" onchange="rmUpdateCalc()" style="width:100%;padding:5px 6px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:13px">'+
-              '<option value="kg"'+(curCostUnit==='kg'?' selected':'')+'>₪ / ק"ג</option>'+
-              '<option value="m"'+(curCostUnit==='m'?' selected':'')+'>₪ / מ"ר (Running)</option>'+
-              '<option value="m2"'+(curCostUnit==='m2'?' selected':'')+'>₪ / מ"ר (שטח)</option>'+
-            '</select></div>'+
-          '<div><label style="font-size:11px;font-weight:600;color:var(--text2);display:block;margin-bottom:4px">עלות ליחידה (₪)</label>'+
-            '<input id="rmUnitCost" type="number" min="0" step="0.1" value="'+(existing.unitCost||'')+'" placeholder="₪" oninput="rmUpdateCalc()" style="width:100%;padding:5px 6px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:13px"></div>'+
-        '</div>'+
-        // Live calculation
-        '<div style="font-size:9px;color:var(--text3);margin-bottom:3px;text-align:left">'+'↓ תיאור יחידת מלאי (L × חתך) | העלות/יחידה והמשקל/יחידה שלמטה אינם מועברים ישירות לטבלות — אך המחיר/קג משמש לחישובי החלק העליון'+'</div>'+'<div id="rmCalcResult" style="background:rgba(79,142,247,.08);border:1px solid rgba(79,142,247,.2);border-radius:6px;padding:10px;font-size:12px;min-height:52px"></div>'+
-      '</div>'+
-      '<div style="padding:10px 14px;border-top:1px solid var(--border);display:flex;justify-content:space-between;gap:8px">'+
-        '<button onclick="deleteRawMat(\''+safePb+'\')" style="padding:5px 12px;background:rgba(229,62,62,.1);border:1px solid rgba(229,62,62,.4);color:#e53e3e;border-radius:4px;cursor:pointer;font-size:12px">🗑 הסר</button>'+
-        '<div style="display:flex;gap:8px">'+
-          '<button onclick="saveRawMat(\''+safePb+'\')" style="padding:5px 16px;background:var(--accent);color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:12px">💾 שמור</button>'+
-          '<button onclick="document.getElementById(\'rawMatModal\').style.display=\'none\'" style="padding:5px 12px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;cursor:pointer;font-size:12px">ביטול</button>'+
-        '</div>'+
-      '</div>'+
-    '</div>';
-  m.style.display='flex';
-  m.dataset.tq = tq || 1;
-  m.dataset.arPb = _isRawMatItem ? pb : '';
-  setTimeout(function(){
-    rmUpdateCalc();
-    if (_isRawMatItem && window._arParents && window._arParents.length) arInitRowDisplays(pb);
-  }, 50);
-}
-
-// ─── AR: estimate dims from parent STEP file ─────────────────────────────────
-async function runARStepEstimate(pb) {
-  const btnEl    = document.getElementById('arEstBtn');
-  const resultEl = document.getElementById('arEstResult');
-  if (!btnEl || !resultEl) return;
-
-  const stpPath = (document.getElementById('arStpSelect')||{}).value || '';
-  if (!stpPath) { resultEl.innerHTML='<span style="color:#fc8181">⚠ בחר קובץ STEP</span>'; return; }
-
-  const origTxt = btnEl.textContent;
-  btnEl.disabled = true;
-  btnEl.textContent = '⟳ טוען…';
-  resultEl.innerHTML = '';
-
-  try {
-    if (!rootDirHandle && !(_graphMode && _msalAcct)) {
-      throw new Error('נדרשת כניסה ל-SharePoint כדי לטעון STEP');
-    }
-
-    // Load & parse (reuse cache if available)
-    let meshData = _geomCache.get(stpPath);
-    if (!meshData) {
-      resultEl.textContent = '⬇ מוריד STEP…';
-      const buf = await getFileBuffer(stpPath);
-      resultEl.textContent = '⚙️ מנתח גאומטריה…';
-      meshData = await parseStepInWorker(buf);
-      if (!meshData || !meshData.length) throw new Error('לא נמצאה גאומטריה ב-STEP');
-      _geomCache.set(stpPath, meshData);
-    }
-
-    const bbox = getBBoxFromMeshData(meshData);
-    if (!bbox) throw new Error('לא ניתן לחשב תיבה כוללת');
-
-    const formSel = document.getElementById('rmForm');
-    const form = formSel ? formSel.value : 'sheet';
-    const est  = estimateARDims(form, bbox);
-    if (!est) throw new Error('צורה לא נתמכת');
-
-    // Fill dimension fields
-    const setDim = function(key, val) {
-      const inp = document.querySelector('.rm-dim[data-key="'+key+'"]');
-      if (inp) { inp.value = val; inp.dispatchEvent(new Event('input')); }
-    };
-    setDim('L', est.L);
-    if (form === 'sheet' && est.W) setDim('W', est.W);
-
-    resultEl.innerHTML =
-      '<span style="color:#68d391">✓ '+est.note+'</span>';
-
-    if (typeof rmUpdateCalc === 'function') rmUpdateCalc();
-  } catch(e) {
-    resultEl.innerHTML = '<span style="color:#fc8181">⚠ '+e.message+'</span>';
-  } finally {
-    btnEl.disabled  = false;
-    btnEl.textContent = origTxt;
-  }
-}
-
-// ─── AR per-parent editor helpers ────────────────────────────────────────────
-function arParentDimChanged(pb, inp, rowIdx) {
-  const parentPb = inp.dataset.ppb;
-  const dimKey   = inp.dataset.dim;
-  const val      = inp.value;
-  // Persist to rawMatData if item already saved
-  if (rawMatData[pb]) {
-    if (!rawMatData[pb].perParent) rawMatData[pb].perParent = {};
-    if (!rawMatData[pb].perParent[parentPb]) rawMatData[pb].perParent[parentPb] = {dims:{}};
-    if (!rawMatData[pb].perParent[parentPb].dims) rawMatData[pb].perParent[parentPb].dims = {};
-    rawMatData[pb].perParent[parentPb].dims[dimKey] = val;
-  }
-  // Always refresh (reads from DOM inputs for unsaved items)
-  arRefreshRow(pb, rowIdx);
-  arRefreshAggregate(pb);
-}
-
-function arRefreshRow(pb, rowIdx) {
-  const massTd = document.getElementById('ar-pmass-'+rowIdx);
-  const subTd  = document.getElementById('ar-psub-'+rowIdx);
-  if (!massTd) return;
-  const row = document.getElementById('ar-prow-'+rowIdx);
-  if (!row) return;
-  const parentPb = row.dataset.ppb;
-  const tqRaw  = parseFloat(row.dataset.tq) || 1;
-  // Build effective rm: saved or fall back to editor inputs
-  let rm = rawMatData[pb];
-  const edDims = {};
-  document.querySelectorAll('#rawMatModal .rm-dim').forEach(function(inp){ if (inp.value) edDims[inp.dataset.key] = inp.value; });
-  const form    = document.getElementById('rmForm')?.value || (rm||{}).form || 'sheet';
-  const density = parseFloat(document.getElementById('rmDensity')?.value) || parseFloat((rm||{}).density) || 2700;
-  if (!rm) rm = {dims: edDims, density: density, form: form};
-  else if (Object.keys(edDims).length) rm = Object.assign({}, rm, {dims: Object.assign({}, rm.dims||{}, edDims)});
-  const uom     = (window._arUom||'').toLowerCase();
-  // Merge per-parent dims on top of base dims
-  const dims    = getARDimsForParent(pb, parentPb);  // base + perParent
-  // Supplement dims from the DOM inputs in this row (captures values not yet saved)
-  row.querySelectorAll('.ar-pdim').forEach(function(inp) {
-    if (inp.value && inp.dataset.dim && !dims[inp.dataset.dim]) dims[inp.dataset.dim] = inp.value;
-  });
-
-  // ── Restore STEP toggle if meshVolume already computed ──────────────────────
-  const resEl = document.getElementById('ar-presult-'+rowIdx);
-  if (resEl && rawMatData[pb] && rawMatData[pb].perParent && rawMatData[pb].perParent[parentPb]) {
-    const perP = rawMatData[pb].perParent[parentPb];
-    if (perP.meshVolume_m3 > 0 && !resEl.querySelector('button')) {
-      const massG = perP.meshVolume_m3 * density * 1000;
-      const massStr = massG >= 1000 ? (massG/1000).toFixed(3)+' kg' : massG.toFixed(1)+' g';
-      const vol_cm3 = (perP.meshVolume_m3 * 1e6).toFixed(1);
-      const useStep = !!perP.useStepVolume;
-      resEl.innerHTML =
-        '<span style="color:#68d391;font-size:9px" title="נפח STEP שמור">✓ '+vol_cm3+'cm³ · '+massStr+'</span>'
-        +'<br><button data-pb="'+pb+'" data-ppb="'+parentPb+'" onclick="toggleStepVolume(this.dataset.pb,this.dataset.ppb,this)"'
-        +' title="'+(useStep?'מחושב מנפח STEP — לחץ לביטול':'לחץ לחישוב עלות מנפח STEP')+'"'
-        +' style="font-size:9px;padding:1px 5px;margin-top:2px;border-radius:3px;border:1px solid var(--border);cursor:pointer;background:'+(useStep?'rgba(56,161,105,.2)':'var(--surface2)')+';color:'+(useStep?'#68d391':'var(--text3)')+'">STEP '+(useStep?'☑':'☐')+'</button>';
-    }
-  }
-
-  if (isARUnit(uom)) {
-    // AR: tqRaw = number of blanks. Per-blank dims required.
-    if (!dims.L) { massTd.textContent = ''; subTd.textContent = ''; return; }
-    const vol  = calcRawMatVolume(form, dims);
-    const mass = vol * density;
-    massTd.textContent = mass >= 0.001 ? (mass*1000).toFixed(0)+' g' : (mass*1e6).toFixed(0)+' mg';
-    subTd.textContent  = (mass*tqRaw >= 0.001 ? (mass*tqRaw).toFixed(3) : '<0.001')+' kg';
-  } else {
-    // M / M2: tqRaw = total length (m) or area (m²) from BOM. Mass computable directly.
-    const totalMass = _computeLinearMass(rm, uom, tqRaw);
-    // If blank L set via perParent: also show per-blank mass
-    if (dims.L) {
-      const blankDims = Object.assign({}, rm.dims||{}, dims);
-      const vol = calcRawMatVolume(form, blankDims);
-      const massPerBlank = vol * density;
-      massTd.textContent = massPerBlank >= 0.001 ? (massPerBlank*1000).toFixed(0)+' g' : '—';
-    } else {
-      massTd.textContent = '—';
-    }
-    subTd.textContent = totalMass >= 0.001 ? totalMass.toFixed(3)+' kg' : '—';
-  }
-}
-
-function arRefreshAggregate(pb) {
-  const aggEl = document.getElementById('arAggRow');
-  if (!aggEl) return;
-  // Build effective rm: saved data if available, else read current editor values
-  let rm = rawMatData[pb];
-  const edDims = {};
-  document.querySelectorAll('#rawMatModal .rm-dim').forEach(function(inp){ if (inp.value) edDims[inp.dataset.key] = inp.value; });
-  const density  = parseFloat(document.getElementById('rmDensity')?.value) || parseFloat((rm||{}).density) || 2700;
-  const form     = document.getElementById('rmForm')?.value || (rm||{}).form || 'sheet';
-  const uc       = parseFloat(document.getElementById('rmUnitCost')?.value) || parseFloat((rm||{}).unitCost) || 0;
-  const costUnit = document.getElementById('rmCostUnit')?.value || (rm||{}).costUnit || 'kg';
-  // For mass calculation: merge saved dims with editor dims (editor takes precedence for unsaved items)
-  const effectiveRm = rm ? rm : {dims: edDims, density: density, form: form};
-  if (!rm) rm = effectiveRm; // use editor values for the BOM loop below
-  if (rm && Object.keys(edDims).length) rm = Object.assign({}, rm, {dims: Object.assign({}, rm.dims||{}, edDims)});
-  if (rm) localStorage.setItem(RM_STORAGE_KEY, JSON.stringify(rawMatData));
-  const uom      = (window._arUom||'').toLowerCase();
-  const RAW_UOM  = /^(m2|m|ar|a\/r)$/i;
-  let totalMass = 0, totalArea = 0, counted = 0;
-
-  BOM.forEach(function(item, idx) {
-    if ((item.pb || item.pn) !== pb) return;
-    if (!RAW_UOM.test((item.uom||'').trim())) return;
-    const tq = item.tq || 0; if (!tq) return;
-    counted++;
-    if (isARUnit(item.uom)) {
-      // AR: use per-parent blank dims
-      const parentPb = getParentPbForBOMIndex(idx);
-      const dims = getARDimsForParent(pb, parentPb);
-      if (!dims.L) return;
-      const vol = calcRawMatVolume(form, dims);
-      totalMass += vol * density * tq;
-      if (form === 'sheet' && dims.W)
-        totalArea += (parseFloat(dims.L)/1000)*(parseFloat(dims.W)/1000)*tq;
-    } else {
-      // M / M2: mass derivable directly from BOM tq
-      totalMass += _computeLinearMass(rm, item.uom, tq);
-      if (uom === 'm2') totalArea += tq; // tq already in m²
-      if (uom === 'm') totalArea += tq; // tq in meters — reuse totalArea for total length
-    }
-  });
-  let totalCost = 0;
-  if (costUnit==='kg') totalCost = totalMass * uc;
-  else if (costUnit==='m2') totalCost = totalArea * uc;
-  else totalCost = totalMass * uc;
-  const total = window._arParents ? window._arParents.length : '?';
-  if (counted > 0) {
-    const qtyLabel = isARUnit(uom) ? '' : (uom==='m2' ? ' ('+totalArea.toFixed(3)+' m²)' : '');
-    var _areaLabel = uom==='m' ? totalArea.toFixed(2)+' m' : totalArea.toFixed(3)+' m²';
-    aggEl.innerHTML =
-      '<strong style="color:#68d391">סה"\u05db: '+totalMass.toFixed(2)+' kg</strong>'+
-      (totalArea>0 ? ' <span style="color:var(--text3);font-size:10px">('+_areaLabel+')</span>' : '')+
-      (uc ? ' · <strong style="color:var(--accent2)">'+fmtC(totalCost)+'</strong>' : '')+
-      ' <span style="color:var(--text3);font-size:10px">'+counted+'/'+total+' פריטי אב — <em>מזין את הטבלה הראשית</em></span>';
-  } else {
-    aggEl.textContent = isARUnit(uom) ? 'הזן L ו-W בטבלה כדי לחשב' : 'לא נמצאו פריטי אב ב-BOM';
-  }
-}
-
-function arInitRowDisplays(pb) {
-  let i = 0;
-  while (document.getElementById('ar-prow-'+i)) { arRefreshRow(pb, i); i++; }
-  arRefreshAggregate(pb);
-}
-
-// Toggle whether this per-parent BOM row uses STEP mesh volume or dims-based for cost
-// Handle manual STEP file selection (for rows without a linked STEP path in BOM)
-async function onManualStepSelected(pb, rowIdx, input) {
-  const file = input.files && input.files[0];
-  if (!file) return;
-  const row = document.getElementById('ar-prow-'+rowIdx);
-  const resultEl = document.getElementById('ar-presult-'+rowIdx);
-  if (!row) return;
-  const parentPb = row.dataset.ppb;
-  if (resultEl) resultEl.innerHTML = '<span style="color:var(--text3);font-size:9px">⏳</span>';
-  try {
-    const buf = await file.arrayBuffer();
-    const meshData = await parseStepInWorker(buf);
-    if (!meshData || !meshData.length) throw new Error('אין גיאומטריה ב-STEP');
-    const _meshVol_mm3 = computeMeshVolume(meshData);
-    const _meshVol_m3  = _meshVol_mm3 / 1e9;
-    const dens = parseFloat(document.getElementById('rmDensity')?.value)
-      || parseFloat((rawMatData[pb]||{}).density)
-      || 2700;
-    const massG = _meshVol_m3 * dens * 1000;
-    const massStr = massG >= 1000 ? (massG/1000).toFixed(3)+' kg' : massG.toFixed(1)+' g';
-    // Auto-init rawMatData[pb] if not yet saved
-    if (!rawMatData[pb]) {
-      const _f3 = document.getElementById('rmForm')?.value   || 'sheet';
-      const _d3 = parseFloat(document.getElementById('rmDensity')?.value) || 2700;
-      const _m3 = (typeof rmGetDims === 'function') ? rmGetDims() : {};
-      rawMatData[pb] = {family: document.getElementById('rmFamily')?.value||'',
-                        grade:  document.getElementById('rmGrade')?.value||'',
-                        form: _f3, density: _d3, dims: _m3,
-                        costUnit: document.getElementById('rmCostUnit')?.value||'kg',
-                        unitCost: parseFloat(document.getElementById('rmUnitCost')?.value)||0,
-                        perParent:{}};
-    }
-    // Persist
-    if (rawMatData[pb]) {
-      if (!rawMatData[pb].perParent) rawMatData[pb].perParent = {};
-      if (!rawMatData[pb].perParent[parentPb]) rawMatData[pb].perParent[parentPb] = {dims:{}};
-      rawMatData[pb].perParent[parentPb].meshVolume_m3 = _meshVol_m3;
-      const T_mm = parseFloat((rawMatData[pb].dims||{}).T) || 0;
-      if (T_mm > 0) rawMatData[pb].perParent[parentPb].stepArea_m2 = _meshVol_m3 / (T_mm/1000);
-      localStorage.setItem(RM_STORAGE_KEY, JSON.stringify(rawMatData));
-    }
-    if (resultEl) {
-      resultEl.innerHTML =
-        '<span style="color:#68d391;font-size:9px" title="'+file.name+'">✓ '+(_meshVol_mm3/1000).toFixed(1)+'cm³ · '+massStr+'</span>'
-        +' <button data-pb="'+pb+'" data-ppb="'+parentPb+'" onclick="toggleStepVolume(this.dataset.pb,this.dataset.ppb,this)"'
-        +' title="לחץ לחישוב עלות מנפח STEP"'
-        +' style="font-size:10px;padding:1px 6px;border-radius:3px;border:1px solid var(--border);cursor:pointer;background:var(--surface2);color:var(--text3)">STEP ☐</button>';
-    }
-    arRefreshRow(pb, rowIdx);
-    arRefreshAggregate(pb);
-  } catch(e) {
-    if (resultEl) resultEl.innerHTML = '<span style="color:#fc8181;font-size:9px" title="'+e.message+'">⚠ '+e.message.slice(0,30)+'</span>';
-  }
-  input.value = '';
-}
-
-function toggleStepVolume(pb, parentPb, btn) {
-  if (!rawMatData[pb] || !rawMatData[pb].perParent || !rawMatData[pb].perParent[parentPb]) return;
-  const perP = rawMatData[pb].perParent[parentPb];
-  if (!perP.meshVolume_m3) return;
-  perP.useStepVolume = !perP.useStepVolume;
-  localStorage.setItem(RM_STORAGE_KEY, JSON.stringify(rawMatData));
-  // Update button appearance
-  if (btn) {
-    btn.textContent = perP.useStepVolume ? 'STEP ☑' : 'STEP ☐';
-    btn.style.background = perP.useStepVolume ? 'rgba(56,161,105,.2)' : 'var(--surface2)';
-    btn.style.color = perP.useStepVolume ? '#68d391' : 'var(--text3)';
-    btn.title = perP.useStepVolume ? 'מחושב מנפח STEP' : 'מחושב ממידות';
-  }
-  // Recompute costs
-  try { computeTreeCosts(); buildCumulativeHours(); updateStats(); } catch(e){}
-}
-
-async function runARStepEstimateForParent(pb, rowIdx, btn) {
-  const stpPath = btn.dataset.stp || '';
-  const row = document.getElementById('ar-prow-'+rowIdx);
-  if (!row || !stpPath) return;
-  const parentPb = row.dataset.ppb;
-  const resultEl = document.getElementById('ar-presult-'+rowIdx);
-  const origTxt  = btn.textContent;
-  btn.disabled   = true;
-  btn.textContent = '⟳';
-  if (resultEl) resultEl.textContent = '';
-  try {
-    if (!rootDirHandle && !(_graphMode && _msalAcct))
-      throw new Error('נדרשת כניסה לטעינת STEP');
-    let meshData = _geomCache.get(stpPath);
-    if (!meshData) {
-      const buf = await getFileBuffer(stpPath);
-      meshData  = await parseStepInWorker(buf);
-      if (!meshData || !meshData.length) throw new Error('אין גאומטריה ב-STEP');
-      _geomCache.set(stpPath, meshData);
-    }
-    // Compute exact mesh volume (geometry-independent mass/cost)
-    const _meshVol_mm3 = computeMeshVolume(meshData);
-    const _meshVol_m3  = _meshVol_mm3 / 1e9;
-    const bbox = getBBoxFromMeshData(meshData);
-    if (!bbox) throw new Error('אין bounding box');
-    const form = document.getElementById('rmForm')?.value || (rawMatData[pb]||{}).form || 'sheet';
-    const est  = estimateARDims(form, bbox);
-    if (!est) throw new Error('צורה לא נתמכת');
-    // Always update UI inputs — works even for items not yet saved to rawMatData
-    row.querySelectorAll('.ar-pdim').forEach(function(inp) {
-      if (inp.dataset.dim === 'L') inp.value = est.L;
-      if (inp.dataset.dim === 'W' && est.W) inp.value = est.W;
-    });
-    // Fill main stock dim fields that are still 0 with cross-section hints from bbox
-    if (est.stockHints) {
-      var anyFilled = false;
-      Object.keys(est.stockHints).forEach(function(key) {
-        var inp = document.querySelector('#rawMatModal .rm-dim[data-key="'+key+'"]');
-        if (inp && (!inp.value || parseFloat(inp.value) === 0)) {
-          inp.value = est.stockHints[key];
-          inp.dispatchEvent(new Event('input')); // triggers rmUpdateCalc
-          anyFilled = true;
-        }
-      });
-    }
-    const _dens6 = parseFloat((rawMatData[pb]||{}).density) || ((MATERIAL_DB[(rawMatData[pb]||{}).family]||{}).density) || 1000;
-    const _mass6_g = _meshVol_m3 * _dens6 * 1000;
-    var _curUseStep6 = rawMatData[pb] && rawMatData[pb].perParent && rawMatData[pb].perParent[parentPb] && rawMatData[pb].perParent[parentPb].useStepVolume;
-    var _massStr6 = _mass6_g>=1000?(_mass6_g/1000).toFixed(3)+' kg':_mass6_g.toFixed(1)+' g';
-    var _btnBg6 = _curUseStep6 ? 'rgba(56,161,105,.2)' : 'var(--surface2)';
-    var _btnCl6 = _curUseStep6 ? '#68d391' : 'var(--text3)';
-    var _btnTx6 = 'STEP '+(_curUseStep6 ? '\u2611' : '\u2610');
-    if (resultEl) resultEl.innerHTML =
-      '<span style="color:#68d391;font-size:9px" title="'+est.note.replace(/"/g,'&quot;')+'">\u2713 '+(_meshVol_mm3/1000).toFixed(1)+'cm\u00b3 \u00b7 '+_massStr6+'</span>'
-      +'<br><button data-pb="'+pb+'" data-ppb="'+parentPb+'" onclick="toggleStepVolume(this.dataset.pb,this.dataset.ppb,this)"'
-      +' title="'+(_curUseStep6?'\u05de\u05d7\u05d5\u05e9\u05d1 \u05de\u05e0\u05e4\u05d7 STEP \u2014 \u05dc\u05d7\u05e5 \u05dc\u05d1\u05d9\u05d8\u05d5\u05dc':'\u05dc\u05d7\u05e5 \u05dc\u05d7\u05d9\u05e9\u05d5\u05d1 \u05e2\u05dc\u05d5\u05ea \u05de\u05e0\u05e4\u05d7 STEP')+'"'
-      +' style="font-size:9px;padding:1px 5px;border-radius:3px;border:1px solid var(--border);cursor:pointer;margin-top:2px;background:'+_btnBg6+';color:'+_btnCl6+'">'+_btnTx6+'</button>';
-    // Auto-init rawMatData[pb] from modal if not yet saved (so meshVolume can be stored)
-    if (!rawMatData[pb]) {
-      const _family2 = document.getElementById('rmFamily')?.value || '';
-      const _grade2  = document.getElementById('rmGrade')?.value  || '';
-      const _form2   = document.getElementById('rmForm')?.value   || 'sheet';
-      const _dens2   = parseFloat(document.getElementById('rmDensity')?.value) || 2700;
-      const _dims2   = (typeof rmGetDims === 'function') ? rmGetDims() : {};
-      const _cu2     = document.getElementById('rmCostUnit')?.value || 'kg';
-      const _uc2     = parseFloat(document.getElementById('rmUnitCost')?.value) || 0;
-      rawMatData[pb] = {family:_family2, grade:_grade2, form:_form2, density:_dens2,
-                        dims:_dims2, costUnit:_cu2, unitCost:_uc2, perParent:{}};
-    }
-    // Persist to rawMatData
-    if (rawMatData[pb]) {
-      if (!rawMatData[pb].perParent) rawMatData[pb].perParent = {};
-      if (!rawMatData[pb].perParent[parentPb]) rawMatData[pb].perParent[parentPb] = {dims:{}};
-      rawMatData[pb].perParent[parentPb].dims.L = String(est.L);
-      if (est.W) rawMatData[pb].perParent[parentPb].dims.W = String(est.W);
-      // Store exact volume (geometry-independent cost base)
-      rawMatData[pb].perParent[parentPb].meshVolume_m3 = _meshVol_m3;
-      var _T_mm6 = parseFloat((rawMatData[pb].dims||{}).T) || 0;
-      if (_T_mm6 > 0) rawMatData[pb].perParent[parentPb].stepArea_m2 = _meshVol_m3 / (_T_mm6 / 1000);
-      // Also persist cross-section hints to stock dims (only fills zeros, won't overwrite manual values)
-      if (est.stockHints && Object.keys(est.stockHints).length) {
-        if (!rawMatData[pb].dims) rawMatData[pb].dims = {};
-        Object.keys(est.stockHints).forEach(function(key) {
-          var cur = rawMatData[pb].dims[key];
-          if (!cur || parseFloat(cur) === 0) {
-            rawMatData[pb].dims[key] = String(est.stockHints[key]);
-          }
-        });
-      }
-      localStorage.setItem(RM_STORAGE_KEY, JSON.stringify(rawMatData));
-    }
-    arRefreshRow(pb, rowIdx);
-    arRefreshAggregate(pb);
-  } catch(e) {
-    if (resultEl) resultEl.innerHTML = '<span style="color:#fc8181;cursor:help" title="'+e.message+'">⚠</span>';
-  } finally {
-    btn.disabled = false;
-    btn.textContent = origTxt;
-  }
-}
-
-// ─── PL PDF Purchasing Info Lookup ───────────────────────────────────────────
-// Reads a Part-List PDF associated with the parent item, extracts the row
-// matching this raw material (pb), and fills in catalog number + full spec.
-const _pdfJsWorkerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
-
-async function _loadPdfJs() {
-  if (window.pdfjsLib) return window.pdfjsLib;
-  await new Promise(function(resolve, reject) {
-    const s = document.createElement('script');
-    s.src = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
-    s.onload = resolve; s.onerror = reject;
-    document.head.appendChild(s);
-  });
-  window.pdfjsLib.GlobalWorkerOptions.workerSrc = _pdfJsWorkerSrc;
-  return window.pdfjsLib;
-}
-
-async function _extractPdfText(buf) {
-  const pdfjs = await _loadPdfJs();
-  const pdf   = await pdfjs.getDocument({data: buf}).promise;
-  let text = '';
-  for (let p = 1; p <= pdf.numPages; p++) {
-    const page  = await pdf.getPage(p);
-    const tc    = await page.getTextContent();
-    text += tc.items.map(function(i){ return i.str; }).join(' ') + '\n';
-  }
-  return text;
-}
-
-// Parse a Part-List text body for a row matching the raw-material PN.
-// Returns {catalogNo, fullDesc, spec, qty, uom} or null.
-function _parsePlRowForPb(text, pb) {
-  const pbNorm = (pb||'').toUpperCase().replace(/\s+/g,' ').trim();
-  const lines  = text.split(/\n/);
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i].toUpperCase();
-    if (!line.includes(pbNorm.slice(0, 8))) continue; // quick pre-filter
-
-    // Collect surrounding lines as one logical row (PL tables can wrap)
-    const block = lines.slice(Math.max(0,i-1), Math.min(lines.length,i+4)).join(' ');
-
-    // Catalog number: long numeric sequence (6-12 digits) near the PN
-    const catMatch = block.match(/\b(\d{6,12})\b/);
-    const catalogNo = catMatch ? catMatch[1] : '';
-
-    // Full description: everything after the catalog number until a numeric qty
-    let fullDesc = block
-      .replace(/^.*?'+pbNorm.slice(0,8)+'/, '').trim()
-      .replace(/^[\d\s]+/, '').trim()
-      .slice(0, 120);
-
-    // Standard spec: AMS-xxxx, MIL-xxxx, ASTM-xxxx, DIN-xxxx etc.
-    const specMatch = block.match(/\b(AMS[\-\s][A-Z0-9\-]+|MIL[\-\s][A-Z0-9\-]+|ASTM[\s][A-Z][0-9\-]+|DIN[\s][0-9]+|ISO[\s][0-9]+)/i);
-    const spec = specMatch ? specMatch[0].trim() : '';
-
-    // Qty + UOM
-    const qtyMatch = block.match(/([\d.]+)\s*(M\b|M2\b|KG\b|EA\b|PC\b)/i);
-    const qty = qtyMatch ? parseFloat(qtyMatch[1]) : null;
-    const uom = qtyMatch ? qtyMatch[2].toUpperCase() : '';
-
-    if (catalogNo || fullDesc) {
-      return {catalogNo, fullDesc: fullDesc.trim(), spec, qty, uom};
-    }
-  }
-  return null;
-}
-
-async function runPLPdfLookup(pb, rowIdx, btn) {
-  const pdfPath = btn.dataset.pdf || '';
-  const row     = document.getElementById('ar-prow-'+rowIdx);
-  const resEl   = document.getElementById('ar-presult-'+rowIdx);
-  if (!pdfPath || !row) return;
-  const origTxt = btn.textContent;
-  btn.disabled  = true;
-  btn.textContent = '⟳';
-  if (resEl) resEl.textContent = '';
-  try {
-    if (!rootDirHandle && !(_graphMode && _msalAcct))
-      throw new Error('נדרשת כניסה לטעינת PDF');
-    const buf  = await getFileBuffer(pdfPath);
-    const text = await _extractPdfText(buf);
-    const info = _parsePlRowForPb(text, pb);
-    if (!info) throw new Error('לא נמצא פריט בPL');
-
-    // Build info tooltip + show in result span
-    const parts = [];
-    if (info.catalogNo) parts.push('קטלוג: '+info.catalogNo);
-    if (info.spec)      parts.push('תקן: '+info.spec);
-    if (info.qty && info.uom) parts.push(info.qty+' '+info.uom);
-    if (resEl) resEl.innerHTML =
-      '<span style="color:#63b3ed;cursor:help;font-size:9px" title="'+
-      (info.fullDesc||'').replace(/"/g,'&quot;')+'">' +
-      (parts.join(' · ') || info.fullDesc.slice(0,30)) +
-      '</span>';
-
-    // Persist to rawMatData if item saved; else store in _plInfoCache
-    window._plInfoCache = window._plInfoCache || {};
-    window._plInfoCache[pb] = info;
-    if (rawMatData[pb]) {
-      rawMatData[pb].catalogNo = info.catalogNo || rawMatData[pb].catalogNo;
-      rawMatData[pb].spec      = info.spec      || rawMatData[pb].spec;
-      localStorage.setItem(RM_STORAGE_KEY, JSON.stringify(rawMatData));
-    }
-  } catch(e) {
-    if (resEl) resEl.innerHTML =
-      '<span style="color:#fc8181;cursor:help;font-size:9px" title="'+e.message+'">⚠</span>';
-  } finally {
-    btn.disabled = false;
-    btn.textContent = origTxt;
-  }
-}
-
-function rmFamilyChanged() {
-  const fam = document.getElementById('rmFamily').value;
-  const fd = MATERIAL_DB[fam]||MATERIAL_DB.aluminum;
-  const grSel = document.getElementById('rmGrade');
-  grSel.innerHTML = fd.grades.map(function(g){ return '<option value="'+g.id+'">'+g.label+'</option>'; }).join('');
-  document.getElementById('rmDensity').value = fd.density;
-  rmUpdateCalc();
-}
-function rmGradeChanged() {
-  const fam = document.getElementById('rmFamily').value;
-  const gid = document.getElementById('rmGrade').value;
-  const fd  = MATERIAL_DB[fam]||MATERIAL_DB.aluminum;
-  const gr  = (fd.grades||[]).find(function(g){return g.id===gid;});
-  if (gr) document.getElementById('rmDensity').value = gr.density;
-  rmUpdateCalc();
-}
-function rmFormChanged() {
-  const formId = document.getElementById('rmForm').value;
-  const formData = MATERIAL_FORMS.find(function(f){return f.id===formId;})||MATERIAL_FORMS[0];
-  const container = document.getElementById('rmDimFields');
-  container.innerHTML = formData.dims.map(function(d){
-    return '<div style="display:flex;flex-direction:column;gap:2px">'+
-      '<label style="font-size:10px;color:var(--text2)">'+d.ph+' ('+d.u+')</label>'+
-      '<input class="rm-dim" data-key="'+d.k+'" type="number" min="0" step="0.1" value="" placeholder="0"'+
-      ' style="width:70px;padding:3px 5px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px"'+
-      ' oninput="rmUpdateCalc()"></div>';
+  // ── Build form dim fields ──────────────────────────────
+  const dimFields = formData.dims.map(function(d){
+    const val = mergedDims[d.k] || '';
+    return '<label style="display:flex;flex-direction:column;gap:3px;font-size:11px;color:var(--text2)">'+
+      d.k+(d.u?' ('+d.u+')':'')+'<br><span style="font-size:10px;opacity:.7">'+d.ph+'</span>'+
+      '<input class="rm-dim" data-key="'+d.k+'" value="'+val+'" placeholder="'+d.ph+'" '+
+      'style="width:90px;padding:4px 6px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px" '+
+      'oninput="rmUpdateCalc(window._curRmPb)"></label>';
   }).join('');
-  rmUpdateCalc();
-}
-function rmGetDims() {
-  const dims = {};
-  document.querySelectorAll('#rmDimFields .rm-dim').forEach(function(inp){ dims[inp.dataset.key]=inp.value; });
-  return dims;
-}
-function rmUpdateCalc() {
-  const form    = document.getElementById('rmForm')?.value || 'sheet';
-  const density = parseFloat(document.getElementById('rmDensity')?.value) || 1000;
-  const dims    = rmGetDims();
-  const vol     = calcRawMatVolume(form, dims);
-  const mass    = vol * density;
-  const uc      = parseFloat(document.getElementById('rmUnitCost')?.value) || 0;
-  const costUnit= document.getElementById('rmCostUnit')?.value || 'kg';
-  const tq      = parseInt(document.getElementById('rawMatModal')?.dataset.tq) || 1;
-  const m       = function(k){ return parseFloat(dims[k]) || 0; };
 
-  let costPer = 0;
-  switch(costUnit) {
-    case 'kg': costPer = mass * uc; break;
-    case 'm':  costPer = m('L') / 1000 * uc; break;
-    case 'm2': costPer = (m('L') / 1000) * (m('W') / 1000) * uc; break;
-    default:   costPer = mass * uc;
-  }
+  // ── Build family grade options ──────────────────────────
+  const famOpts = Object.keys(MATERIAL_DB).map(function(k){
+    return '<option value="'+k+'"'+(k===fam?' selected':'')+'>'+MATERIAL_DB[k].label+'</option>';
+  }).join('');
+  const gradeOpts = famData.grades.map(function(g){
+    return '<option value="'+g.id+'"'+(g.id===grade?' selected':'')+'>'+g.label+'</option>';
+  }).join('');
+  const formOpts = MATERIAL_FORMS.map(function(f){
+    return '<option value="'+f.id+'"'+(f.id===formId?' selected':'')+'>'+f.label+'</option>';
+  }).join('');
+  const costUnitOpts = ['kg','m','m2'].map(function(u){
+    return '<option value="'+u+'"'+(u===curCostUnit?' selected':'')+'>'+u+'</option>';
+  }).join('');
 
-  // Format mass: g if < 1 kg, else kg
-  const fmtMass = function(v) {
-    return v >= 1 ? v.toFixed(3) + ' kg' : (v * 1000).toFixed(1) + ' g';
-  };
-  const qm = function(k){ return m(k) ? m(k) : '?'; };
+  const existWaste = parseFloat(existing.wastePct)||0;
+  const existCost  = parseFloat(existing.unitCost)||0;
 
-  // Form-specific summary line
-  let summary = '';
-  switch(form) {
-    case 'sheet': {
-      const area = (m('L') / 1000) * (m('W') / 1000);
-      const areaStr = (m('L') && m('W'))
-        ? m('L').toFixed(0) + ' × ' + m('W').toFixed(0) + ' mm = ' + area.toFixed(4) + ' m²'
-        : '? × ? mm';
-      summary = '<span style="color:var(--text3)">⬛</span> ' + areaStr +
-                ' · <strong>T=' + qm('T') + ' mm</strong>' +
-                ' · <strong style="color:#68d391">' + fmtMass(mass) + '</strong>';
-      break;
-    }
-    case 'bar_round':
-    case 'tube_round':
-    case 'bar_square':
-    case 'tube_square':
-    case 'tube_rect':
-    case 'angle':
-    case 'profile': {
-      // For linear M-type materials: if L not set, show per-meter rate
-      const _isM  = (window._arUom||'').toUpperCase() === 'M';
-      const _hasL = m('L') > 0;
-      const _icon = {bar_round:'●', tube_round:'◎', bar_square:'▬', tube_square:'□', tube_rect:'▭', angle:'∟', profile:'⬡'}[form] || '▬';
-      // Cross-section description
-      const _xsec = (function(){
-        switch(form){
-          case 'bar_round':  return '⌀'+qm('D')+' mm';
-          case 'tube_round': return '⌀'+qm('D')+'/⌀'+qm('d')+' mm';
-          case 'bar_square': return qm('S')+'×'+(m('S2')||qm('S'))+' mm';
-          case 'tube_square':return '□'+qm('S')+'×t='+qm('t')+' mm';
-          case 'tube_rect':  return qm('W')+'×'+qm('H')+'×t='+qm('t')+' mm';
-          case 'angle':      return qm('W')+'×'+(m('W2')||qm('W'))+'×T='+qm('T')+' mm';
-          case 'profile':    return 'A='+qm('A')+' mm²';
-          default: return '';
-        }
-      })();
-      if (_isM && !_hasL) {
-        // Per-meter mass rate (set L=1000 for reference)
-        const _ndM = Object.assign({}, dims, {L:'1000'});
-        const _massPerM = calcRawMatVolume(form, _ndM) * density;
-        summary = '<span style="color:var(--text3)">'+_icon+'</span>' +
-                  ' <strong>'+_xsec+'</strong>' +
-                  ' · <strong style="color:#68d391">'+fmtMass(_massPerM)+'/m</strong>';
-      } else {
-        summary = '<span style="color:var(--text3)">'+_icon+'</span>' +
-                  ' <strong>'+_xsec+'</strong>' +
-                  ' · L='+qm('L')+' mm' +
-                  ' · <strong style="color:#68d391">'+fmtMass(mass)+'</strong>';
-      }
-      break;
-    }
-    default: {
-      summary = '<strong style="color:#68d391">' + fmtMass(mass) + '</strong>' +
-                ' · נפח=' + (vol * 1e6).toFixed(2) + ' cm³';
-    }
-  }
-
-  const resEl = document.getElementById('rmCalcResult');
-  if (!resEl) return;
-  const _arPb = document.getElementById('rawMatModal')?.dataset.arPb || '';
-  resEl.innerHTML =
-    '<div style="font-size:12px;margin-bottom:6px;padding-bottom:6px;border-bottom:1px solid var(--border)">' + summary + '</div>' +
-    '<div style="display:flex;gap:16px;flex-wrap:wrap;font-size:12px">'+
-    '<div><span style="color:var(--text2)">נפח: </span><strong>'+(vol*1e6).toFixed(3)+' cm³</strong></div>'+
-    '<div><span style="color:var(--text2)">משקל/יחידה: </span><strong>'+fmtMass(mass)+'</strong></div>'+
-    '<div><span style="color:var(--text2)">עלות/יחידה: </span><strong>'+fmtC(costPer)+'</strong></div>'+
-    (_arPb
-      ? '<div style="color:var(--text3);font-size:10px">סה"כ — ראה טבלת פריטי אב ↑</div>'
-      : '<div><span style="color:var(--text2)">סה"כ TQ='+tq+': </span><strong style="color:var(--accent2)">'+fmtC(costPer*tq)+'</strong></div>')+
-    '</div>';
-  if (_arPb) {
-    let _ri = 0;
-    while (document.getElementById('ar-prow-'+_ri)) { arRefreshRow(_arPb, _ri); _ri++; }
-    arRefreshAggregate(_arPb);
-  }
-}
-
-function saveRawMat(pb) {
-  const family = document.getElementById('rmFamily').value;
-  const grade  = document.getElementById('rmGrade').value;
-  const form   = document.getElementById('rmForm').value;
-  const density= parseFloat(document.getElementById('rmDensity').value)||2700;
-  const dims   = rmGetDims();
-  const costUnit=document.getElementById('rmCostUnit').value;
-  const unitCost=parseFloat(document.getElementById('rmUnitCost').value)||0;
-  const _existRM = rawMatData[pb] || {};
-  rawMatData[pb] = {family,grade,form,dims,density,costUnit,unitCost,perParent:_existRM.perParent||{}};
-  localStorage.setItem(RM_STORAGE_KEY, JSON.stringify(rawMatData));
-  document.getElementById('rawMatModal').style.display='none';
-  computeTreeCosts(); refreshCostCells();
-  buildTable(); applyFilters();
-  if(document.getElementById('mtp-rawmat')&&document.getElementById('mtp-rawmat').classList.contains('active')) _populateRawmatTab(true);
-}
-function deleteRawMat(pb) {
-  delete rawMatData[pb];
-  localStorage.setItem(RM_STORAGE_KEY, JSON.stringify(rawMatData));
-  document.getElementById('rawMatModal').style.display='none';
-  computeTreeCosts(); refreshCostCells();
-  buildTable(); applyFilters();
-  if(document.getElementById('mtp-rawmat')&&document.getElementById('mtp-rawmat').classList.contains('active')) _populateRawmatTab(true);
-}
-
-// ─── AI Price Search ─────────────────────────────────────
-// Israeli suppliers — Google site-search links (always reliable, no invented URLs)
-const IL_SUPPLIERS = [
-  {name:'גלבורג',        domain:'galborg.co.il'},
-  {name:'בית המיסב',     domain:'hmisab.co.il'},
-  {name:'ברסיס',         domain:'brasis.co.il'},
-  {name:'טלמיר',         domain:'talmir.co.il'},
-  {name:'4project',      domain:'4project.co.il'},
-  {name:'מיברג',         domain:'miberg.co.il'},
-  {name:'TSC',           domain:'tsc.co.il'},
-  {name:'אום ובורגג',    domain:'om-burgag.co.il'},
-  {name:'סקופ',          domain:'scoop.co.il'},
-  {name:'ברמיל',         domain:'barmil.co.il'},
-];
-
-// ── Standard equivalents (ISO ↔ DIN) ──────────────────────────────────────────
-const STD_EQUIV = {
-  'ISO10642':'DIN7991',  'DIN7991':'ISO10642',  // countersunk hex socket
-  'ISO4762' :'DIN912',   'DIN912' :'ISO4762',   // hex socket cap screw
-  'ISO4014' :'DIN931',   'DIN931' :'ISO4014',   // hex bolt partial thread
-  'ISO4017' :'DIN933',   'DIN933' :'ISO4017',   // hex bolt full thread
-  'ISO4032' :'DIN934',   'DIN934' :'ISO4032',   // hex nut
-  'ISO7380' :'DIN7380',  'DIN7380':'ISO7380',   // button head
-  'ISO7089' :'DIN125',   'DIN125' :'ISO7089',   // flat washer
-  'ISO7090' :'DIN125A',                          // flat washer chamfered
-  'ISO7092' :'DIN433',   'DIN433' :'ISO7092',   // small washer
-  'ISO7093' :'DIN9021',  'DIN9021':'ISO7093',   // large washer
-  'ISO4026' :'DIN913',   'DIN913' :'ISO4026',   // grub flat tip
-  'ISO4027' :'DIN914',   'DIN914' :'ISO4027',   // grub cone tip
-  'ISO4028' :'DIN915',   'DIN915' :'ISO4028',   // grub dog tip
-  'ISO4029' :'DIN916',   'DIN916' :'ISO4029',   // grub cup tip
-  'ISO7045' :'DIN7985',  'DIN7985':'ISO7045',   // pan head cross
-  'ISO1207' :'DIN84',    'DIN84'  :'ISO1207',   // slotted cheese head
-  'ISO4026' :'DIN913',
-  'ISO10644':'DIN6912',  'DIN6912':'ISO10644',  // low head cap screw
-  'ISO4161' :'DIN6923',  'DIN6923':'ISO4161',   // flange nut
-  'ISO6922' :'DIN7991',  // (rare alias)
-};
-// A2=304, A4=316, A5=316 high-Mo (ISO 3506 material codes)
-const MAT_GRADE_EXPAND = {'A2':'304','A4':'316','A5':'316'};
-
-// Append SS grade after A2/A4/A5 so Google finds it
-function _expandMatGrade(term) {
-  return term.replace(/\b(A[245])\b/gi, function(m) {
-    const g = MAT_GRADE_EXPAND[m.toUpperCase()];
-    return g ? m + ' ' + g : m;
-  });
-}
-
-// Return equivalent standard designation (same size/grade, different org)
-// e.g. "ISO10642 M6X25 10.9 A5" → "DIN7991 M6X25 10.9 A5"
-function _getStdEquiv(simplifiedTerm) {
-  const m = simplifiedTerm.match(/^([A-Z]+\d+)/i);
-  if (!m) return '';
-  const stdNum = m[1].toUpperCase();
-  const eq = STD_EQUIV[stdNum];
-  if (!eq) return '';
-  return eq + simplifiedTerm.slice(stdNum.length);  // swap prefix, keep rest
-}
-
-// Simplify ISO/DIN designation for Google: keep standard + size, drop surface codes
-// ISO10642-M6X25-10.9-A5D → "ISO10642 M6X25 10.9 A5"
-function _simplifyStd(term) {
-  if (!/^(ISO|DIN|EN|ASTM|GB|BS|NF|JIS|UNI)\d/i.test(term)) return term;
-  const parts = term.split(/[-\s]+/);
-  const kept = parts.filter(function(p, i) {
-    if (i === 0) return true;                            // always keep standard number
-    if (/^M\d+([Xx×]\d+)?$/i.test(p)) return true;     // M6, M6X25
-    if (/^\d+\.\d+$/.test(p)) return true;              // 10.9, 8.8
-    if (/^(A2|A4|A5|70|80)$/i.test(p)) return true;    // stainless grade
-    if (/^\d{1,2}$/.test(p) && parseInt(p) <= 64) return true; // size number (M6 washer → "6")
-    return false; // drop: A5D, A5T, HDG, 200HV, etc.
-  });
-  return kept.join(' ').trim() || term;
-}
-
-// Extract a meaningful search term — use technical designation when available
-function _extractSearchTerm(pb, desc, cat) {
-  const pbT = (pb || '').trim();
-  const catT = (cat || '').trim();
-
-  // Case 1: pb IS a standard technical designation (ISO/DIN/EN/ASTM + specs)
-  // e.g. "ISO10642-M6X25-10.9-A5D", "DIN934-M8-8", "M6X25"
-  if (/^(ISO|DIN|EN|ASTM|GB|BS|NF|JIS|UNI)\d/i.test(pbT) || /^M\d+[Xx×\-]/i.test(pbT)) {
-    return pbT.slice(0, 70);
-  }
-
-  // Case 2: pb looks like a raw material spec (contains grade + dims, not pure sequential)
-  // e.g. "TR S235JRH 100X50X3.5MM" — has useful technical info
-  if (/[Xx×]\d/.test(pbT) && !/^\d+[\.\-]\d+[\.\-]\d+/.test(pbT)) {
-    return pbT.slice(0, 60);
-  }
-
-  // Case 3: pb is internal sequential number → use description
-  // e.g. "14020.080.001", "6910M280-001/C", "400224323"
-  // Clean description: commas→spaces, strip filler words
-  const cleanDesc = (desc || '')
-    .replace(/,/g, ' ')
-    .replace(/\b(STANDARD|COMMERCIAL|GENERIC|ASSEMBLY|PART|ITEM|COMPONENT|NON-LOCKIN|LOCKIN|CO\b)\b/gi, '')
-    .replace(/\s{2,}/g, ' ')
-    .trim();
-
-  // Prepend cat if it adds technical info (e.g. "ISO10642" without the full spec)
-  if (catT && /^(ISO|DIN|EN|ASTM|M\d)/i.test(catT) && !cleanDesc.toLowerCase().includes(catT.toLowerCase().slice(0,4))) {
-    return (catT + ' ' + cleanDesc).slice(0, 70);
-  }
-
-  return cleanDesc.slice(0, 70) || pbT;
-}
-
-function _buildSupplierLinks(pb, desc, cat) {
-  const fullTerm  = _extractSearchTerm(pb, desc, cat);
-  const simpTerm  = _expandMatGrade(_simplifyStd(fullTerm));  // ISO10642 M6X25 10.9 A5 316
-  const equivTerm = _getStdEquiv(simpTerm);                   // DIN7991 M6X25 10.9 A5 316 (or '')
-
-  const tFull  = encodeURIComponent(fullTerm);
-  const tSimp  = encodeURIComponent(simpTerm);
-  const tEquiv = equivTerm ? encodeURIComponent(equivTerm) : '';
-  const tPrice = encodeURIComponent(simpTerm + ' price');     // with PRICE suffix
-
-  const links = [];
-
-  // ── Tier 1: Israeli ─────────────────────────────────────
-  links.push({group:'🇮🇱 ישראל', label:'גוגל ישראל', il:true,
-    href:'https://www.google.com/search?q='+tPrice+'+site%3Aco.il'});
-  // Equivalent standard — Google IL
-  if (equivTerm) {
-    links.push({group:null, label:'גוגל ישראל ('+equivTerm.split(' ')[0]+')', il:true,
-      href:'https://www.google.com/search?q='+encodeURIComponent(equivTerm+' price')+'+site%3Aco.il'});
-  }
-  IL_SUPPLIERS.forEach(function(s){
-    links.push({group:null, label:'🇮🇱 '+s.name, il:true,
-      href:'https://www.google.com/search?q='+tSimp+'+site%3A'+encodeURIComponent(s.domain)});
-  });
-
-  // ── Tier 2: International fallback ──────────────────────
-  links.push({group:'🌍 חו"ל (אם לא נמצא בישראל)', label:'RS Components', il:false,
-    href:'https://il.rs-online.com/web/c/?searchTerm='+tFull});
-  if (equivTerm) {
-    links.push({group:null, label:'RS ('+equivTerm.split(' ')[0]+')', il:false,
-      href:'https://il.rs-online.com/web/c/?searchTerm='+tEquiv});
-  }
-  links.push({group:null, label:'TME (EU)', il:false,
-    href:'https://www.tme.eu/il/en/katalog/?search='+tFull});
-  links.push({group:null, label:'McMaster', il:false,
-    href:'https://www.mcmaster.com/#'+tSimp});
-  links.push({group:null, label:'Aliexpress', il:false,
-    href:'https://www.aliexpress.com/wholesale?SearchText='+tFull});
-  links.push({group:null, label:'גוגל כללי', il:false,
-    href:'https://www.google.com/search?q='+tPrice+'+buy'});
-
-  return links;
-}
-
-function openAIPriceSearch(pb, desc, cat) {
-  const safePb = pb.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
-  const safeDesc = desc.replace(/'/g,"\\'").slice(0,60);
-  let m = document.getElementById('aiPriceModal');
-  if (!m) { m=document.createElement('div'); m.id='aiPriceModal'; m.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:3500;display:none;align-items:center;justify-content:center'; document.body.appendChild(m); }
-  const apiKey = localStorage.getItem(ANOM_API_KEY)||'';
-
-  const _rawST   = _extractSearchTerm(pb, desc, cat);
-  const _simpST  = _expandMatGrade(_simplifyStd(_rawST));
-  const _equivST = _getStdEquiv(_simpST);
-  const searchTerm = _simpST + (_equivST ? ' / '+_equivST : '');  // displayed in header
-  const links = _buildSupplierLinks(pb, desc, cat);
-  // Build two-tier links HTML: Israeli tier first, then international
-  const ilLinks  = links.filter(function(l){ return l.il; });
-  const intLinks = links.filter(function(l){ return !l.il; });
-  function _renderTier(arr, color) {
-    return arr.map(function(l){
-      return '<a href="'+l.href+'" target="_blank" class="btn" style="font-size:10px;text-decoration:none;'+color+'">'+l.label+'</a>';
-    }).join('');
-  }
-  const ilBtns  = _renderTier(ilLinks,  'border-color:rgba(56,161,105,.5);color:#68d391');
-  const intBtns = _renderTier(intLinks, 'border-color:rgba(100,150,255,.5);color:#90b8ff');
-
-  m.innerHTML =
-    '<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;width:600px;max-height:88vh;display:flex;flex-direction:column;overflow:hidden">'+
-      '<div style="padding:12px 16px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">'+
-        '<div><div style="font-weight:700;font-size:13px">🤖 חיפוש מחיר ב-AI</div>'+
-          '<div style="font-size:11px;color:var(--text2);font-family:monospace">'+pb+'</div>'+
-          '<div style="font-size:11px;color:var(--text2)">'+desc+'</div>'+
-          '<div style="margin-top:4px;font-size:10px;color:var(--text3)">🔍 מחפש לפי: <span style="color:var(--accent2);font-weight:600">'+searchTerm+'</span></div>'+
-        '</div>'+
-        '<button onclick="document.getElementById(\'aiPriceModal\').style.display=\'none\'" style="padding:4px 10px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;cursor:pointer">✕</button>'+
-      '</div>'+
-      '<div style="padding:12px 16px;display:flex;flex-direction:column;gap:10px;overflow-y:auto;flex:1">'+
-        // API Key + search button
-        '<div style="display:flex;gap:8px;align-items:center">'+
-          '<span style="font-size:11px;color:var(--text2);flex-shrink:0">🔑 API Key:</span>'+
-          '<input type="password" id="aiPriceKey" value="'+apiKey+'" placeholder="sk-ant-api03-…"'+
-          ' style="flex:1;padding:4px 8px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:11px;font-family:monospace">'+
-          '<button onclick="runAIPriceSearch(\''+safePb+'\',\''+safeDesc+'\',\''+cat+'\')" style="padding:4px 14px;background:var(--accent);color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:12px;white-space:nowrap">🔍 חפש AI</button>'+
-        '</div>'+
-        // Quick-links — two tiers
-        '<div style="display:flex;flex-direction:column;gap:8px">'+
-          '<div>'+
-            '<div style="font-size:10px;color:#68d391;margin-bottom:4px;font-weight:600">🇮🇱 ספקים ישראלים</div>'+
-            '<div style="display:flex;gap:5px;flex-wrap:wrap">'+ilBtns+'</div>'+
-          '</div>'+
-          '<div>'+
-            '<div style="font-size:10px;color:#90b8ff;margin-bottom:4px;font-weight:600">🌍 חו"ל — אם לא נמצא בישראל</div>'+
-            '<div style="display:flex;gap:5px;flex-wrap:wrap">'+intBtns+'</div>'+
-          '</div>'+
-        '</div>'+
-        // AI results
-        '<div id="aiPriceResult" style="min-height:60px"></div>'+
-        // Manual entry
-        '<div style="border-top:1px solid var(--border);padding-top:10px">'+
-          '<div style="font-size:11px;font-weight:600;color:var(--text2);margin-bottom:6px">הזן מחיר ידנית (לאחר אימות):</div>'+
-          '<div style="display:grid;grid-template-columns:70px 100px 1fr;gap:8px">'+
-            '<select id="aiPriceCur" style="padding:4px 6px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px">'+
-              '<option value="ILS">₪ ILS</option><option value="USD">$ USD</option><option value="EUR">€ EUR</option>'+
-            '</select>'+
-            '<input id="aiPriceVal" type="number" min="0" step="0.01" placeholder="מחיר" style="padding:4px 6px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px">'+
-            '<input id="aiPriceUrl" type="text" placeholder="קישור לעמוד מוצר / חיפוש" style="padding:4px 6px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px">'+
-          '</div>'+
-        '</div>'+
-      '</div>'+
-      '<div style="padding:10px 14px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:8px">'+
-        '<button onclick="saveAIPrice(\''+safePb+'\')" style="padding:5px 16px;background:var(--accent);color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:12px">💾 שמור מחיר</button>'+
-        '<button onclick="document.getElementById(\'aiPriceModal\').style.display=\'none\'" style="padding:5px 12px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;cursor:pointer;font-size:12px">ביטול</button>'+
-      '</div>'+
+  m.innerHTML = '<div style="background:var(--surface1);border:1px solid var(--border);border-radius:10px;width:640px;max-width:96vw;max-height:88vh;overflow-y:auto;padding:20px 22px;position:relative;box-shadow:0 8px 40px rgba(0,0,0,.5)">' +
+    '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">'+
+    '<div style="font-size:15px;font-weight:700;color:var(--text)">🧱 הגדרת חומר גלם</div>'+
+    '<div style="font-size:12px;color:var(--text3);font-family:monospace;max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+pb+'">'+pb+'</div>'+
+    '<button onclick="closeRawMat()" style="background:none;border:none;color:var(--text3);cursor:pointer;font-size:18px;padding:2px 6px">✕</button>'+
+    '</div>'+
+    (desc ? '<div style="font-size:11px;color:var(--text3);margin-bottom:10px">'+desc+'</div>' : '')+
+    detectedBanner+
+    arBanner+
+    '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:12px">'+
+    '<label style="display:flex;flex-direction:column;gap:4px;font-size:11px;color:var(--text2)">משפחת חומר'+
+      '<select id="rmFamily" style="padding:5px 6px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:5px;font-size:12px" onchange="rmOnFamilyChange(window._curRmPb)">'+famOpts+'</select></label>'+
+    '<label style="display:flex;flex-direction:column;gap:4px;font-size:11px;color:var(--text2)">סגסוגת / דרגה'+
+      '<select id="rmGrade" style="padding:5px 6px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:5px;font-size:12px" onchange="rmUpdateCalc(window._curRmPb)">'+gradeOpts+'</select></label>'+
+    '<label style="display:flex;flex-direction:column;gap:4px;font-size:11px;color:var(--text2)">צורה'+
+      '<select id="rmForm" style="padding:5px 6px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:5px;font-size:12px" onchange="rmOnFormChange(window._curRmPb)">'+formOpts+'</select></label>'+
+    '</div>'+
+    '<div style="margin-bottom:12px"><div style="font-size:11px;color:var(--text3);margin-bottom:6px">מידות חתך (mm)</div>'+
+      '<div id="rmDimFields" style="display:flex;flex-wrap:wrap;gap:10px">'+dimFields+'</div></div>'+
+    '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px">'+
+    '<label style="display:flex;flex-direction:column;gap:4px;font-size:11px;color:var(--text2)">צפיפות (kg/m³)'+
+      '<input id="rmDensity" type="number" value="'+curDens+'" min="100" max="25000" step="10" '+
+      'style="padding:5px 6px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:5px;font-size:12px" '+
+      'oninput="rmUpdateCalc(window._curRmPb)"></label>'+
+    '<label style="display:flex;flex-direction:column;gap:4px;font-size:11px;color:var(--text2)">מחיר/יחידה'+
+      '<input id="rmUnitCost" type="number" value="'+(existCost||'')+'" min="0" step="0.01" placeholder="₪" '+
+      'style="padding:5px 6px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:5px;font-size:12px" '+
+      'oninput="rmUpdateCalc(window._curRmPb)"></label>'+
+    '<label style="display:flex;flex-direction:column;gap:4px;font-size:11px;color:var(--text2)">יחידת מחיר'+
+      '<select id="rmCostUnit" style="padding:5px 6px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:5px;font-size:12px" '+
+      'onchange="rmUpdateCalc(window._curRmPb)">'+costUnitOpts+'</select></label>'+
+    '<label style="display:flex;flex-direction:column;gap:4px;font-size:11px;color:var(--text2)" title="% חומר גלם שנזרק (נסטינג / שאריות חיתוך)">'+
+      '% פסולת / waste'+
+      '<input id="rmWastePct" type="number" value="'+(existWaste||'')+'" min="0" max="200" step="1" placeholder="0" '+
+      'style="padding:5px 6px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:5px;font-size:12px" '+
+      'oninput="rmUpdateCalc(window._curRmPb)"></label>'+
+    '</div>'+
+    '<div id="rmCalcResult" style="background:rgba(66,153,225,.08);border:1px solid rgba(66,153,225,.3);border-radius:6px;padding:10px 12px;margin-bottom:14px;font-size:12px;color:var(--text2);min-height:36px"></div>'+
+    '<div style="display:flex;gap:10px;justify-content:flex-end">'+
+    '<button onclick="closeRawMat()" style="padding:7px 18px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:5px;cursor:pointer;font-size:13px">ביטול</button>'+
+    '<button onclick="saveRawMat(window._curRmPb)" style="padding:7px 20px;background:var(--accent);border:none;color:#fff;border-radius:5px;cursor:pointer;font-size:13px;font-weight:600">💾 שמור</button>'+
+    '</div>'+
     '</div>';
   m.style.display='flex';
+  m.onclick=function(ev){if(ev.target===m)closeRawMat();};
+  setTimeout(function(){
+    rmUpdateCalc(pb);
+    if(_isRawMatItem) _arParents.forEach(function(p,i){ arRefreshRow(pb,i); });
+  },50);
 }
 
-async function runAIPriceSearch(pb, desc, cat) {
-  const key = document.getElementById('aiPriceKey').value.trim();
-  if (!key) { alert('נא להזין API Key'); return; }
-  localStorage.setItem(ANOM_API_KEY, key);
-  const resEl = document.getElementById('aiPriceResult');
-  resEl.innerHTML = '<span class="anom-ai-spinner">⟳</span> מחפש מחיר…';
+function closeRawMat(){
+  const m=document.getElementById('rawMatModal');
+  if(m) m.style.display='none';
+}
 
-  // Build enriched search term: simplified + material grade expansion + equivalent standard
-  const rawTerm    = _extractSearchTerm(pb, desc, cat);
-  const simpTerm   = _expandMatGrade(_simplifyStd(rawTerm)); // ISO10642 M6X25 10.9 A5 316
-  const equivTerm  = _getStdEquiv(simpTerm);                 // DIN7991 M6X25 10.9 A5 316
-  const searchTerm2 = simpTerm + (equivTerm ? ' / '+equivTerm : '');
-
-  const ilSupplierNames = IL_SUPPLIERS.map(function(s){return s.name;}).join(', ');
-  const prompt =
-    'אתה מסייע לרכש הנדסי. כלל ברזל: אל תמציא מחיר. אל תעריך. אל תשער.\n'+
-    'החזר תוצאה רק אם יש לך ידע ממשי ואמין על מחיר אמיתי של הפריט.\n'+
-    'אם אין לך מחיר ממשי ממקור ידוע — החזר מערך ריק בלבד: []\n\n'+
-    'אם יש מחיר ממשי, ציין ספק מהרשימה בלבד: '+ilSupplierNames+', McMaster-Carr, Aliexpress, TME.\n'+
-    'searchUrl: null תמיד. אל תמציא URL.\n\n'+
-    'פורמט JSON בלבד:\n'+
-    '[{"supplier":"שם","price":0.00,"currency":"ILS","searchUrl":null,"note":"מקור הידע"}]\n\n'+
-    'מה מחפשים: '+searchTerm2+'\n'+
-    (equivTerm ? '(תקן מקביל: '+simpTerm.split(' ')[0]+' = '+equivTerm.split(' ')[0]+' — חפש שניהם)\n' : '')+
-    '(מק"ט פנימי '+pb+' — לא רלוונטי לחיפוש, אל תשתמש בו)';
-
-  try {
-    const resp = await fetch('https://api.anthropic.com/v1/messages', {
-      method:'POST',
-      headers:{'Content-Type':'application/json','x-api-key':key,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
-      body:JSON.stringify({model:'claude-haiku-4-5-20251001',max_tokens:700,messages:[{role:'user',content:prompt}]})
-    });
-    if (!resp.ok) { const e=await resp.json().catch(function(){return{};}); throw new Error(e.error&&e.error.message||resp.status); }
-    const data = await resp.json();
-    const text = data.content&&data.content[0]?data.content[0].text:'';
-    const jm = text.match(/\[[\s\S]*\]/);
-    if (!jm) throw new Error('תשובה לא תקינה');
-    const results = JSON.parse(jm[0]).filter(function(r){ return r.price && r.price > 0; });
-    const ilNames = IL_SUPPLIERS.map(function(s){return s.name;});
-    const isIL = function(r){ return ilNames.some(function(n){ return (r.supplier||'').includes(n); }); };
-    if (!results.length) {
-      resEl.innerHTML =
-        '<div style="background:rgba(237,137,54,.08);border:1px solid rgba(237,137,54,.3);border-radius:5px;padding:10px 12px;font-size:12px;color:var(--text2)">'+
-        '📭 אין מידע מחיר אמין לפריט זה.<br>'+
-        '<span style="font-size:11px;color:var(--text3)">השתמש בקישורי החיפוש מעל לבדיקה ישירה מול הספקים, ואז הזן מחיר ידנית.</span>'+
-        '</div>';
-      return;
-    }
-    resEl.innerHTML =
-      '<div style="font-size:10px;color:var(--text3);margin-bottom:6px">מחירים ממקורות ידועים — אמת מול הספק לפני שמירה. לחץ על כרטיס להעתקה.</div>'+
-      results.map(function(r){
-        const il = isIL(r);
-        const sym = r.currency==='ILS'?'₪':r.currency==='USD'?'$':'€';
-        const ilBadge = il ? '<span style="font-size:9px;background:rgba(56,161,105,.2);color:#68d391;border-radius:3px;padding:1px 4px;margin-left:4px">🇮🇱</span>' : '';
-        return '<div style="border:1px solid '+(il?'rgba(56,161,105,.4)':'var(--border)')+';border-radius:5px;padding:8px 10px;margin-bottom:6px;background:var(--surface2);cursor:pointer" '+
-          'onclick="applyAIPrice('+r.price+',\''+r.currency+'\',\'\')">'+
-          '<div style="display:flex;align-items:center;justify-content:space-between">'+
-            '<span style="font-weight:600;font-size:12px">'+r.supplier+ilBadge+'</span>'+
-            '<span style="font-size:13px;font-weight:700;color:var(--accent2)">'+sym+r.price+'</span>'+
-          '</div>'+
-          (r.note?'<div style="font-size:11px;color:var(--text3);margin-top:2px">'+r.note+'</div>':'')+
-        '</div>';
-      }).join('');
-  } catch(e) {
-    resEl.innerHTML = '<span style="color:var(--warn)">❌ '+e.message+'</span>';
+function rmOnFamilyChange(pb){
+  const fam=document.getElementById('rmFamily').value;
+  const fd=MATERIAL_DB[fam]||MATERIAL_DB.aluminum;
+  const gSel=document.getElementById('rmGrade');
+  if(gSel){
+    gSel.innerHTML=fd.grades.map(function(g){return '<option value="'+g.id+'">'+g.label+'</option>';}).join('');
   }
+  const dEl=document.getElementById('rmDensity');
+  if(dEl) dEl.value=fd.density;
+  rmUpdateCalc(pb);
 }
 
-function applyAIPrice(price, currency, urlEnc) {
-  document.getElementById('aiPriceVal').value = price;
-  const cur = document.getElementById('aiPriceCur');
-  if (cur) cur.value = currency;
-  try { document.getElementById('aiPriceUrl').value = decodeURIComponent(urlEnc); } catch(e){}
+function rmOnFormChange(pb){
+  const formId=document.getElementById('rmForm').value;
+  const formData=MATERIAL_FORMS.find(function(f){return f.id===formId;})||MATERIAL_FORMS[0];
+  const existing=rawMatData[pb]||{};
+  const mergedDims=Object.assign({},existing.dims||{});
+  const dimFields=formData.dims.map(function(d){
+    const val=mergedDims[d.k]||'';
+    const safePb=(window._curRmPb||pb).replace(/[^a-zA-Z0-9_.-]/g,'_');
+    return '<label style="display:flex;flex-direction:column;gap:3px;font-size:11px;color:var(--text2)">'+
+      d.k+(d.u?' ('+d.u+')':'')+'<br><span style="font-size:10px;opacity:.7">'+d.ph+'</span>'+
+      '<input class="rm-dim" data-key="'+d.k+'" value="'+val+'" placeholder="'+d.ph+'" '+
+      'style="width:90px;padding:4px 6px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px" '+
+      'oninput="rmUpdateCalc(window._curRmPb)"></label>';
+  }).join('');
+  const cont=document.getElementById('rmDimFields');
+  if(cont) cont.innerHTML=dimFields;
+  rmUpdateCalc(pb);
 }
 
-function saveAIPrice(pb) {
-  const price    = parseFloat(document.getElementById('aiPriceVal').value);
-  const currency = document.getElementById('aiPriceCur').value||'USD';
-  const url      = (document.getElementById('aiPriceUrl').value||'').trim();
-  if (!price || isNaN(price)) { alert('נא להזין מחיר תקין'); return; }
-  // Save to buyNotes
-  const existing = buyNotes[pb] || {};
-  buyNotes[pb] = Object.assign({}, existing, {price, currency, url: url||existing.url||''});
-  localStorage.setItem('px_'+pb, JSON.stringify({p:price, src:url, currency}));
-  document.getElementById('aiPriceModal').style.display='none';
+function rmUpdateCalc(pb){
+  const el=document.getElementById('rmCalcResult');
+  if(!el) return;
+  const dims={};
+  document.querySelectorAll('#rawMatModal .rm-dim').forEach(function(inp){ if(inp.value) dims[inp.dataset.key]=inp.value; });
+  const formId=(document.getElementById('rmForm')||{}).value||'sheet';
+  const density=parseFloat((document.getElementById('rmDensity')||{}).value)||2700;
+  const unitCost=parseFloat((document.getElementById('rmUnitCost')||{}).value)||0;
+  const costUnit=(document.getElementById('rmCostUnit')||{}).value||'kg';
+  const wastePct=parseFloat((document.getElementById('rmWastePct')||{}).value)||0;
+  const vol=calcRawMatVolume(formId,dims);
+  const mass=vol*density;
+  const waste=1+wastePct/100;
+  const grossMass=mass*waste;
+  let cost=0;
+  if(costUnit==='kg') cost=grossMass*unitCost;
+  else if(costUnit==='m') cost=(parseFloat(dims.L)||0)/1000*unitCost;
+  else if(costUnit==='m2') cost=((parseFloat(dims.L)||0)/1000)*((parseFloat(dims.W)||0)/1000)*unitCost;
+  const massStr=mass>=0.001?(mass*1000).toFixed(0)+' g':'<1 g';
+  const grossStr=wastePct>0?' (גולמי: '+(grossMass*1000).toFixed(0)+' g)':'';
+  const costStr=cost>0?fmtC(cost):'—';
+  const wasteStr=wastePct>0?' + '+wastePct+'% פסולת':'';
+  el.innerHTML='<b>נפח:</b> '+(vol*1e6).toFixed(2)+' cm³ · <b>משקל נטו:</b> '+massStr+grossStr+wasteStr+
+    (cost>0?' · <b>עלות/יחידה:</b> '+costStr:'');
+  // Update per-parent rows if visible
+  const _arParents=window._arParents||[];
+  _arParents.forEach(function(p,i){ arRefreshRow(pb,i); });
+  // Update aggregate
+  arRefreshAggregate(pb);
+}
+
+function arParentDimChanged(pb,inp,rowIdx){
+  arRefreshRow(pb,rowIdx);
+  arRefreshAggregate(pb);
+}
+
+function arRefreshRow(pb,rowIdx){
+  const massTd=document.getElementById('ar-pmass-'+rowIdx);
+  const subTd=document.getElementById('ar-psub-'+rowIdx);
+  if(!massTd) return;
+  const row=document.getElementById('ar-prow-'+rowIdx);
+  if(!row) return;
+  const parentPb=row.dataset.ppb;
+  const tqRaw=parseFloat(row.dataset.tq)||1;
+  const rm=rawMatData[pb];
+  const edDims={};
+  document.querySelectorAll('#rawMatModal .rm-dim').forEach(function(inp){ if(inp.value) edDims[inp.dataset.key]=inp.value; });
+  const form=(document.getElementById('rmForm')||{}).value||(rm||{}).form||'sheet';
+  const density=parseFloat((document.getElementById('rmDensity')||{}).value)||parseFloat((rm||{}).density)||2700;
+  const wastePct=parseFloat((document.getElementById('rmWastePct')||{}).value)||parseFloat((rm||{}).wastePct)||0;
+  // Get per-parent L/W from the modal inputs for this row
+  const Linp=document.querySelector('#ar-prow-'+rowIdx+' .ar-pdim[data-dim="L"]');
+  const Winp=document.querySelector('#ar-prow-'+rowIdx+' .ar-pdim[data-dim="W"]');
+  const L=parseFloat(Linp&&Linp.value)||0;
+  const W=parseFloat(Winp&&Winp.value)||0;
+  if(!L){ massTd.textContent='—'; subTd.textContent=''; return; }
+  const perParentDims=Object.assign({},edDims,{L:String(L)});
+  if(W) perParentDims.W=String(W);
+  const vol=calcRawMatVolume(form,perParentDims);
+  const mass=vol*density;
+  const waste=1+wastePct/100;
+  const grossMass=mass*waste;
+  massTd.textContent=mass>=0.001?(mass*1000).toFixed(0)+' g':'<1 g';
+  const subKg=grossMass*tqRaw;
+  subTd.textContent=(subKg>=0.001?subKg.toFixed(3):'<0.001')+' kg'+(wastePct>0?' *':'');
+}
+
+function arRefreshAggregate(pb){
+  const aggEl=document.getElementById('arAggRow');
+  if(!aggEl) return;
+  const _arParents=window._arParents||[];
+  if(!_arParents.length){ aggEl.textContent=''; return; }
+  const density=parseFloat((document.getElementById('rmDensity')||{}).value)||2700;
+  const wastePct=parseFloat((document.getElementById('rmWastePct')||{}).value)||0;
+  const unitCost=parseFloat((document.getElementById('rmUnitCost')||{}).value)||0;
+  const form=(document.getElementById('rmForm')||{}).value||'sheet';
+  const edDims={};
+  document.querySelectorAll('#rawMatModal .rm-dim').forEach(function(inp){ if(inp.value) edDims[inp.dataset.key]=inp.value; });
+  const waste=1+wastePct/100;
+  let totalGross=0;
+  _arParents.forEach(function(p,i){
+    const row=document.getElementById('ar-prow-'+i);
+    if(!row) return;
+    const tq=parseFloat(row.dataset.tq)||1;
+    const Linp=document.querySelector('#ar-prow-'+i+' .ar-pdim[data-dim="L"]');
+    const Winp=document.querySelector('#ar-prow-'+i+' .ar-pdim[data-dim="W"]');
+    const L=parseFloat(Linp&&Linp.value)||0;
+    const W=parseFloat(Winp&&Winp.value)||0;
+    if(!L) return;
+    const dims=Object.assign({},edDims,{L:String(L)});
+    if(W) dims.W=String(W);
+    const vol=calcRawMatVolume(form,dims);
+    totalGross+=vol*density*waste*tq;
+  });
+  const cost=totalGross*unitCost;
+  aggEl.innerHTML='סה"כ גולמי: <b>'+(totalGross>=0.001?totalGross.toFixed(3):'<0.001')+' kg</b>'+
+    (cost>0 ? ' · עלות: <b>'+fmtC(cost)+'</b>' : '')+
+    (wastePct>0?' (כולל '+wastePct+'% פסולת)':'');
+}
+
+function saveRawMat(pb){
+  const dims={};
+  document.querySelectorAll('#rawMatModal .rm-dim').forEach(function(inp){ if(inp.value) dims[inp.dataset.key]=inp.value; });
+  const family=(document.getElementById('rmFamily')||{}).value||'aluminum';
+  const grade=(document.getElementById('rmGrade')||{}).value||'generic';
+  const form=(document.getElementById('rmForm')||{}).value||'sheet';
+  const density=parseFloat((document.getElementById('rmDensity')||{}).value)||2700;
+  const unitCost=parseFloat((document.getElementById('rmUnitCost')||{}).value)||0;
+  const costUnit=(document.getElementById('rmCostUnit')||{}).value||'kg';
+  const wastePct=parseFloat((document.getElementById('rmWastePct')||{}).value)||0;
+  // Collect per-parent dims from modal
+  const _arParents=window._arParents||[];
+  const perParent=Object.assign({},(rawMatData[pb]||{}).perParent||{});
+  _arParents.forEach(function(p,i){
+    const row=document.getElementById('ar-prow-'+i);
+    if(!row) return;
+    const parentPb=row.dataset.ppb;
+    const Linp=document.querySelector('#ar-prow-'+i+' .ar-pdim[data-dim="L"]');
+    const Winp=document.querySelector('#ar-prow-'+i+' .ar-pdim[data-dim="W"]');
+    const L=(Linp&&Linp.value)||'';
+    const W=(Winp&&Winp.value)||'';
+    if(!perParent[parentPb]) perParent[parentPb]={};
+    perParent[parentPb].dims=L?{L,W:W||undefined}:{};
+  });
+  const uom=getBOMInfoForPb(pb).uom||'';
+  rawMatData[pb]={family,grade,form,dims,density,unitCost,costUnit,wastePct,perParent,_uom:uom};
+  localStorage.setItem(RM_STORAGE_KEY,JSON.stringify(rawMatData));
   saveProcToFile();
-  computeTreeCosts(); refreshCostCells();
-  buildTable(); applyFilters();
-  // Refresh buy tab price cells if tab is open
-  buyBuilt=false;
-  if(document.getElementById('mtp-buy') && document.getElementById('mtp-buy').classList.contains('active')){
-    _populateBuyTab(true);
-  } else {
-    // invalidate so next open rebuilds
-    const btEl=document.getElementById('buyTabContent');
-    if(btEl) btEl.dataset.built='';
-  }
+  closeRawMat();
+  computeTreeCosts(); buildCumulativeHours(); updateWHCells();
+  // Rebuild rawmat tab next time
+  const rtc=document.getElementById('rawmatTabContent');
+  if(rtc) rtc.dataset.built='';
+  // Rebuild BOM table proc buttons
+  buildTable(); buildCumulativeHours(); updateWHCells(); applyFilters();
 }
 
-// ─── Raw Materials Excel Export ───────────────────────────
-async function exportRawMaterials() {
-  // Use aggregated buyData (totalQty = sum across all BOM occurrences)
-  buildBuyData();
-  const items = [];
-  buyData.forEach(function(item) {
-    const pb = item.pb;
-    const rm = rawMatData[pb];
-    if (!rm) return;
-    const famData = MATERIAL_DB[rm.family]||{label:rm.family||pb};
-    const res = getRawMatCost(pb);
-    const tq = item.totalQty || 1;
-    items.push({
-      pb, desc: item.desc, family: famData.label, grade: rm.grade||'',
-      form: (MATERIAL_FORMS.find(function(f){return f.id===rm.form;})||{}).label||rm.form,
-      dims: rm.dims||{}, density: rm.density, costUnit: rm.costUnit,
-      unitCost: rm.unitCost, tq,
-      massPerUnit: res?res.mass:0, volPerUnit: res?res.vol:0,
-      costPerUnit: res?res.cost:0, totalCost: res?res.cost*tq:0, totalMass: res?res.mass*tq:0,
-    });
-  });
-
-  if (!items.length) { alert('אין חומרי גלם מוגדרים בBOM'); return; }
-
-  if (typeof ExcelJS === 'undefined') {
-    try {
-      await new Promise(function(resolve, reject) {
-        const s = document.createElement('script');
-        s.src = 'https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.3.0/exceljs.min.js';
-        s.onload = resolve; s.onerror = reject;
-        document.head.appendChild(s);
-      });
-    } catch(e) { alert('לא ניתן לטעון ExcelJS — בדוק חיבור לאינטרנט'); return; }
-  }
-  const wb = new ExcelJS.Workbook();
-  wb.views = [{rightToLeft:true}];
-
-  // Summary sheet
-  const hdrStyle = {font:{bold:true,color:{argb:'FFFFFFFF'}},fill:{type:'pattern',pattern:'solid',fgColor:{argb:'FF2D4A8A'}},alignment:{horizontal:'center'}};
-  const addSheet = function(name, sheetItems) {
-    const ws = wb.addWorksheet(name, {views:[{rightToLeft:true}]});
-    ws.columns = [
-      {header:'מק"ט',      key:'pb',         width:22},
-      {header:'תיאור',     key:'desc',        width:30},
-      {header:'משפחה',     key:'family',      width:14},
-      {header:'סגסוגת',   key:'grade',       width:12},
-      {header:'צורה',      key:'form',        width:16},
-      {header:'אורך (mm)', key:'L',           width:10},
-      {header:'רוחב (mm)', key:'W',           width:10},
-      {header:'עובי (mm)', key:'T',           width:10},
-      {header:'ⓓ חיצוני', key:'D',           width:10},
-      {header:'TQ',        key:'tq',          width:6},
-      {header:'משקל/יח (kg)', key:'massPerUnit', width:14},
-      {header:'משקל סה"כ (kg)',key:'totalMass',  width:14},
-      {header:'יח"מ',     key:'costUnit',    width:8},
-      {header:'עלות/יח ₪', key:'unitCost',   width:12},
-      {header:'עלות ₪ סה"כ',key:'totalCost', width:14},
-    ];
-    ws.getRow(1).eachCell(function(cell){ Object.assign(cell, hdrStyle); });
-    ws.getRow(1).height = 20;
-    sheetItems.forEach(function(it) {
-      ws.addRow({
-        pb: it.pb, desc: it.desc, family: it.family, grade: it.grade, form: it.form,
-        L: it.dims.L||'', W: it.dims.W||'', T: it.dims.T||'', D: it.dims.D||it.dims.S||'',
-        tq: it.tq,
-        massPerUnit: Math.round(it.massPerUnit*1000)/1000,
-        totalMass:   Math.round(it.totalMass*1000)/1000,
-        costUnit: it.costUnit, unitCost: it.unitCost,
-        totalCost: Math.round(it.totalCost),
-      });
-    });
-    // Total row
-    const last = ws.lastRow.number+1;
-    const totalRow = ws.addRow({pb:'סה"כ',totalMass:{formula:'SUM(L2:L'+last+')'},totalCost:{formula:'SUM(O2:O'+last+')'}});
-    totalRow.font={bold:true};
-    return ws;
-  };
-
-  // Group by family
-  const families = {};
-  items.forEach(function(it){ if (!families[it.family]) families[it.family]=[]; families[it.family].push(it); });
-  // All items summary
-  addSheet('סיכום', items);
-  Object.entries(families).forEach(function(e){ addSheet(e[0], e[1]); });
-
-  const buf = await wb.xlsx.writeBuffer();
-  const blob = new Blob([buf], {type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
-  const a = document.createElement('a'); a.href=URL.createObjectURL(blob);
-  a.download = 'RawMaterials_ZMAG.xlsx'; a.click();
-}
-
-function updateWHCells() {
-  document.querySelectorAll('.cell-setupH').forEach((td, i) => {
-    const h = setupHours[i];
-    td.textContent = (h && h > 0.005) ? fmtTimeAuto(h * 60) : '';
-  });
-  document.querySelectorAll('.cell-cycleH').forEach((td, i) => {
-    const h = perUnitH[i];
-    td.textContent = (h && h > 0.005) ? fmtTimeAuto(h * 60) : '';
-  });
-  document.querySelectorAll('.cell-cumCH').forEach((td, i) => {
-    const h = cumCycleH[i];
-    td.textContent = (h && h > 0.005) ? fmtTimeAuto(h * 60) : '';
-  });
-  document.querySelectorAll('[data-total-h-idx]').forEach(function(td) {
-    const i = parseInt(td.dataset.totalHIdx);
-    const h = cumCycleH[i];
-    const tot = h > 0.005 ? h * projectQty : 0;
-    td.textContent = tot > 0.005 ? fmtTimeAuto(tot * 60) : '';
-    td.style.fontWeight = projectQty > 1 ? '600' : '';
-  });
-}
-
-// ─── Tree collapse ───────────────────────────────────────
-function toggleNode(idx){
-  const tr=rows[idx], lv=parseInt(tr.dataset.lv);
-  const tog=tr.querySelector('.tog');
-  if(collapsed.has(idx)){
-    collapsed.delete(idx);
-    if(tog) tog.textContent='−';
-    showKids(idx,lv);
-  } else {
-    collapsed.add(idx);
-    if(tog) tog.textContent='+';
-    for(let i=idx+1;i<BOM.length;i++){
-      if(BOM[i].lv<=lv) break;
-      rows[i].classList.add('cc');
-    }
-  }
-}
-function showKids(pidx,plv){
-  for(let i=pidx+1;i<BOM.length;i++){
-    const cl=BOM[i].lv;
-    if(cl<=plv) break;
-    if(cl===plv+1){
-      rows[i].classList.remove('cc');
-      if(!collapsed.has(i)) showKids(i,cl);
-    }
-  }
-}
-function collapseAll(){
-  collapsed.clear();
-  rows.forEach((tr,idx)=>{
-    const lv=parseInt(tr.dataset.lv);
-    const hasKids=tr.dataset.kids==='1';
-    if(hasKids){ collapsed.add(idx); const t=tr.querySelector('.tog'); if(t) t.textContent='+'; }
-    if(lv>0) tr.classList.add('cc'); else tr.classList.remove('cc');
-  });
-}
-function expandAll(){
-  collapsed.clear();
-  rows.forEach(tr=>{ const t=tr.querySelector('.tog'); if(t) t.textContent='−'; tr.classList.remove('cc'); });
-  applyFilters();
-}
-
-// ─── Level filter ────────────────────────────────────────
-function onLevel(v){
-  maxLevel=parseInt(v);
-  document.getElementById('levelDisp').textContent=v==='10'?'All':v;
-  applyFilters();
-  if (selIdx >= 0 && rows[selIdx] && !rows[selIdx].classList.contains('hid')) {
-    setTimeout(() => rows[selIdx].scrollIntoView({block:'center', behavior:'smooth'}), 50);
-  }
-}
-
-// ─── Type dropdown ───────────────────────────────────────
-function toggleTypeDD(){
-  const dd=document.getElementById('typeDD');
-  const btn=document.getElementById('typeBtn');
-  const open=dd.classList.toggle('open');
-  btn.classList.toggle('open',open);
-}
-function toggleType(type,cb){
-  if(cb.checked) selTypes.add(type); else selTypes.delete(type);
-  updateTypeBtn();
-  applyFilters();
-  saveFilterState();
-}
-function updateTypeBtn(){
-  const btn=document.getElementById('typeBtn');
-  if(selTypes.size===3) btn.textContent='All Types ▾';
-  else if(selTypes.size===0) btn.textContent='No Types ▾';
-  else btn.textContent=[...selTypes].join(', ')+' ▾';
-}
-// Close dropdown on outside click
-document.addEventListener('click',e=>{
-  if(!document.getElementById('typeWrap').contains(e.target)){
-    document.getElementById('typeDD').classList.remove('open');
-    document.getElementById('typeBtn').classList.remove('open');
-  }
-});
-
-// ─── Filters & search ────────────────────────────────────
-document.getElementById('searchInput').addEventListener('input',function(){
-  searchTerm=this.value.trim().toLowerCase();
-  document.getElementById('clearSearch').style.display=searchTerm?'block':'none';
-  applyFilters();
-});
-function clearSearch(){
-  document.getElementById('searchInput').value='';
-  searchTerm='';
-  document.getElementById('clearSearch').style.display='none';
-  applyFilters();
-}
-function toggleFilesOnly(){
-  filesOnly=!filesOnly;
-  document.getElementById('filesOnlyBtn').classList.toggle('on',filesOnly);
-  applyFilters();
-  saveFilterState();
-}
-
-function applyFilters(){
-  filterStatus=document.getElementById('statusFilter').value;
-  const filtering=searchTerm||filterStatus||(selTypes.size<3)||filesOnly||maxLevel<10;
-  const matchSet=new Set();
-
-  BOM.forEach((item,idx)=>{
-    let m=true;
-    if(item.lv>maxLevel) m=false;
-    if(m && searchTerm && !item.pn.toLowerCase().includes(searchTerm) && !item.desc.toLowerCase().includes(searchTerm) && !item.cat.toLowerCase().includes(searchTerm)) m=false;
-    if(m && !selTypes.has(item.type)) m=false;
-    if(m && filterStatus && item.st!==filterStatus) m=false;
-    if(m && filesOnly && !item.pdf && (!item.cads||!item.cads.length)) m=false;
-    if(m) matchSet.add(idx);
-  });
-
-  const showSet=new Set();
-  if(filtering){
-    matchSet.forEach(idx=>{
-      showSet.add(idx);
-      const tl=BOM[idx].lv;
-      for(let i=idx-1;i>=0;i--){
-        if(BOM[i].lv<tl){ showSet.add(i); if(BOM[i].lv===0) break; }
-      }
-    });
-  }
-
-  let vis=0;
-  rows.forEach((tr,idx)=>{
-    let show;
-    if(!filtering) show=!tr.classList.contains('cc');
-    else show=showSet.has(idx);
-    // Hard guard: never show items of explicitly excluded types
-    if(show && selTypes.size<3 && !selTypes.has(BOM[idx].type)) show=false;
-    tr.classList.toggle('hid',!show);
-    if(show) vis++;
-  });
-
-  if(searchTerm) hlSearch(searchTerm); else clearHL();
-  document.getElementById('emptyState').style.display=vis===0?'block':'none';
-  updateStats(vis);
-  // Rebuild buy/rawmat tabs if currently open so they respect the visual filter
-  buyBuilt = false;
-  const _bEl = document.getElementById('buyTabContent');
-  if (_bEl) _bEl.dataset.built = '';
-  if (document.getElementById('mtp-buy') && document.getElementById('mtp-buy').classList.contains('active'))
-    _populateBuyTab(true);
-  if (document.getElementById('mtp-rawmat') && document.getElementById('mtp-rawmat').classList.contains('active'))
-    _populateRawmatTab(true);
-  saveFilterState();
-}
-
-function hlSearch(q){
-  rows.forEach((tr,idx)=>{
-    const item=BOM[idx];
-    const pn=tr.querySelector('.pn-txt');
-    const dc=tr.querySelector('.desc-cell');
-    if(pn) pn.innerHTML=hlTxt(item.pn,q);
-    if(dc) dc.innerHTML=hlTxt(item.desc,q);
-  });
-}
-function clearHL(){
-  rows.forEach((tr,idx)=>{
-    const item=BOM[idx];
-    const pn=tr.querySelector('.pn-txt');
-    const dc=tr.querySelector('.desc-cell');
-    if(pn) pn.textContent=item.pn;
-    if(dc) dc.textContent=item.desc;
-  });
-}
-function hlTxt(t,q){
-  if(!q) return esc(t);
-  const i=t.toLowerCase().indexOf(q);
-  if(i<0) return esc(t);
-  return esc(t.slice(0,i))+'<span class="hl">'+esc(t.slice(i,i+q.length))+'</span>'+esc(t.slice(i+q.length));
-}
-function esc(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
-function escHtml(s){ return esc(String(s||'')); }
-
-// ─── Sort ────────────────────────────────────────────────
-function sortBy(col){
-  if(curSort.col===col) curSort.asc=!curSort.asc;
-  else { curSort.col=col; curSort.asc=true; }
-  document.querySelectorAll('thead th').forEach(th=>th.classList.remove('sorted'));
-  const sortedTh=document.querySelector(`thead th[data-col="${col}"]`);
-  if(sortedTh){ sortedTh.classList.add('sorted'); const si=sortedTh.querySelector('.si-sort'); if(si) si.textContent=curSort.asc?'↑':'↓'; }
-  const tbody=document.getElementById('bomBody');
-  const trs=Array.from(tbody.querySelectorAll('tr'));
-  trs.sort((a,b)=>{
-    const ia=+a.dataset.idx, ib=+b.dataset.idx;
-    let va=BOM[ia][col]||'', vb=BOM[ib][col]||'';
-    if(col==='qty'||col==='lv'||col==='tq'){ va=parseFloat(va)||0; vb=parseFloat(vb)||0; return curSort.asc?va-vb:vb-va; }
-    return curSort.asc?va.localeCompare(vb):vb.localeCompare(va);
-  });
-  trs.forEach(tr=>tbody.appendChild(tr));
-  rows=trs;
-}
-
-// ─── Stats ───────────────────────────────────────────────
-function getDescendantIndices(idx) {
-  const parentLv = BOM[idx].lv;
-  const result = [];
-  for (let i = idx + 1; i < BOM.length; i++) {
-    if (BOM[i].lv <= parentLv) break;
-    result.push(i);
-  }
-  return result;
-}
-function toggleRowCheck(idx){
-  const willDisable=!disabledRows.has(idx);
-  const affected = [idx, ...getDescendantIndices(idx)];
-  affected.forEach(function(i){
-    if(willDisable){ disabledRows.add(i); rows[i] && rows[i].classList.add('vhid'); }
-    else           { disabledRows.delete(i); rows[i] && rows[i].classList.remove('vhid'); }
-  });
-  updateRowCheckVisuals();
-  buyBuilt=false; // invalidate buy data cache
-  // Invalidate HTML caches so tabs rebuild on next view
-  const _buyEl=document.getElementById('buyTabContent');
-  if(_buyEl) _buyEl.dataset.built='';
-  // Immediately refresh whichever tab is currently open
-  if(document.getElementById('mtp-buy')&&document.getElementById('mtp-buy').classList.contains('active'))
-    _populateBuyTab(true);
-  if(document.getElementById('mtp-rawmat')&&document.getElementById('mtp-rawmat').classList.contains('active'))
-    _populateRawmatTab(true);
-  // session-only — do NOT saveFilterState for disabledRows
-}
-function updateRowCheckVisuals(){
-  rows.forEach(function(tr,i){
-    const cb=tr.querySelector('.row-cb');
-    const enabled=!disabledRows.has(i);
-    if(cb) cb.checked=enabled;
-    tr.classList.toggle('row-disabled',!enabled);
-  });
-  try { computeTreeCosts(); } catch(e) {}
-  try { buildCumulativeHours(); } catch(e) {}
-  updateStats();
-}
-function setProjectQty(v) {
-  const n = Math.max(1, parseInt(v) || 1);
-  projectQty = n;
-  const inp = document.getElementById('projectQtyInput');
-  if (inp && parseInt(inp.value) !== n) inp.value = n;
-  updateStats();
-}
-function updateStats(vis){
-  const t=BOM.length;
-  const p=BOM.filter(r=>r.pdf).length;
-  const c=BOM.filter(r=>r.cads&&r.cads.length).length;
-  const s=vis!==undefined?vis:t;
-  const dis=disabledRows.size;
-  const disStr=dis>0?' · '+dis+' hidden':'';
-  // Use innerHTML to preserve analysisProgress span child
-  const eligibleItems = BOM.filter((item, i) =>
-    item.type === 'ELTDesign' && item.pdf &&
-    rows[i] && !rows[i].classList.contains('hid') && !rows[i].classList.contains('vhid')
-  );
-  const analyzedItems = eligibleItems.filter(item => {
-    const pb = item.pb || item.pn;
-    return procData[pb] && procData[pb].length > 0;
-  });
-  const pct = eligibleItems.length ? Math.round(analyzedItems.length / eligibleItems.length * 100) : 0;
-  const progressHtml = `<span id="analysisProgress"><span style="font-size:11px;color:var(--text2);margin-left:12px">ניתוח: ${analyzedItems.length}/${eligibleItems.length}</span><span style="display:inline-block;width:80px;height:5px;background:var(--surface2);border-radius:3px;margin-left:6px;vertical-align:middle"><span style="display:block;width:${pct}%;height:100%;background:var(--accent2);border-radius:3px"></span></span></span>`;
-  // Project totals
-  const rootCost  = BOM.reduce((sum, item, i) => item.lv === 0 ? sum + (treeCosts[i]  || 0) : sum, 0);
-  const rootCycleH = BOM.reduce((sum, item, i) => item.lv === 0 ? sum + (cumCycleH[i] || 0) : sum, 0);
-  const rootSetupH = setupHours.reduce((a, b) => a + b, 0);
-  // Raw material subtotal (for breakdown display — already included in rootCost via getItemUnitCost)
-  let rawMatTotal = 0;
-  try { rawMatTotal = Object.keys(rawMatData || {}).reduce((sum, pb) => sum + (computeARAggregate(pb)||{cost:0}).cost, 0); } catch(e) {}
-  const projCostStr  = rootCost   > 0 ? ' · 💰 ' + fmtC(rootCost * projectQty) : '';
-  const rawMatStr    = rawMatTotal > 0 ? ' · 🧱 ' + fmtC(rawMatTotal * projectQty) : '';
-  const projHoursStr = rootCycleH > 0 ? ' · ⏱ ' + fmtTimeAuto(rootCycleH * projectQty * 60) : '';
-  const setupStr     = rootSetupH > 0 ? ' · ⚙ ' + fmtTimeAuto(rootSetupH * 60) : '';
-  const projStr = (projectQty > 1 ? ` · ×${projectQty}` : '') + projCostStr + rawMatStr + projHoursStr + setupStr;
-  document.getElementById('statsBar').innerHTML=`${s.toLocaleString()}/${t.toLocaleString()} parts · ${p} drawings · ${c} CAD`+disStr+projStr+progressHtml;
-  // Update cost columns
-  refreshCostCells();
-}
-function refreshCostCells() {
-  if (!unitCosts.length) return;
-  // 🔧 Labor cost (ELTDesign process cost × tq)
-  document.querySelectorAll('[data-labor-idx]').forEach(function(td) {
-    const i = parseInt(td.dataset.laborIdx);
-    const item = BOM[i];
-    if (!item || item.type !== 'ELTDesign') { td.textContent = ''; return; }
-    const cost = (unitCosts[i] || 0) * (item.tq || 0);
-    td.textContent = cost > 0 ? fmtC(cost) : '—';
-  });
-  // 🛒 Buy/material cost (Buy or raw material cost × tq)
-  document.querySelectorAll('[data-buy-idx]').forEach(function(td) {
-    const i = parseInt(td.dataset.buyIdx);
-    const item = BOM[i];
-    if (!item || item.type === 'ELTDesign') { td.textContent = ''; return; }
-    const cost = (unitCosts[i] || 0) * (item.tq || 0);
-    td.textContent = cost > 0 ? fmtC(cost) : '—';
-  });
-  document.querySelectorAll('[data-cost-idx]').forEach(function(td){
-    const i = parseInt(td.dataset.costIdx);
-    const uc = unitCosts[i] || 0;
-    td.textContent = uc > 0 ? fmtC(uc) : '—';
-  });
-  document.querySelectorAll('[data-tree-cost-idx]').forEach(function(td){
-    const i = parseInt(td.dataset.treeCostIdx);
-    const tc = treeCosts[i];
-    td.textContent = tc ? fmtC(tc) : '—';
-  });
-  document.querySelectorAll('[data-proj-cost-idx]').forEach(function(td){
-    const i = parseInt(td.dataset.projCostIdx);
-    const tc = treeCosts[i] || 0;
-    const sc = cumSetupCosts[i] || 0;
-    const proj = tc * projectQty + sc;
-    td.textContent = proj > 0 ? fmtC(proj) : '—';
-    td.style.fontWeight = (projectQty > 1 || sc > 0) ? '700' : '';
-  });
-}
-
-// ─── Select row ──────────────────────────────────────────
-function selectRow(idx){
-  if(selIdx>=0&&rows[selIdx]) rows[selIdx].classList.remove('sel');
-  selIdx=idx;
-  rows[idx].classList.add('sel');
-  rows[idx].scrollIntoView({block:'nearest', behavior:'smooth'});
-  showPreview(BOM[idx]);
-  renderMfgSide(BOM[idx]);
-  const assyBtn = document.getElementById('msExportAssyBtn');
-  if (assyBtn) assyBtn.style.display = '';
-  const xlsxBtn = document.getElementById('xlsxBtn');
-  if (xlsxBtn) xlsxBtn.textContent = '📊 הרכבה';
-}
-function closePreview(){
-  if(selIdx>=0&&rows[selIdx]) rows[selIdx].classList.remove('sel');
-  selIdx=-1; curItem=null; viewerActive=false;
-  const xlsxBtn = document.getElementById('xlsxBtn');
-  if (xlsxBtn) xlsxBtn.textContent = '📊 Excel';
-  document.getElementById('noSel').style.display='flex';
-  document.getElementById('pvContent').style.display='none';
-}
-
-// ─── Preview ─────────────────────────────────────────────
-function showPreview(item){
-  curItem=item;
-  document.getElementById('noSel').style.display='none';
-  const pc=document.getElementById('pvContent');
-  pc.style.display='flex';
-  document.getElementById('pvPN').textContent=item.pn;
-  document.getElementById('pvDesc').textContent=item.desc;
-  document.getElementById('pvMeta').innerHTML=`
-    <div class="mi"><div class="ml">Catalog</div><div class="mv" style="font-family:monospace">${item.cat||'—'}</div></div>
-    <div class="mi"><div class="ml">QTY</div><div class="mv">${item.qty} ${item.uom}</div></div>
-    <div class="mi"><div class="ml">Type</div><div class="mv"><span class="badge ${item.type==='ELTDesign'?'b-des':item.type==='Buy'?'b-buy':'b-pkg'}">${item.type}</span></div></div>
-    <div class="mi"><div class="ml">Status</div><div class="mv">${item.st?`<span class="badge ${item.st==='Released'?'b-rel':'b-obs'}">${item.st}</span>`:'—'}</div></div>
-    <div class="mi"><div class="ml">Level</div><div class="mv">${item.lv}</div></div>
-    ${item.mf?`<div class="mi"><div class="ml">Manuf</div><div class="mv">${item.mf}</div></div>`:''}`;
-  viewerActive=false;
-  switchTab(curTab);
-}
-
-function switchTab(tab){
-  curTab=tab;
-  document.getElementById('tabDrw').className='pv-tab'+(tab==='drawing'?' on':'');
-  document.getElementById('tabCad').className='pv-tab'+(tab==='cad'?' on':'');
-  document.getElementById('tabAll').className='pv-tab'+(tab==='all'?' on':'');
-  const body=document.getElementById('pvBody');
-  body.innerHTML='';
-  if(!curItem) return;
-
-  if(tab==='drawing'){
-    // Must be authenticated to load any drawing from SharePoint
-    if(!_graphMode || !_msalAcct){
-      body.innerHTML=`<div style="padding:32px;text-align:center;color:var(--text2)">
-        <div style="font-size:32px;margin-bottom:12px">🔑</div>
-        <div style="margin-bottom:16px">יש להתחבר עם Microsoft כדי לצפות בשרטוטים</div>
-        <button onclick="msalLogin()" style="background:var(--accent);color:#fff;border:none;border-radius:6px;padding:10px 24px;font-size:13px;cursor:pointer">התחבר עם Microsoft</button>
-      </div>`;
-      return;
-    }
-    if(curItem.pdf){
-      // PDF selector if multiple
-      if(curItem.pdfs&&curItem.pdfs.length>1){
-        const sel=document.createElement('div'); sel.className='pdf-sel';
-        curItem.pdfs.forEach((p,i)=>{
-          const b=document.createElement('button'); b.className='pdf-btn'+(i===0?' on':'');
-          b.textContent=p.split('/').pop().replace('.pdf',''); b.title=b.textContent;
-          b.onclick=async()=>{ sel.querySelectorAll('.pdf-btn').forEach(x=>x.classList.remove('on')); b.classList.add('on');
-            if(_graphMode && _msalAcct){
-              try{
-                const dlUrl=await _graphDownloadUrl(p);
-                const resp=await fetch(dlUrl); const blob=await resp.blob();
-                const blobUrl=URL.createObjectURL(blob);
-                frm.src=blobUrl+'#zoom=page-fit&scrollbar=0';
-                frm.onload=()=>URL.revokeObjectURL(blobUrl);
-                return;
-              }catch(e){}
-            }
-            frm.src=p+'#zoom=page-fit&scrollbar=0'; };
-          sel.appendChild(b);
-        });
-        body.appendChild(sel);
-      }
-      const wrap=document.createElement('div'); wrap.className='pdf-frame'; wrap.style.flex='1';
-      const frm=document.createElement('iframe'); frm.title='Drawing';
-      body.appendChild(wrap);
-      wrap.innerHTML='<div style="padding:24px;text-align:center;color:var(--text3)">⏳ טוען שרטוט מ-SharePoint...</div>';
-      (async()=>{
-        try{
-          const dlUrl=await _graphDownloadUrl(curItem.pdf);
-          // Fetch as Blob → create blob URL for inline iframe display
-          // (avoids Content-Disposition:attachment from SharePoint download URLs)
-          const resp=await fetch(dlUrl);
-          if(!resp.ok) throw new Error('Fetch HTTP '+resp.status);
-          const blob=await resp.blob();
-          const blobUrl=URL.createObjectURL(blob);
-          wrap.innerHTML=''; wrap.appendChild(frm);
-          frm.src=blobUrl+'#zoom=page-fit&scrollbar=0';
-          frm.onload=()=>URL.revokeObjectURL(blobUrl); // cleanup
-        }catch(e){
-          console.error('Graph drawing error:',e);
-          wrap.innerHTML=`<div style="padding:20px;text-align:center;color:var(--err,#f66);font-size:13px">
-            ⚠ שגיאה בטעינת שרטוט<br><small style="color:var(--text3)">${e.message}</small><br>
-            <small style="color:var(--text3);word-break:break-all">${curItem.pdf}</small>
-          </div>`;
-        }
-      })();
-      body.style.display='flex'; body.style.flexDirection='column';
-    } else {
-      body.innerHTML='<div style="padding:24px;color:var(--text3);text-align:center">No drawing for this part.</div>';
-    }
-  }
-
-  else if(tab==='cad'){
-    // Must be authenticated to load CAD files from SharePoint
-    if(!_graphMode || !_msalAcct){
-      body.innerHTML=`<div style="padding:32px;text-align:center;color:var(--text2)">
-        <div style="font-size:32px;margin-bottom:12px">🔑</div>
-        <div style="margin-bottom:16px">יש להתחבר עם Microsoft כדי לצפות בקבצי CAD</div>
-        <button onclick="msalLogin()" style="background:var(--accent);color:#fff;border:none;border-radius:6px;padding:10px 24px;font-size:13px;cursor:pointer">התחבר עם Microsoft</button>
-      </div>`;
-      return;
-    }
-    // (original cad tab continues below)
-    const stpFiles=(curItem.cads||[]).filter(f=>/\.stp$|\.step$/i.test(f));
-    const otherFiles=(curItem.cads||[]).filter(f=>!/\.stp$|\.step$/i.test(f));
-    const allCads=curItem.cads||[];
-
-    if(allCads.length===0){
-      body.innerHTML='<div style="padding:24px;color:var(--text3);text-align:center">No CAD files for this part.</div>';
-      return;
-    }
-
-    const layout=document.createElement('div'); layout.className='cad-layout';
-
-    // File buttons
-    const fileRow=document.createElement('div'); fileRow.className='cad-files';
-    allCads.forEach((p,i)=>{
-      const fname=p.split('/').pop();
-      const ext=fname.split('.').pop().toUpperCase();
-      const isStp=/\.stp$|\.step$/i.test(p);
-      const a=document.createElement('a'); a.href=p; a.download=fname;
-      a.className='cad-dl-btn'+(isStp?' active-stp':'');
-      a.title='Download '+fname;
-      a.innerHTML=`${isStp?'🔩':'📦'} ${fname} <span class="af-ext">${ext}</span>`;
-      a.addEventListener('click',e=>e.stopPropagation());
-      fileRow.appendChild(a);
-      // Click STP button to preview it
-      if(isStp){
-        a.addEventListener('click',e=>{
-          e.preventDefault();
-          load3D(p, viewerEl);
-        });
-        a.style.cursor='pointer';
-      }
-    });
-    layout.appendChild(fileRow);
-
-    // 3D viewer area
-    const viewerEl=document.createElement('div'); viewerEl.className='cad-preview';
-    viewerEl.innerHTML='<div class="viewer-msg"><div class="vm-icon">🔩</div><div class="vm-txt">Loading 3D preview…</div></div>';
-    layout.appendChild(viewerEl);
-    body.appendChild(layout);
-
-    // Auto-load first STP
-    if(stpFiles.length>0) load3D(stpFiles[0], viewerEl);
-    else viewerEl.innerHTML='<div class="viewer-msg"><div class="vm-icon">📦</div><div class="vm-txt">No STEP file available.<br>Download the file above to open in your CAD tool.</div></div>';
-  }
-
-  else if(tab==='all'){
-    const allP=curItem.pdfs||[];
-    const allC=curItem.cads||[];
-    const all=[...allP.map(p=>({path:p,icon:'📄',type:'PDF'})),...allC.map(c=>({path:c,icon:'🔩',type:'CAD'}))];
-    if(!all.length){ body.innerHTML='<div style="padding:24px;color:var(--text3);text-align:center">No files found.</div>'; return; }
-    if(!_graphMode || !_msalAcct){
-      body.innerHTML=`<div style="padding:32px;text-align:center;color:var(--text2)">
-        <div style="font-size:32px;margin-bottom:12px">🔑</div>
-        <div style="margin-bottom:16px">יש להתחבר עם Microsoft כדי לצפות בקבצים</div>
-        <button onclick="msalLogin()" style="background:var(--accent);color:#fff;border:none;border-radius:6px;padding:10px 24px;font-size:13px;cursor:pointer">התחבר עם Microsoft</button>
-      </div>`;
-      return;
-    }
-    const wrap=document.createElement('div'); wrap.className='all-files';
-    all.forEach(({path,icon,type})=>{
-      const fname=path.split('/').pop();
-      const ext=fname.split('.').pop().toUpperCase();
-      const a=document.createElement('a'); a.href='#'; a.className='af-row';
-      a.innerHTML=`<span style="font-size:16px">${icon}</span><span class="af-name" title="${fname}">${fname}</span><span class="af-ext">${ext}</span><span class="af-ext" style="color:var(--text3);margin-left:auto">⏳</span>`;
-      a.onclick=async(e)=>{
-        e.preventDefault();
-        const sp=a.querySelector('span:last-child'); sp.textContent='⏳';
-        try{
-          const url=await _graphDownloadUrl(path); // use full relative path, not just filename
-          if(type==='PDF'){ window.open(url,'_blank'); }
-          else { const dl=document.createElement('a'); dl.href=url; dl.download=fname; dl.click(); }
-          sp.textContent='✓';
-        }catch(err){ sp.textContent='⚠'; alert('שגיאה: '+err.message); }
-      };
-      wrap.appendChild(a);
-    });
-    body.appendChild(wrap);
-  }
-}
-
-// ─── 3D STP Preview ──────────────────────────────────────
-let threeLoaded=false;
-function loadScript(src){ return new Promise((res,rej)=>{ const s=document.createElement('script'); s.src=src; s.onload=res; s.onerror=rej; document.head.appendChild(s); }); }
-async function ensureThree(){
-  if(!threeLoaded){
-    await loadScript('https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js');
-    await loadScript('https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js');
-    threeLoaded=true;
-  }
-}
-
-// Web Worker for STEP parsing (keeps main thread responsive)
-const _OCCT_CDN='https://cdn.jsdelivr.net/npm/occt-import-js@0.0.22/dist/';
-const _workerSrc=`
-importScripts('${_OCCT_CDN}occt-import-js.js');
-let _occ=null;
-async function getOcc(){
-  if(!_occ) _occ=await occtimportjs({locateFile:f=>'${_OCCT_CDN}'+f});
-  return _occ;
-}
-self.onmessage=async function(e){
-  try{
-    const occ=await getOcc();
-    const result=occ.ReadStepFile(new Uint8Array(e.data.buf),null);
-    const ml=result.meshes||[];
-    const out=[]; const xfr=new Set();
-    for(let i=0;i<ml.length;i++){
-      const m=ml[i];
-      const rp=m.attributes&&m.attributes.position&&m.attributes.position.array;
-      if(!rp||!rp.length) continue;
-      const pos=rp instanceof Float32Array?rp:new Float32Array(rp);
-      const rn=m.attributes&&m.attributes.normal&&m.attributes.normal.array;
-      const norm=(rn&&rn.length)?(rn instanceof Float32Array?rn:new Float32Array(rn)):null;
-      const ri=m.index&&m.index.array;
-      const idx=(ri&&ri.length)?(ri instanceof Uint32Array?ri:new Uint32Array(ri)):null;
-      out.push({pos:pos.buffer,norm:norm?norm.buffer:null,idx:idx?idx.buffer:null,color:m.color||null});
-      xfr.add(pos.buffer); if(norm)xfr.add(norm.buffer); if(idx)xfr.add(idx.buffer);
-    }
-    self.postMessage({ok:true,meshes:out},[...xfr]);
-  }catch(err){ self.postMessage({ok:false,err:err.message}); }
-};
-`;
-let _workerUrl=null;
-function getWorkerUrl(){ if(!_workerUrl) _workerUrl=URL.createObjectURL(new Blob([_workerSrc],{type:'application/javascript'})); return _workerUrl; }
-
-function parseStepInWorker(buf){
-  return new Promise((resolve,reject)=>{
-    const w=new Worker(getWorkerUrl());
-    w.onmessage=e=>{ w.terminate(); if(e.data.ok) resolve(e.data.meshes.map(d=>({pos:new Float32Array(d.pos),norm:d.norm?new Float32Array(d.norm):null,idx:d.idx?new Uint32Array(d.idx):null,color:d.color}))); else reject(new Error(e.data.err)); };
-    w.onerror=e=>{ w.terminate(); reject(new Error(e.message)); };
-    w.postMessage({buf},[buf]);
-  });
-}
-
-let activeRenderer=null;
-const _geomCache=new Map(); // stpPath → {posArr,normArr,idxArr,color}[]
-async function load3D(stpPath, container){
-  // Cancel previous renderer
-  if(activeRenderer){ activeRenderer.dispose(); activeRenderer=null; }
-  function setMsg(t){ container.innerHTML='<div class="viewer-msg"><div class="vm-icon" style="font-size:28px">⚙️</div><div class="vm-txt">'+t+'</div></div>'; }
-  setMsg('מאתחל…');
-  try{
-    if(!rootDirHandle && !(_graphMode && _msalAcct)){
-      container.innerHTML='<div class="viewer-msg"><div class="vm-icon">🔑</div><div class="vm-txt">Login with Microsoft (🔑 התחבר) to view 3D preview from SharePoint.</div></div>';
-      return;
-    }
-
-    // ── Get geometry data (cached; parsing runs in Web Worker) ──────────
-    let cachedMeshData=_geomCache.get(stpPath);
-    if(!cachedMeshData){
-      setMsg('⬇ מוריד קובץ STP…');
-      const buf=await getFileBuffer(stpPath);
-      setMsg('⚙️ מנתח גאומטריה… (Worker)');
-      cachedMeshData=await parseStepInWorker(buf); // non-blocking!
-      if(!cachedMeshData.length) throw new Error('STEP: no geometry found');
-      _geomCache.set(stpPath, cachedMeshData);
-      console.log('[3D] parsed '+cachedMeshData.length+' meshes via Worker');
-    } else {
-      setMsg('בונה סצנה…');
-    }
-
-    // Three.js must be loaded on main thread
-    await ensureThree();
-
-    // Build three.js scene
-    // Capture dimensions BEFORE clearing innerHTML (avoids 0x0 canvas after DOM update)
-    const cw=container.clientWidth||600, ch=container.clientHeight||420;
-    console.log('[3D] container: '+cw+'x'+ch);
-    container.innerHTML='';
-    const canvas=document.createElement('canvas');
-    canvas.className='cad-canvas';
-    container.appendChild(canvas);
-
-    const renderer=new THREE.WebGLRenderer({canvas,antialias:true});
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio,2));
-    renderer.setSize(cw,ch,false);
-    renderer.setClearColor(0x0d0f18);
-    activeRenderer=renderer;
-
-    const scene=new THREE.Scene();
-    const camera=new THREE.PerspectiveCamera(45,cw/ch,.001,1e7);
-
-    // Lights
-    scene.add(new THREE.AmbientLight(0xffffff,.5));
-    const d1=new THREE.DirectionalLight(0xffffff,.8); d1.position.set(1,2,1.5); scene.add(d1);
-    const d2=new THREE.DirectionalLight(0x8899ff,.3); d2.position.set(-1,-1,-1); scene.add(d2);
-
-    // Build Three.js group from cached mesh data
-    const group=new THREE.Group();
-    const meshColors=[0x4488cc,0x44aacc,0x66bbdd,0x3377aa,0x5599bb];
-    let totalVerts=0;
-    for(let mi=0;mi<cachedMeshData.length;mi++){
-      const d=cachedMeshData[mi];
-      totalVerts+=d.pos.length/3;
-      const geo=new THREE.BufferGeometry();
-      geo.setAttribute('position',new THREE.Float32BufferAttribute(d.pos,3));
-      if(d.norm) geo.setAttribute('normal',new THREE.Float32BufferAttribute(d.norm,3));
-      else geo.computeVertexNormals();
-      if(d.idx) geo.setIndex(new THREE.BufferAttribute(d.idx,1));
-      let col=new THREE.Color(meshColors[mi%meshColors.length]);
-      try{ const c=d.color; if(c&&!(c.r===0&&c.g===0&&c.b===0)) col=new THREE.Color(c.r,c.g,c.b); }catch(e){}
-      const mat=new THREE.MeshPhongMaterial({color:col,shininess:40,side:THREE.DoubleSide});
-      group.add(new THREE.Mesh(geo,mat));
-    }
-    if(totalVerts===0) throw new Error('No geometry vertices found');
-    console.log('[3D] vertices='+totalVerts+' meshes='+group.children.length);
-    scene.add(group);
-
-    // Fit camera
-    const box=new THREE.Box3().setFromObject(group);
-    const ctr=box.getCenter(new THREE.Vector3());
-    const sz=box.getSize(new THREE.Vector3());
-    const md=(isFinite(Math.max(sz.x,sz.y,sz.z))?Math.max(sz.x,sz.y,sz.z):0)||1;
-    console.log('[3D] bbox size='+JSON.stringify(sz)+' md='+md+' center='+JSON.stringify(ctr));
-    camera.position.set(ctr.x+md*1.2,ctr.y+md*.8,ctr.z+md*1.2);
-    camera.lookAt(ctr);
-    camera.near=md*.001; camera.far=md*100; camera.updateProjectionMatrix();
-
-    // Orbit controls
-    const ctrl=new THREE.OrbitControls(camera,renderer.domElement);
-    ctrl.target.copy(ctr); ctrl.update();
-    ctrl.enableDamping=true; ctrl.dampingFactor=.05;
-
-    // Grid
-    const grid=new THREE.GridHelper(md*3,10,0x222840,0x1a1e2e);
-    grid.position.y=box.min.y; scene.add(grid);
-
-    // Animate
-    let animId;
-    function animate(){ animId=requestAnimationFrame(animate); ctrl.update(); renderer.render(scene,camera); }
-    animate();
-
-    // Resize observer — also triggers once on mount to fix any initial 0-size
-    const ro=new ResizeObserver(()=>{
-      const rw=container.clientWidth||cw, rh=container.clientHeight||ch;
-      if(rw>0&&rh>0){ renderer.setSize(rw,rh,false); camera.aspect=rw/rh; camera.updateProjectionMatrix(); }
-    });
-    ro.observe(container);
-    // Force initial resize after layout settles
-    requestAnimationFrame(()=>{ const rw=container.clientWidth||cw,rh=container.clientHeight||ch; if(rw>0&&rh>0){ renderer.setSize(rw,rh,false); camera.aspect=rw/rh; camera.updateProjectionMatrix(); } });
-
-    // Toolbar
-    const tb=document.createElement('div'); tb.className='viewer-toolbar';
-    const resetBtn=document.createElement('button'); resetBtn.className='vt-btn'; resetBtn.textContent='⟳ Reset View';
-    resetBtn.onclick=()=>{ camera.position.set(ctr.x+md*1.2,ctr.y+md*.8,ctr.z+md*1.2); camera.lookAt(ctr); ctrl.target.copy(ctr); ctrl.update(); };
-    tb.appendChild(resetBtn);
-    const dlBtn=document.createElement('a'); dlBtn.className='vt-btn'; dlBtn.textContent='⬇ Download STP'; dlBtn.style.textDecoration='none'; dlBtn.style.cursor='pointer';
-    dlBtn.onclick=async(e)=>{ e.preventDefault();
-      try{
-        const dlUrl=await _graphDownloadUrl(stpPath);
-        const r2=await fetch(dlUrl); const b2=await r2.blob();
-        const bu=URL.createObjectURL(b2); const a2=document.createElement('a');
-        a2.href=bu; a2.download=stpPath.split('/').pop(); a2.click();
-        setTimeout(()=>URL.revokeObjectURL(bu),5000);
-      }catch(e2){ alert('Download failed: '+e2.message); }
-    };
-    tb.appendChild(dlBtn);
-    container.appendChild(tb);
-
-    renderer._roCleanup=()=>{ ro.disconnect(); cancelAnimationFrame(animId); };
-    renderer.dispose=((orig)=>function(){ if(renderer._roCleanup) renderer._roCleanup(); orig.call(renderer); })(renderer.dispose.bind(renderer));
-
-  } catch(err){
-    container.innerHTML=`<div class="viewer-msg err"><div class="vm-icon">⚠️</div><div class="vm-txt">3D preview failed:<br>${err.message}</div><div class="vm-hint">This viewer requires internet access (CDN libraries) and the file must be accessible from the browser. Download the file to open in your CAD application.</div></div>`;
-  }
-}
-
-// ─── Splitter ────────────────────────────────────────────
-(()=>{
-  const sp=document.getElementById('splitter'),pv=document.getElementById('preview');
-  let drag=false,sx=0,sw=0;
-  sp.addEventListener('mousedown',e=>{ drag=true; sx=e.clientX; sw=pv.offsetWidth; sp.classList.add('drag'); document.body.style.userSelect='none'; });
-  document.addEventListener('mousemove',e=>{ if(!drag) return; const d=sx-e.clientX; pv.style.width=Math.max(280,Math.min(900,sw+d))+'px'; });
-  document.addEventListener('mouseup',()=>{ drag=false; sp.classList.remove('drag'); document.body.style.userSelect=''; });
-})();
-
-// ── Vertical splitter (resize mfg-bottom height) ──
-(()=>{
-  const vs=document.getElementById('vSplitter');
-  const mfg=document.getElementById('mfgSide');
-  if(!vs||!mfg) return;
-  let drag=false,sy=0,sh=0;
-  vs.addEventListener('mousedown',function(e){ drag=true; sy=e.clientY; sh=mfg.offsetHeight; vs.classList.add('drag'); document.body.style.userSelect='none'; e.preventDefault(); });
-  document.addEventListener('mousemove',function(e){ if(!drag) return; const dy=sy-e.clientY; mfg.style.height=Math.max(60,Math.min(600,sh+dy))+'px'; });
-  document.addEventListener('mouseup',function(){ drag=false; vs.classList.remove('drag'); document.body.style.userSelect=''; });
-})();
-
-// ── Main tab switching ──
-function switchMainTab(id) {
-  document.querySelectorAll('.mtn-tab').forEach(function(b){ b.classList.toggle('on', b.id==='mtn-'+id); });
-  document.querySelectorAll('.mtp').forEach(function(p){ p.classList.toggle('active', p.id==='mtp-'+id); });
-  if(id==='buy')     _populateBuyTab(true);
-  if(id==='rawmat')  _populateRawmatTab(true);
-  if(id==='matfam')  _populateMatFamTab();
-  if(id==='reports') _populateReportsTab();
-}
-
-// Map from sanitized DOM id → real pb
-let _btPbMap = {};
-function _btId(pb){ return 'bt_'+pb.replace(/[^a-zA-Z0-9]/g,'_'); }
-
-function _populateBuyTab(force) {
-  const el=document.getElementById('buyTabContent');
-  const st=document.getElementById('buyTabStats');
-  if(!el) return;
-  if(!force && el.dataset.built==='1') return; // already built, use filter only
-
-  _btPbMap = {};
-  buildBuyData();
-  // EA only — exclude raw material units (M, M2, AR, A/R)
-  const RAW_UOM=/^(m2|m|ar|a\/r|kg)$/i;
-  const rows=buyData.filter(function(r){ return !RAW_UOM.test((r.uom||'').trim()); })
-                    .sort(function(a,b){ return b.totalQty - a.totalQty; });
-
-  rows.forEach(function(r){ _btPbMap[_btId(r.pb)]=r.pb; });
-  if(st) st.textContent=rows.length+' Buy items (EA)';
-
-  let priced=0, totalILS=0;
-  rows.forEach(function(r){
-    const e=getPriceEntry(r.pb);
-    if(e){ priced++; totalILS+=toILS(e.p,e.currency||'USD')*(r.totalQty||0); }
-  });
-  if(st) st.textContent=rows.length+' פריטים · '+priced+' עם מחיר · '+fmtC(totalILS)+' סה"כ';
-
-  if(!rows.length){ el.innerHTML='<div style="color:var(--text3);padding:30px;text-align:center">No EA Buy items</div>'; return; }
-
-  let h='<table id="buyTabTable" style="width:100%;border-collapse:collapse;font-size:12px">';
-  h+='<thead><tr>';
-  ['Part Number','Description','Total Qty','×Occ','Unit Price','Total Cost',''].forEach(function(c,i){
-    const w=i===1?'':'';
-    h+='<th style="position:sticky;top:0;background:var(--header-bg);border-bottom:2px solid var(--border);padding:6px 10px;text-align:left;font-size:11px;font-weight:600;color:var(--text2);text-transform:uppercase;white-space:nowrap'+w+'">'+c+'</th>';
-  });
-  h+='</tr></thead><tbody>';
-
-  rows.forEach(function(r){
-    const bid=_btId(r.pb);
-    const e=getPriceEntry(r.pb);
-    const safePb=r.pb.replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'&quot;');
-    const safeDesc=(r.desc||'').replace(/'/g,"\\'").replace(/"/g,'&quot;').slice(0,60);
-    const safeCat =(r.cat||'').replace(/'/g,"\\'").replace(/"/g,'&quot;');
-    const priceVal=e ? e.p : '';
-    const curVal  =e ? (e.currency||'USD') : 'USD';
-    const totalILS_=e ? toILS(e.p,curVal)*(r.totalQty||0) : 0;
-    const srcUrl  =e ? (e.src||'') : '';
-
-    h+='<tr class="bt-row" id="btrow-'+bid+'" data-pb="'+escHtml(r.pb)+'" data-desc="'+escHtml(r.desc||'')+'">';
-    h+='<td style="padding:5px 10px;font-family:monospace;color:var(--accent);white-space:nowrap">'+escHtml(r.pb)+'</td>';
-    h+='<td style="padding:5px 10px;color:var(--text2);max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+escHtml(r.desc||'')+'">'+escHtml(r.desc||'')+'</td>';
-    h+='<td style="padding:5px 10px;font-weight:600;text-align:right">'+r.totalQty+'</td>';
-    h+='<td style="padding:5px 10px;color:var(--text3);text-align:center">×'+((r.occ||1))+'</td>';
-    // Unit price cell — currency + input + source link
-    h+='<td style="padding:4px 8px;white-space:nowrap">';
-    h+='<div style="display:flex;align-items:center;gap:4px">';
-    h+='<select id="btcur-'+bid+'" onchange="_saveTabBuyPrice(\''+bid+'\')" style="padding:2px 4px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:11px">';
-    ['ILS','USD','EUR'].forEach(function(c){
-      h+='<option value="'+c+'"'+(curVal===c?' selected':'')+'>'+c+'</option>';
-    });
-    h+='</select>';
-    h+='<input type="number" id="btprice-'+bid+'" value="'+escHtml(String(priceVal))+'" placeholder="0.00" step="0.01" min="0"'+
-       ' onchange="_saveTabBuyPrice(\''+bid+'\')"'+
-       ' style="width:82px;padding:3px 6px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px;text-align:right">';
-    if(srcUrl){
-      h+='<a id="btsrc-'+bid+'" href="'+escHtml(srcUrl)+'" target="_blank" title="מקור מחיר" style="font-size:14px;text-decoration:none;opacity:.7">🔗</a>';
-    } else {
-      h+='<span id="btsrc-'+bid+'" style="font-size:14px;opacity:.3;cursor:default" title="אין מקור">🔗</span>';
-    }
-    h+='</div>';
-    h+='</td>';
-    // Total cost
-    h+='<td id="bttotal-'+bid+'" data-tq="'+r.totalQty+'" style="padding:5px 10px;font-family:monospace;font-weight:700;color:var(--accent2);text-align:right;white-space:nowrap">'+
-       (totalILS_>0 ? fmtC(totalILS_) : '<span style="color:var(--text3)">—</span>')+'</td>';
-    // Actions
-    h+='<td style="padding:4px 8px;white-space:nowrap">';
-    h+='<button class="btn" onclick="openAIPriceSearch(\''+safePb+'\',\''+safeDesc+'\',\''+safeCat+'\')" style="font-size:11px;padding:3px 8px" title="חיפוש מחיר AI + ספקים">🤖 AI</button>';
-    h+='</td>';
-    h+='</tr>';
-  });
-  h+='</tbody></table>';
-  el.innerHTML=h;
-  el.dataset.built='1';
-  _btCurrentFilter='';
-}
-
-function _saveTabBuyPrice(bid) {
-  const pb=_btPbMap[bid]; if(!pb) return;
-  const priceEl=document.getElementById('btprice-'+bid);
-  const curEl  =document.getElementById('btcur-'+bid);
-  if(!priceEl||!curEl) return;
-  const price=parseFloat(priceEl.value);
-  const currency=curEl.value||'USD';
-  if(!price||isNaN(price)){
-    localStorage.removeItem('px_'+pb);
-    const bn=buyNotes[pb]; if(bn){ delete bn.price; delete bn.currency; }
-  } else {
-    buyNotes[pb]=Object.assign(buyNotes[pb]||{},{price,currency});
-    localStorage.setItem('px_'+pb,JSON.stringify({p:price,src:(buyNotes[pb]||{}).url||'',currency}));
-  }
-  buyBuilt=false; buildBuyData();
-  computeTreeCosts(); refreshCostCells();
-  // update total cell
-  const totalEl=document.getElementById('bttotal-'+bid);
-  if(totalEl){
-    const tq=parseFloat(totalEl.dataset.tq||0);
-    const ils=(price&&!isNaN(price)) ? toILS(price,currency)*tq : 0;
-    totalEl.innerHTML=ils>0 ? fmtC(ils) : '<span style="color:var(--text3)">—</span>';
-  }
-  // refresh stats
-  _refreshBuyTabStats();
-}
-
-let _btCurrentFilter='';
-function _buyTabFilter(q){
-  _btCurrentFilter=q.toLowerCase();
-  document.querySelectorAll('#buyTabTable .bt-row').forEach(function(tr){
-    const pb=(tr.dataset.pb||'').toLowerCase();
-    const desc=(tr.dataset.desc||'').toLowerCase();
-    tr.style.display=(pb.includes(_btCurrentFilter)||desc.includes(_btCurrentFilter)) ? '' : 'none';
-  });
-  document.getElementById('clearBuyTabSearch').style.display=q?'block':'none';
-}
-
-function _refreshBuyTabStats(){
-  const st=document.getElementById('buyTabStats');
-  if(!st) return;
-  const RAW_UOM=/^(m2|m|ar|a\/r|kg)$/i;
-  const rows=buyData.filter(function(r){ return !RAW_UOM.test((r.uom||'').trim()); });
-  let priced=0, totalILS=0;
-  rows.forEach(function(r){
-    const e=getPriceEntry(r.pb);
-    if(e){ priced++; totalILS+=toILS(e.p,e.currency||'USD')*(r.totalQty||0); }
-  });
-  st.textContent=rows.length+' פריטים · '+priced+' עם מחיר · '+fmtC(totalILS)+' סה"כ';
-}
-
-function _fmtDims(dims) {
-  if (!dims || typeof dims !== 'object') return String(dims || '—');
-  const parts = [];
-  ['L','W','T','D','OD','ID','TH'].forEach(function(k){ if (dims[k]) parts.push(k+':'+dims[k]); });
-  return parts.length ? parts.join(' ') : '—';
-}
-
-// Compute mass for M / M2 items from configured dims + qty
-function _computeLinearMass(rm, uom, tq) {
-  if (!rm || !tq) return 0;
-  const density = parseFloat(rm.density) || 2700;
-  const dims = rm.dims || {};
-  const uomL = (uom||'').toLowerCase();
-  if (uomL === 'm2') {
-    const T = parseFloat(dims.T || dims.TH) || 0;
-    if (!T) return 0;
-    return tq * (T/1000) * density;
-  }
-  if (uomL === 'm') {
-    // Use L=1000mm (1m reference) when stock length not set
-    const Lmm = parseFloat(dims.L) || 1000;
-    const refDims = (parseFloat(dims.L) > 0) ? dims : Object.assign({}, dims, {L: '1000'});
-    const vol = calcRawMatVolume(rm.form || 'bar_round', refDims);  // m³ for one stock unit
-    if (!vol) return 0;
-    const massPerM = vol * density / (Lmm / 1000);  // kg/m
-    return tq * massPerM;
-  }
-  return 0;
-}
-
-function _populateRawmatTab(force) {
-  const el=document.getElementById('rawmatTabContent');
-  const st=document.getElementById('rawmatTabStats');
-  if(!el) return;
-
-  const RAW_UOM=/^(m2|m|ar|a\/r)$/i;
-  const IS_AR=/^(ar|a\/r)$/i;
-  const aggMap={};
-  BOM.forEach(function(b, _idx){
-    if(isRowHiddenForTabs(_idx)) return;
-    if(b.type!=='Buy') return;
-    const uom=(b.uom||'').trim();
-    if(!RAW_UOM.test(uom)) return;
-    const pb=b.pb||b.pn;
-    if(!aggMap[pb]) aggMap[pb]={pb,desc:b.desc||'',uom,tq:0,occ:0};
-    aggMap[pb].tq+=b.tq||0;
-    aggMap[pb].occ++;
-  });
-  const rows=Object.values(aggMap).sort(function(a,b){ return a.pb.localeCompare(b.pb); });
-
-  let configured=0, totalMass=0, totalCost=0;
-  rows.forEach(function(r){
-    const rm=rawMatData[r.pb];
-    if(rm) configured++;
-    let mass=0, cost=0;
-    if(rm){
-      if(IS_AR.test(r.uom)){ try{ const a=computeARAggregate(r.pb,true)||{}; mass=a.mass||0; cost=a.cost||0; }catch(e){} }
-      else{ mass=_computeLinearMass(rm,r.uom,r.tq); cost=mass*(parseFloat(rm.unitCost)||0); }
-    }
-    totalMass+=mass; totalCost+=cost;
-  });
-  if(st) st.textContent=rows.length+' חומרים · '+configured+' מוגדרים'+(totalMass>0?' · '+totalMass.toFixed(1)+' kg':'')+(totalCost>0?' · '+fmtC(totalCost):'');
-
-  if(!rows.length){ el.innerHTML='<div style="color:var(--text3);padding:30px;text-align:center">לא נמצאו חומרי גלם ב-BOM (M / M2 / AR)</div>'; return; }
-
-  const TH='position:sticky;top:0;background:var(--header-bg);border-bottom:2px solid var(--border);padding:6px 10px;text-align:left;font-size:11px;font-weight:600;color:var(--text2);text-transform:uppercase;white-space:nowrap;user-select:none;position:relative;overflow:visible';
-  const COL_WIDTHS=[130,200,55,80,80,140,90,120,130,110,110,90];
-  let h='<table id="rawmatTabTable" style="width:100%;border-collapse:collapse;font-size:12px;table-layout:fixed"><colgroup>';
-  COL_WIDTHS.forEach(function(w){ h+='<col style="width:'+w+'px">'; });
-  h+='</colgroup><thead><tr>';
-  ['PB / Part','תיאור','UOM','Qty','Form','Family · Grade','Density','עלות יחידה','ממדים','Total Mass','Total Cost',''].forEach(function(c,i){
-    h+='<th style="'+TH+(i>0?' position:relative':'')+'">'
-      +'<span>'+c+'</span>'
-      +'<div class="rh" style="position:absolute;right:0;top:0;bottom:0;width:5px;cursor:col-resize;z-index:2" onmousedown="_rmColResizeStart(event,'+i+')"></div>'
-      +'</th>';
-  });
-  h+='</tr></thead><tbody>';
-
-  rows.forEach(function(r){
-    const rm=rawMatData[r.pb]||{};
-    const isConfigured=!!rawMatData[r.pb];
-    const isAR=IS_AR.test(r.uom);
-    let mass=0, cost=0;
-    if(isConfigured){
-      if(isAR){ try{ const a=computeARAggregate(r.pb,true)||{}; mass=a.mass||0; cost=a.cost||0; }catch(e){} }
-      else{ mass=_computeLinearMass(rm,r.uom,r.tq); const uc=parseFloat(rm.unitCost)||0; cost=mass*uc; }
-    }
-    const safePb=r.pb.replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'&quot;');
-    const safeDesc=(r.desc||'').replace(/'/g,"\\'").replace(/"/g,'&quot;').slice(0,60);
-    const rmId='rm_'+r.pb.replace(/[^a-zA-Z0-9]/g,'_');
-    const rowBg=isConfigured?'':'background:rgba(245,166,35,.04)';
-
-    h+='<tr class="rm-row" id="rmrow-'+rmId+'" data-pb="'+escHtml(r.pb)+'" data-desc="'+escHtml(r.desc)+'" style="border-bottom:1px solid var(--border);'+rowBg+'">';
-    // Toggle button for AR expansion
-    h+='<td style="padding:4px 10px;font-family:monospace;color:var(--accent);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">';
-    if(isConfigured){ h+='<button id="rmtoggle-'+rmId+'" onclick="_toggleRawmatExpand(\''+safePb+'\')" style="background:none;border:none;color:var(--text3);cursor:pointer;font-size:10px;margin-right:3px;padding:0;line-height:1">▶</button>'; }
-    h+=escHtml(r.pb)+'</td>';
-    h+='<td style="padding:5px 10px;color:var(--text2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+escHtml(r.desc)+'">'+escHtml(r.desc)+'</td>';
-    h+='<td style="padding:5px 10px;font-weight:700;color:var(--warn)">'+escHtml(r.uom)+'</td>';
-    h+='<td style="padding:5px 10px;text-align:right">'+r.tq+(r.occ>1?' <span style="color:var(--text3);font-size:10px">×'+r.occ+'</span>':'')+'</td>';
-    h+='<td style="padding:5px 10px;color:var(--text2);overflow:hidden;text-overflow:ellipsis">'+escHtml(rm.form||'—')+'</td>';
-    h+='<td style="padding:5px 10px;color:var(--text2);overflow:hidden;text-overflow:ellipsis">'+escHtml((rm.family||'')+(rm.grade&&rm.grade!=='generic'?' · '+rm.grade:''))+'</td>';
-    h+='<td style="padding:5px 10px;text-align:right;color:var(--text2)">'+escHtml(rm.density?String(rm.density):'—')+'</td>';
-    // Inline unit cost
-    h+='<td style="padding:4px 8px;overflow:hidden">';
-    if(isConfigured){
-      h+='<div style="display:flex;align-items:center;gap:3px">'
-        +'<input type="number" id="rmcost-'+rmId+'" value="'+escHtml(String(rm.unitCost||''))+'" placeholder="0.00" min="0" step="0.01"'
-        +' onchange="_saveRawmatCost(\''+safePb+'\',this.value)"'
-        +' style="width:62px;padding:3px 4px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:11px;text-align:right">'
-        +'<span style="font-size:10px;color:var(--text3)">₪/'+escHtml(rm.costUnit||'kg')+'</span>'
-        +'</div>';
-    } else { h+='<span style="font-size:10px;color:var(--text3);font-style:italic">לא מוגדר</span>'; }
-    h+='</td>';
-    h+='<td style="padding:5px 10px;font-size:11px;color:var(--text3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+escHtml(_fmtDims(rm.dims))+'</td>';
-    h+='<td id="rmmass-'+rmId+'" style="padding:5px 10px;font-weight:600;text-align:right">'+(mass>0?mass.toFixed(2):'—')+'</td>';
-    h+='<td id="rmtotal-'+rmId+'" style="padding:5px 10px;font-family:monospace;font-weight:700;color:var(--accent2);text-align:right;white-space:nowrap">'+(cost>0?fmtC(cost):'—')+'</td>';
-    h+='<td style="padding:4px 6px;white-space:nowrap">'
-      +'<button class="btn" onclick="openRawMatEditor(\''+safePb+'\',\''+safeDesc+'\','+r.tq+')"'
-      +' style="font-size:11px;padding:3px 8px'+(isConfigured?'':';border-color:var(--warn);color:var(--warn)')+'">'
-      +(isConfigured?'✏️ ערוך':'⚙ הגדר')+'</button>'
-      +'</td>';
-    h+='</tr>';
-  });
-  h+='</tbody></table>';
-  el.innerHTML=h;
-  // Wire up column resizers
-  _rmInitColResize();
-}
-
-// ── Rawmat tab: expand any configured row to show per-parent breakdown ──
-function _toggleRawmatExpand(pb) {
+// ─── _toggleRawmatExpand: expand/collapse per-parent rows in rawmat tab ──────
+function _toggleRawmatExpand(pb){
   const rmId='rm_'+pb.replace(/[^a-zA-Z0-9]/g,'_');
-  const subId='rmpar-'+rmId;
-  let sub=document.getElementById(subId);
-  const btn=document.getElementById('rmtoggle-'+rmId);
-  if(sub){ sub.style.display=sub.style.display==='none'?'':'none'; if(btn) btn.textContent=sub.style.display===''?'▼':'▶'; return; }
-
-  const rm=rawMatData[pb]; if(!rm) return;
-  const parents=getParentsForRawMat(pb,true); if(!parents.length) return;
-  const density=parseFloat(rm.density)||(MATERIAL_DB[rm.family]||{}).density||2700;
-  const uc=parseFloat(rm.unitCost)||0;
-
-  // Determine UOM from BOM
-  let uom='ar';
-  for(let i=0;i<BOM.length;i++){
-    if((BOM[i].pb||BOM[i].pn)===pb && BOM[i].uom){ uom=(BOM[i].uom||'').trim().toLowerCase(); break; }
+  const expRow=document.getElementById('rmexp-'+rmId);
+  const btn=document.getElementById('rmbtn-'+rmId);
+  if(expRow){
+    const showing=expRow.style.display!=='none';
+    expRow.style.display=showing?'none':'';
+    if(btn) btn.textContent=showing?'▶':'▼';
+    return;
   }
-  const isAR_uom=/^(ar|a\/r)$/i.test(uom);
-  const isM=/^m$/i.test(uom);
-  const isM2=/^m2$/i.test(uom);
-  const isSheet=rm.form==='sheet';
-
-  // Header columns vary by UOM
-  let hd='<th style="padding:3px 8px;text-align:left;color:var(--text3);font-size:10px;font-weight:600">פריט אב</th>';
-  if(isAR_uom||isM2){ hd+='<th style="padding:3px 8px;text-align:right;color:var(--text3);font-size:10px;font-weight:600">L (mm)</th>'; }
-  if(isAR_uom||isM2){ hd+='<th style="padding:3px 8px;text-align:right;color:var(--text3);font-size:10px;font-weight:600">W (mm)</th>'; }
-  if(isM){ hd+='<th style="padding:3px 8px;text-align:right;color:var(--text3);font-size:10px;font-weight:600">אורך גלם (mm)</th>'; }
-  hd+='<th style="padding:3px 8px;text-align:right;color:var(--text3);font-size:10px;font-weight:600">'+(isAR_uom?'כמות':(isM?'אורך (m)':'שטח (m²)'))+'</th>';
-  hd+='<th style="padding:3px 8px;text-align:right;color:var(--text3);font-size:10px;font-weight:600">מסה (kg)</th>';
-  hd+='<th style="padding:3px 8px;text-align:right;color:var(--text3);font-size:10px;font-weight:600">עלות</th>';
-  hd+='<th style="padding:3px 8px;color:var(--text3);font-size:10px;font-weight:600">📐</th>';
-
-  let h='<tr id="'+subId+'" style="background:var(--surface2)">'
-    +'<td colspan="12" style="padding:0 10px 8px 32px">'
-    +'<table style="width:100%;border-collapse:collapse;font-size:11px;margin-top:4px">'
-    +'<thead><tr style="border-bottom:1px solid var(--border)">'+hd+'</tr></thead><tbody>';
-
-  parents.forEach(function(p){
-    let mass=0, cost=0, dimsHtml='', tqHtml='';
-    const safePbE=pb.replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'&quot;');
-    const safeDescE=(rm.desc||(p.parentDesc||'')).replace(/'/g,"\\'").replace(/"/g,'&quot;').slice(0,60);
-
-    if(isAR_uom){
-      const dims=getARDimsForParent(pb,p.parentPb);
-      const hasDims=!!dims.L;
-      const vol=hasDims?calcRawMatVolume(rm.form,dims):0;
-      const massUnit=vol*density;
-      dimsHtml='<td style="padding:3px 8px;text-align:right">'+(hasDims?escHtml(String(dims.L)):'<span style="color:var(--text3)">—</span>')+'</td>'
-               +'<td style="padding:3px 8px;text-align:right">'+(hasDims&&dims.W?escHtml(String(dims.W)):'<span style="color:var(--text3)">—</span>')+'</td>';
-      tqHtml='<td style="padding:3px 8px;text-align:right;color:var(--text3)">×'+p.tq+'</td>';
-      mass=massUnit*p.tq;
-      cost=rm.costUnit==='m2'&&dims.W?(parseFloat(dims.L)/1000)*(parseFloat(dims.W)/1000)*uc*p.tq:mass*uc;
-    } else if(isM){
-      // perParent blank length
-      const blankL=((rm.perParent||{})[p.parentPb]||{}).dims||{};
-      const Lmm=blankL.L||'';
-      dimsHtml='<td style="padding:3px 8px;text-align:right">'+(Lmm?Lmm+' mm':'<span style="color:var(--text3)">—</span>')+'</td>';
-      tqHtml='<td style="padding:3px 8px;text-align:right;color:var(--text3)">'+p.tq.toFixed(3)+' m</td>';
-      mass=_computeLinearMass(rm,'m',p.tq);
-      cost=mass*uc;
-    } else if(isM2){
-      const blankD=((rm.perParent||{})[p.parentPb]||{}).dims||{};
-      const Lmm=blankD.L||'', Wmm=blankD.W||'';
-      dimsHtml='<td style="padding:3px 8px;text-align:right">'+(Lmm?Lmm+' mm':'<span style="color:var(--text3)">—</span>')+'</td>'
-               +'<td style="padding:3px 8px;text-align:right">'+(Wmm?Wmm+' mm':'<span style="color:var(--text3)">—</span>')+'</td>';
-      tqHtml='<td style="padding:3px 8px;text-align:right;color:var(--text3)">'+p.tq.toFixed(3)+' m²</td>';
-      mass=_computeLinearMass(rm,'m2',p.tq);
-      cost=rm.costUnit==='m2'?p.tq*uc:mass*uc;
-    }
-
-    const hasStep=!!p.stpPath;
-    h+='<tr style="border-bottom:1px solid rgba(100,110,140,.15)">'
-      +'<td style="padding:3px 8px;font-size:10px;color:var(--accent);overflow:hidden;text-overflow:ellipsis;max-width:140px;white-space:nowrap;cursor:pointer" title="'+escHtml(p.parentPb)+' \u2014 \u05dc\u05d7\u05e5 \u05dc\u05e0\u05d5\u05d5\u05d8" onclick="jumpToParentInBOM(\'' + p.parentPb.replace(/\\/g,'\\\\').replace(/'/g,"\\'") + '\')">\u{1F441}\uFE0F '+escHtml(p.parentDesc)+'</td>'
-      +dimsHtml
-      +tqHtml
-      +'<td style="padding:3px 8px;text-align:right;font-weight:600">'+(mass>0?mass.toFixed(3):'—')+'</td>'
-      +'<td style="padding:3px 8px;text-align:right;color:var(--accent2);font-weight:700">'+(cost>0?fmtC(cost):'<span style="color:var(--text3)">—</span>')+'</td>'
-      +'<td style="padding:3px 8px">'
-        +(hasStep
-          ?'<button onclick="openRawMatEditor(\''+safePbE+'\',\''+safeDescE+'\','+p.tq+')" title="📐 הגדר ממדים עבור '+escHtml(p.parentDesc)+'" style="background:var(--accent);color:#fff;border:none;border-radius:3px;cursor:pointer;font-size:10px;padding:2px 6px">📐</button>'
-          :'<span style="color:var(--text3);font-size:9px">—</span>')
-      +'</td>'
-      +'</tr>';
+  // Build expansion row
+  const _arParents=getParentsForRawMat(pb);
+  if(!_arParents.length) return;
+  const rm=rawMatData[pb]||{};
+  const dens=parseFloat(rm.density)||(MATERIAL_DB[rm.family]||{}).density||2700;
+  const waste=1+((parseFloat(rm.wastePct)||0)/100);
+  let html='<tr id="rmexp-'+rmId+'" class="rm-exp-row"><td colspan="99" style="padding:4px 8px 8px 36px">';
+  html+='<table style="font-size:10px;border-collapse:collapse;width:100%"><thead><tr>'+
+    '<th style="text-align:left;color:var(--text3);padding:2px 6px">הורה</th>'+
+    '<th style="color:var(--text3);padding:2px 6px">L×W</th>'+
+    '<th style="color:var(--text3);padding:2px 6px">×TQ</th>'+
+    '<th style="color:var(--text3);padding:2px 6px">נטו</th>'+
+    '<th style="color:var(--text3);padding:2px 6px">גולמי</th>'+
+    '</tr></thead><tbody>';
+  _arParents.forEach(function(p){
+    const pp=p.parentPb;
+    const dims=getARDimsForParent(pb,pp);
+    const vol=dims.L?calcRawMatVolume(rm.form||'sheet',dims):0;
+    const net=vol*dens;
+    const gross=net*waste*p.tq;
+    const Lstr=dims.L?dims.L+' mm':'—';
+    const Wstr=dims.W?'×'+dims.W+' mm':'';
+    html+='<tr><td style="color:var(--text2);padding:1px 6px">'+pp+'</td>'+
+      '<td style="text-align:center;padding:1px 6px">'+Lstr+Wstr+'</td>'+
+      '<td style="text-align:center;padding:1px 6px">×'+p.tq+'</td>'+
+      '<td style="text-align:right;padding:1px 6px">'+(net>0?(net*1000).toFixed(0)+' g':'—')+'</td>'+
+      '<td style="text-align:right;padding:1px 6px;color:var(--accent2)">'+(gross>0?gross.toFixed(3)+' kg':'—')+'</td></tr>';
   });
-  h+='</tbody></table></td></tr>';
-
+  html+='</tbody></table></td></tr>';
   const mainRow=document.getElementById('rmrow-'+rmId);
-  if(mainRow){ mainRow.insertAdjacentHTML('afterend',h); }
+  if(mainRow) mainRow.insertAdjacentHTML('afterend',html);
   if(btn) btn.textContent='▼';
 }
+
 // Backward-compat alias (still called from old HTML if any)
 function _toggleRawmatAR(pb){ _toggleRawmatExpand(pb); }
 
@@ -4876,6 +2905,7 @@ function _saveRawmatCost(pb, val) {
   if(!rawMatData[pb]) return;
   rawMatData[pb].unitCost = parseFloat(val)||0;
   localStorage.setItem(RM_STORAGE_KEY, JSON.stringify(rawMatData));
+  saveProcToFile();
   computeTreeCosts(); refreshCostCells();
   const rmId='rm_'+pb.replace(/[^a-zA-Z0-9]/g,'_');
   const IS_AR=/^(ar|a\/r)$/i;
@@ -4982,6 +3012,574 @@ function getPriceEntry(pb) {
   return PRICE_DB[pb] || null;
 }
 
+
+// ─── _fmtDims helper ─────────────────────────────────────────────────────────
+function _fmtDims(dims) {
+  if (!dims || typeof dims !== 'object') return String(dims || '—');
+  const parts = [];
+  ['L','W','T','D','d','OD','ID','S','S2','H','W2','A','t','TH'].forEach(function(k){
+    if (dims[k]) parts.push(k+':'+dims[k]);
+  });
+  return parts.length ? parts.join(' ') : '—';
+}
+
+// ─── selectRow ───────────────────────────────────────────────────────────────
+function selectRow(idx){
+  if(selIdx>=0&&rows[selIdx]) rows[selIdx].classList.remove('sel');
+  selIdx=idx;
+  rows[idx].classList.add('sel');
+  rows[idx].scrollIntoView({block:'nearest', behavior:'smooth'});
+  showPreview(BOM[idx]);
+  renderMfgSide(BOM[idx]);
+}
+
+// ─── closePreview ────────────────────────────────────────────────────────────
+function closePreview(){
+  if(selIdx>=0&&rows[selIdx]) rows[selIdx].classList.remove('sel');
+  selIdx=-1;
+  document.getElementById('noSel').style.display='';
+  const pc=document.getElementById('pvContent');
+  if(pc) pc.style.display='none';
+  renderMfgSide(null);
+}
+
+// ─── showPreview ─────────────────────────────────────────────────────────────
+function showPreview(item){
+  curItem=item;
+  document.getElementById('noSel').style.display='none';
+  const pc=document.getElementById('pvContent');
+  if(pc) pc.style.display='flex';
+  const pvPN=document.getElementById('pvPN');
+  const pvDesc=document.getElementById('pvDesc');
+  const pvMeta=document.getElementById('pvMeta');
+  if(pvPN) pvPN.textContent=item.pn;
+  if(pvDesc) pvDesc.textContent=item.desc;
+  if(pvMeta) pvMeta.innerHTML=
+    '<div class="mi"><div class="ml">Catalog</div><div class="mv" style="font-family:monospace">'+(item.cat||'—')+'</div></div>'+
+    '<div class="mi"><div class="ml">QTY</div><div class="mv">'+item.qty+' '+item.uom+'</div></div>'+
+    '<div class="mi"><div class="ml">Type</div><div class="mv"><span class="badge '+(item.type==='ELTDesign'?'b-des':item.type==='Buy'?'b-buy':'b-pkg')+'">'+item.type+'</span></div></div>'+
+    '<div class="mi"><div class="ml">Status</div><div class="mv">'+(item.st||'—')+'</div></div>';
+  switchTab(curTab);
+}
+
+// ─── switchTab ───────────────────────────────────────────────────────────────
+function switchTab(tab){
+  curTab=tab;
+  const tabDrw=document.getElementById('tabDrw');
+  const tabCad=document.getElementById('tabCad');
+  const tabAll=document.getElementById('tabAll');
+  if(tabDrw) tabDrw.className='pv-tab'+(tab==='drawing'?' on':'');
+  if(tabCad) tabCad.className='pv-tab'+(tab==='cad'?' on':'');
+  if(tabAll) tabAll.className='pv-tab'+(tab==='all'?' on':'');
+  const body=document.getElementById('pvBody');
+  if(!body) return;
+  body.innerHTML='';
+  if(!curItem) return;
+  if(tab==='drawing'){
+    const pdfs=Array.isArray(curItem.pdf)?curItem.pdf:(curItem.pdf?[curItem.pdf]:[]);
+    if(!pdfs.length){
+      body.innerHTML='<div class="no-files">No drawing available.</div>';
+    } else {
+      const src=pdfs[0];
+      body.innerHTML='<iframe src="'+src+'" style="width:100%;height:100%;border:none"></iframe>';
+    }
+  } else if(tab==='cad'){
+    const cadFiles=curItem.cads||[];
+    if(!cadFiles.length){
+      body.innerHTML='<div class="no-files">No CAD files available.</div>';
+    } else {
+      body.innerHTML='<div style="display:flex;flex-direction:column;gap:6px;padding:8px">'+
+        cadFiles.map(function(f){
+          const name=f.split(/[\\/]/).pop();
+          return '<div style="display:flex;align-items:center;gap:8px;padding:6px 8px;background:var(--surface2);border-radius:5px;border:1px solid var(--border)">'+
+            '<span style="font-size:20px">🔩</span>'+
+            '<a href="'+f+'" target="_blank" style="color:var(--accent);text-decoration:none;font-size:12px;font-family:monospace">'+name+'</a>'+
+            '</div>';
+        }).join('')+
+        '</div>';
+    }
+  } else {
+    const files=[];
+    const pdfs=Array.isArray(curItem.pdf)?curItem.pdf:(curItem.pdf?[curItem.pdf]:[]);
+    pdfs.forEach(function(f){ files.push({icon:'📄',file:f,color:'#e04040'}); });
+    (curItem.cads||[]).forEach(function(f){ files.push({icon:'🔩',file:f,color:'#4090e0'}); });
+    if(!files.length){
+      body.innerHTML='<div class="no-files">No files associated with this item.</div>';
+    } else {
+      body.innerHTML='<div style="display:flex;flex-direction:column;gap:6px;padding:8px">'+
+        files.map(function(e){
+          const name=e.file.split(/[\\/]/).pop();
+          return '<div style="display:flex;align-items:center;gap:8px;padding:6px 8px;background:var(--surface2);border-radius:5px;border:1px solid var(--border)">'+
+            '<span style="font-size:20px">'+e.icon+'</span>'+
+            '<a href="'+e.file+'" target="_blank" style="color:'+e.color+';text-decoration:none;font-size:12px;font-family:monospace">'+name+'</a>'+
+            '</div>';
+        }).join('')+
+        '</div>';
+    }
+  }
+}
+
+// ─── updateStats ─────────────────────────────────────────────────────────────
+function updateStats(visCount){
+  const bar=document.getElementById('statsBar');
+  if(!bar) return;
+  let vis=visCount;
+  if(vis===undefined){
+    vis=0;
+    rows.forEach(function(tr){ if(tr&&!tr.classList.contains('hid')&&!tr.classList.contains('cc')) vis++; });
+  }
+  const n=BOM.length;
+  const tc=treeCosts[0]||0;
+  let txt=n+' פריטים · '+vis+' מוצגים';
+  if(projectQty>1) txt+=' · '+projectQty+' ערכות';
+  if(tc>0) txt+=' · עלות: '+fmtC(tc*(projectQty||1));
+  bar.textContent=txt;
+}
+
+// ─── updateWHCells ───────────────────────────────────────────────────────────
+function updateWHCells(){
+  rows.forEach(function(tr,idx){
+    if(!tr) return;
+    const sh=tr.querySelector('.cell-setupH');
+    const ch=tr.querySelector('.cell-cycleH');
+    const cumch=tr.querySelector('.cell-cumCH');
+    if(sh) sh.textContent=setupHours[idx]>0?fmtTimeAuto(setupHours[idx]*60):'';
+    if(ch) ch.textContent=directCycleH[idx]>0?fmtTimeAuto(directCycleH[idx]*60):'';
+    if(cumch) cumch.textContent=cumCycleH[idx]>0?fmtTimeAuto(cumCycleH[idx]*60):'';
+  });
+  document.querySelectorAll('[data-totalHIdx]').forEach(function(td){
+    const i=parseInt(td.dataset.totalHIdx);
+    const h=(cumHours[i]||0)*projectQty;
+    td.textContent=h>0?fmtTimeAuto(h*60):'';
+  });
+  refreshCostCells();
+  updateStats();
+}
+
+// ─── refreshCostCells ────────────────────────────────────────────────────────
+function refreshCostCells(){
+  document.querySelectorAll('[data-laborIdx]').forEach(function(td){
+    const i=parseInt(td.dataset.laborIdx);
+    const item=BOM[i];
+    if(!item||item.type!=='ELTDesign'){ td.textContent=''; return; }
+    const cost=(unitCosts[i]||0)*(item.tq||0);
+    td.textContent=cost>0?fmtC(cost):'—';
+  });
+  document.querySelectorAll('[data-buyIdx]').forEach(function(td){
+    const i=parseInt(td.dataset.buyIdx);
+    const item=BOM[i];
+    if(!item||item.type==='ELTDesign'){ td.textContent=''; return; }
+    const cost=(unitCosts[i]||0)*(item.tq||0);
+    td.textContent=cost>0?fmtC(cost):'—';
+  });
+  document.querySelectorAll('[data-costIdx]').forEach(function(td){
+    const i=parseInt(td.dataset.costIdx);
+    const uc=unitCosts[i]||0;
+    td.textContent=uc>0?fmtC(uc):'—';
+  });
+  document.querySelectorAll('[data-treeCostIdx]').forEach(function(td){
+    const i=parseInt(td.dataset.treeCostIdx);
+    const tc=treeCosts[i];
+    td.textContent=tc?fmtC(tc):'—';
+  });
+  document.querySelectorAll('[data-projCostIdx]').forEach(function(td){
+    const i=parseInt(td.dataset.projCostIdx);
+    const tc=treeCosts[i];
+    td.textContent=tc?fmtC(tc*(projectQty||1)):'—';
+  });
+}
+
+// ─── applyFilters ────────────────────────────────────────────────────────────
+function applyFilters(){
+  filterStatus=document.getElementById('statusFilter').value;
+  const filtering=!!(searchTerm||filterStatus||(selTypes.size<3)||filesOnly||maxLevel<10);
+  const matchSet=new Set();
+  BOM.forEach(function(item,idx){
+    let m=true;
+    if(item.lv>maxLevel) m=false;
+    if(m&&searchTerm&&!item.pn.toLowerCase().includes(searchTerm)&&!item.desc.toLowerCase().includes(searchTerm)&&!(item.cat||'').toLowerCase().includes(searchTerm)) m=false;
+    if(m&&!selTypes.has(item.type)) m=false;
+    if(m&&filterStatus&&item.st!==filterStatus) m=false;
+    if(m&&filesOnly){
+      const pdfs=Array.isArray(item.pdf)?item.pdf:(item.pdf?[item.pdf]:[]);
+      if(!pdfs.length&&(!item.cads||!item.cads.length)) m=false;
+    }
+    if(m) matchSet.add(idx);
+  });
+  const showSet=new Set();
+  if(filtering){
+    matchSet.forEach(function(idx){
+      showSet.add(idx);
+      const tl=BOM[idx].lv;
+      for(let i=idx-1;i>=0;i--){
+        if(BOM[i].lv<tl){ showSet.add(i); if(BOM[i].lv===0) break; }
+      }
+    });
+  }
+  let vis=0;
+  rows.forEach(function(tr,idx){
+    let show;
+    if(!filtering) show=!tr.classList.contains('cc');
+    else show=showSet.has(idx);
+    if(show&&selTypes.size<3&&!selTypes.has(BOM[idx].type)) show=false;
+    tr.classList.toggle('hid',!show);
+    if(show) vis++;
+  });
+  const es=document.getElementById('emptyState');
+  if(es) es.style.display=(vis===0)?'':'none';
+  updateStats(vis);
+  saveFilterState();
+}
+
+// ─── Tree expand/collapse ─────────────────────────────────────────────────────
+function toggleNode(idx){
+  const tr=rows[idx];
+  if(!tr) return;
+  const lv=parseInt(tr.dataset.lv);
+  const tog=tr.querySelector('.tog');
+  if(collapsed.has(idx)){
+    collapsed.delete(idx);
+    if(tog) tog.textContent='−';
+    showKids(idx,lv);
+  } else {
+    collapsed.add(idx);
+    if(tog) tog.textContent='+';
+    for(let i=idx+1;i<BOM.length;i++){
+      if(BOM[i].lv<=lv) break;
+      rows[i].classList.add('cc');
+    }
+  }
+}
+function showKids(pidx,plv){
+  for(let i=pidx+1;i<BOM.length;i++){
+    const cl=BOM[i].lv;
+    if(cl<=plv) break;
+    if(cl===plv+1){
+      rows[i].classList.remove('cc');
+      if(!collapsed.has(i)) showKids(i,cl);
+    }
+  }
+}
+function collapseAll(){
+  collapsed.clear();
+  rows.forEach(function(tr,idx){
+    const lv=parseInt(tr.dataset.lv);
+    const hasKids=tr.dataset.kids==='1';
+    if(hasKids){ collapsed.add(idx); const t=tr.querySelector('.tog'); if(t) t.textContent='+'; }
+    if(lv>0) tr.classList.add('cc'); else tr.classList.remove('cc');
+  });
+}
+function expandAll(){
+  collapsed.clear();
+  rows.forEach(function(tr){ const t=tr.querySelector('.tog'); if(t) t.textContent='−'; tr.classList.remove('cc'); });
+  applyFilters();
+}
+
+// ─── Filter controls ─────────────────────────────────────────────────────────
+function toggleFilesOnly(){
+  filesOnly=!filesOnly;
+  const btn=document.getElementById('filesOnlyBtn');
+  if(btn) btn.classList.toggle('on',filesOnly);
+  applyFilters();
+}
+function onLevel(val){
+  maxLevel=parseInt(val);
+  const disp=document.getElementById('levelDisp');
+  if(disp) disp.textContent=maxLevel>=10?'All':maxLevel;
+  applyFilters();
+}
+function toggleType(type,cb){
+  if(cb.checked) selTypes.add(type); else selTypes.delete(type);
+  updateTypeBtn();
+  applyFilters();
+}
+function toggleTypeDD(){
+  const dd=document.getElementById('typeDD');
+  if(dd) dd.classList.toggle('open');
+}
+function updateTypeBtn(){
+  const btn=document.getElementById('typeBtn');
+  if(!btn) return;
+  if(selTypes.size===3) btn.textContent='All Types ▾';
+  else btn.textContent=[...selTypes].join(', ')+'▾';
+}
+function clearSearch(){
+  const sb=document.getElementById('searchInput');
+  if(sb) sb.value='';
+  searchTerm='';
+  applyFilters();
+}
+function setProjectQty(val){
+  projectQty=Math.max(1,parseInt(val)||1);
+  updateWHCells();
+}
+
+// ─── Row check (enable/disable) ───────────────────────────────────────────────
+function toggleRowCheck(idx){
+  if(disabledRows.has(idx)) disabledRows.delete(idx);
+  else disabledRows.add(idx);
+  updateRowCheckVisuals();
+  computeTreeCosts(); buildCumulativeHours(); updateWHCells();
+  const rtc=document.getElementById('rawmatTabContent');
+  if(rtc) rtc.dataset.built='';
+  const btc=document.getElementById('buyTabContent');
+  if(btc) btc.dataset.built='';
+}
+function updateRowCheckVisuals(){
+  rows.forEach(function(tr,idx){
+    if(!tr) return;
+    const cb=tr.querySelector('.row-cb');
+    const disabled=disabledRows.has(idx);
+    if(cb) cb.checked=!disabled;
+    tr.classList.toggle('row-disabled',disabled);
+  });
+}
+
+// ─── switchMainTab ────────────────────────────────────────────────────────────
+function switchMainTab(id){
+  document.querySelectorAll('.mtn-tab').forEach(function(b){ b.classList.toggle('on',b.id==='mtn-'+id); });
+  document.querySelectorAll('.mtp').forEach(function(p){ p.classList.toggle('active',p.id==='mtp-'+id); });
+  if(id==='buy')     _populateBuyTab(true);
+  if(id==='rawmat')  _populateRawmatTab(true);
+  if(id==='matfam')  _populateMatFamTab();
+  if(id==='reports') _populateReportsTab();
+}
+
+// ─── Buy Tab ──────────────────────────────────────────────────────────────────
+let _btPbMap={};
+function _btId(pb){ return 'bt_'+pb.replace(/[^a-zA-Z0-9]/g,'_'); }
+
+function _populateBuyTab(force){
+  const el=document.getElementById('buyTabContent');
+  const st=document.getElementById('buyTabStats');
+  if(!el) return;
+  if(!force&&el.dataset.built==='1') return;
+  _btPbMap={};
+  buildBuyData();
+  const RAW_UOM=/^(m2|m|ar|a\/r|kg)$/i;
+  const filtered=buyData.filter(function(r){ return !RAW_UOM.test((r.uom||'').trim()); })
+                        .sort(function(a,b){ return b.totalQty-a.totalQty; });
+  filtered.forEach(function(r){ _btPbMap[_btId(r.pb)]=r.pb; });
+  if(!filtered.length){
+    el.innerHTML='<div style="padding:30px;text-align:center;color:var(--text3)">אין פריטי רכש</div>';
+    el.dataset.built='1';
+    return;
+  }
+  let h='<table id="buyTabTable" style="width:100%;border-collapse:collapse;font-size:12px"><colgroup>'+
+    '<col style="width:160px"><col style="width:220px"><col style="width:70px"><col style="width:60px">'+
+    '<col style="width:90px"><col style="width:70px"><col style="width:90px">'+
+    '</colgroup><thead><tr style="background:var(--header-bg);position:sticky;top:0;z-index:1">'+
+    '<th style="text-align:left;padding:5px 8px;color:var(--text3)">PN</th>'+
+    '<th style="text-align:left;padding:5px 8px;color:var(--text3)">תיאור</th>'+
+    '<th style="text-align:right;padding:5px 8px;color:var(--text3)">כמות</th>'+
+    '<th style="text-align:left;padding:5px 8px;color:var(--text3)">UOM</th>'+
+    '<th style="text-align:right;padding:5px 8px;color:var(--text3)">מחיר ליחידה</th>'+
+    '<th style="text-align:left;padding:5px 8px;color:var(--text3)">מטבע</th>'+
+    '<th style="text-align:right;padding:5px 8px;color:var(--text3)">סה"כ</th>'+
+    '</tr></thead><tbody>';
+  filtered.forEach(function(r){
+    const bid=_btId(r.pb);
+    const pentry=getPriceEntry(r.pb);
+    const price=pentry?pentry.p:0;
+    const currency=pentry?pentry.currency:'ILS';
+    const total=price?fmtC(toILS(price,currency)*r.totalQty):'—';
+    h+='<tr class="bt-row" data-pb="'+r.pb+'" data-desc="'+(r.desc||'')+'" style="border-bottom:1px solid var(--border)">'+
+      '<td style="padding:4px 8px;font-family:monospace;color:var(--text)">'+r.pb+'</td>'+
+      '<td style="padding:4px 8px;color:var(--text2)">'+r.desc+'</td>'+
+      '<td style="padding:4px 8px;text-align:right;font-weight:600">'+r.totalQty.toLocaleString()+'</td>'+
+      '<td style="padding:4px 8px;color:var(--text3)">'+r.uom+'</td>'+
+      '<td style="padding:4px 8px;text-align:right"><input type="number" id="btprice-'+bid+'" value="'+(price||'')+'" min="0" step="0.01" placeholder="מחיר" '+
+        'style="width:80px;padding:2px 4px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px;font-size:11px;text-align:right" '+
+        'onchange="_saveTabBuyPrice(this.dataset.bid)"></td>'+
+      '<td style="padding:4px 8px"><select id="btcur-'+bid+'" data-bid="'+bid+'" style="padding:2px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px;font-size:11px" '+
+        'onchange="_saveTabBuyPrice(this.dataset.bid)">'+
+        ['ILS','USD','EUR'].map(function(c){ return '<option'+(c===currency?' selected':'')+'>'+c+'</option>'; }).join('')+
+        '</select></td>'+
+      '<td id="bttotal-'+bid+'" style="padding:4px 8px;text-align:right;color:var(--accent2);font-weight:600">'+total+'</td>'+
+      '</tr>';
+  });
+  h+='</tbody></table>';
+  el.innerHTML=h;
+  el.dataset.built='1';
+  if(st) st.textContent=filtered.length+' פריטים';
+}
+
+function _buyTabFilter(q){
+  q=(q||'').toLowerCase();
+  document.querySelectorAll('#buyTabContent .bt-row').forEach(function(tr){
+    tr.style.display=(!q||(tr.dataset.pb||'').toLowerCase().includes(q)||(tr.dataset.desc||'').toLowerCase().includes(q))?'':'none';
+  });
+  const cls=document.getElementById('clearBuyTabSearch');
+  if(cls) cls.style.display=q?'':'none';
+}
+
+function _saveTabBuyPrice(bid){
+  const pb=_btPbMap[bid];
+  if(!pb) return;
+  const priceEl=document.getElementById('btprice-'+bid);
+  const curEl=document.getElementById('btcur-'+bid);
+  if(!priceEl) return;
+  const price=parseFloat(priceEl.value);
+  const currency=curEl?curEl.value:'ILS';
+  if(!isNaN(price)&&price>=0){
+    localStorage.setItem('px_'+pb,JSON.stringify({p:price,src:'',currency}));
+    if(!buyNotes[pb]) buyNotes[pb]={};
+    Object.assign(buyNotes[pb],{price,currency});
+    saveProcToFile();
+  }
+  computeTreeCosts(); refreshCostCells();
+  const totalEl=document.getElementById('bttotal-'+bid);
+  if(totalEl){
+    const r=buyData.find(function(x){return x.pb===pb;});
+    if(r) totalEl.textContent=price>0?fmtC(toILS(price,currency)*r.totalQty):'—';
+  }
+}
+
+// ─── Raw Mat Tab ──────────────────────────────────────────────────────────────
+function _populateRawmatTab(force){
+  const el=document.getElementById('rawmatTabContent');
+  const st=document.getElementById('rawmatTabStats');
+  if(!el) return;
+  if(!force&&el.dataset.built==='1') return;
+  const RAW_UOM=/^(m2|m|ar|a\/r)$/i;
+  const map={};
+  BOM.forEach(function(item,idx){
+    if(!RAW_UOM.test((item.uom||'').trim())) return;
+    if(isRowHiddenForTabs(idx)) return;
+    const pb=item.pb||item.pn;
+    if(!map[pb]) map[pb]={pb,desc:item.desc,uom:item.uom,tq:0,occ:0};
+    map[pb].tq+=(item.tq||0);
+    map[pb].occ++;
+  });
+  const items=Object.values(map);
+  if(!items.length){
+    el.innerHTML='<div style="padding:30px;text-align:center;color:var(--text3)">אין חומרי גלם</div>';
+    el.dataset.built='1';
+    if(st) st.textContent='0 פריטים';
+    return;
+  }
+  const IS_AR=/^(ar|a\/r)$/i;
+  let h='<table id="rawmatTabTable" style="width:100%;border-collapse:collapse;font-size:12px"><colgroup>'+
+    '<col style="width:30px"><col style="width:160px"><col style="width:200px"><col style="width:60px"><col style="width:80px">'+
+    '<col style="width:100px"><col style="width:80px"><col style="width:80px"><col style="width:90px"><col>'+
+    '</colgroup><thead><tr style="background:var(--header-bg);position:sticky;top:0;z-index:1">'+
+    '<th style="padding:4px 6px"></th>'+
+    '<th style="text-align:left;padding:4px 8px;color:var(--text3)"><span class="rh">PN</span></th>'+
+    '<th style="text-align:left;padding:4px 8px;color:var(--text3)"><span class="rh">תיאור</span></th>'+
+    '<th style="text-align:right;padding:4px 8px;color:var(--text3)"><span class="rh">כמות</span></th>'+
+    '<th style="text-align:left;padding:4px 8px;color:var(--text3)"><span class="rh">UOM</span></th>'+
+    '<th style="text-align:left;padding:4px 8px;color:var(--text3)"><span class="rh">חומר / צורה</span></th>'+
+    '<th style="text-align:left;padding:4px 8px;color:var(--text3)"><span class="rh">מידות</span></th>'+
+    '<th style="text-align:right;padding:4px 8px;color:var(--text3)"><span class="rh">משקל</span></th>'+
+    '<th style="text-align:right;padding:4px 8px;color:var(--text3)"><span class="rh">עלות</span></th>'+
+    '<th style="text-align:right;padding:4px 8px;color:var(--text3)"><span class="rh">מחיר/ק"ג</span></th>'+
+    '</tr></thead><tbody>';
+  items.forEach(function(r){
+    const rm=rawMatData[r.pb];
+    const configured=!!rm;
+    const rmId='rm_'+r.pb.replace(/[^a-zA-Z0-9]/g,'_');
+    let matStr='—', dimsStr='—', massStr='—', costStr='—', kgStr='—';
+    if(configured){
+      const fd=MATERIAL_DB[rm.family]||{};
+      const ff=MATERIAL_FORMS.find(function(f){return f.id===rm.form;})||{};
+      matStr=(fd.label||rm.family)+(rm.grade&&rm.grade!=='generic'?' / '+rm.grade:'')+' · '+(ff.label||rm.form);
+      dimsStr=_fmtDims(rm.dims);
+      // mass
+      let mass=0;
+      if(IS_AR.test(r.uom)){
+        try{ const a=computeARAggregate(r.pb,true)||{}; mass=a.mass||0; costStr=a.cost>0?fmtC(a.cost):'—'; }catch(e){}
+      } else {
+        const dens=parseFloat(rm.density)||(MATERIAL_DB[rm.family]||{}).density||2700;
+        const nd=Object.assign({},rm.dims||{},{L:'1000'});
+        const vol=calcRawMatVolume(rm.form||'sheet',nd);
+        const massPerM=vol*dens;
+        const wasteFactor=1+(parseFloat(rm.wastePct)||0)/100;
+        mass=massPerM*wasteFactor*r.tq;
+        const uc=parseFloat(rm.unitCost)||0;
+        const cost=uc>0?mass*uc:0;
+        if(cost>0) costStr=fmtC(cost);
+      }
+      massStr=mass>0?(mass>=1?mass.toFixed(2)+' kg':(mass*1000).toFixed(0)+' g'):'—';
+      const uc=parseFloat(rm.unitCost)||0;
+      if(uc>0&&rm.costUnit==='kg') kgStr=fmtC(uc)+'/kg';
+      else if(uc>0) kgStr=fmtC(uc)+'/'+rm.costUnit;
+    }
+    const isAR=IS_AR.test(r.uom);
+    const expandBtn=isAR?'<button id="rmbtn-'+rmId+'" data-pb="'+r.pb+'" onclick="_toggleRawmatExpand(this.dataset.pb)" style="background:none;border:none;cursor:pointer;color:var(--accent);font-size:11px;padding:1px 3px" title="הצג לפי הורים">▶</button>':'';
+    const rowBg=configured?'':'rgba(237,137,54,.08)';
+    h+='<tr id="rmrow-'+rmId+'" class="rm-row" data-pb="'+r.pb+'" data-desc="'+(r.desc||'')+'" data-tq="'+r.tq+'" style="border-bottom:1px solid var(--border);background:'+rowBg+'">'+
+      '<td style="padding:2px 4px;text-align:center">'+expandBtn+'</td>'+
+      '<td style="padding:4px 8px;font-family:monospace;color:var(--text)">'+r.pb+'</td>'+
+      '<td style="padding:4px 8px;color:var(--text2)">'+r.desc+'</td>'+
+      '<td style="padding:4px 8px;text-align:right;font-weight:600">'+r.tq.toLocaleString()+'</td>'+
+      '<td style="padding:4px 8px;color:var(--text3)">'+r.uom+'</td>'+
+      '<td id="rmmat-'+rmId+'" style="padding:4px 8px;color:var(--text2);font-size:11px">'+matStr+'</td>'+
+      '<td id="rmdims-'+rmId+'" style="padding:4px 8px;color:var(--text2);font-size:11px;font-family:monospace">'+dimsStr+'</td>'+
+      '<td id="rmmass-'+rmId+'" style="padding:4px 8px;text-align:right;color:var(--text2);font-size:11px">'+massStr+'</td>'+
+      '<td id="rmtotal-'+rmId+'" style="padding:4px 8px;text-align:right;color:var(--accent2);font-weight:600;font-size:11px">'+costStr+'</td>'+
+      '<td style="padding:4px 8px;text-align:right;color:var(--text3);font-size:11px">'+
+        (configured?'<span style="cursor:pointer;text-decoration:underline" onclick="openRawMatEditor(this.parentElement.parentElement.dataset.pb, this.parentElement.parentElement.dataset.desc)" title="ערוך">✏️</span> ':'<button class="proc-btn" onclick="openRawMatEditor(this.parentElement.parentElement.dataset.pb, this.parentElement.parentElement.dataset.desc, this.parentElement.parentElement.dataset.tq)" style="font-size:11px">⚙ הגדר</button>')+
+        (configured?kgStr:'')+
+      '</td>'+
+      '</tr>';
+  });
+  h+='</tbody></table>';
+  el.innerHTML=h;
+  el.dataset.built='1';
+  _rmInitColResize();
+  if(st) st.textContent=items.length+' פריטים';
+}
+
+// ─── Export raw materials to Excel ────────────────────────────────────────────
+function exportRawMaterials(){
+  const IS_AR=/^(ar|a\/r)$/i;
+  const rows2=[];
+  const map={};
+  BOM.forEach(function(item,idx){
+    if(!/^(m2|m|ar|a\/r)$/i.test((item.uom||'').trim())) return;
+    if(isRowHiddenForTabs(idx)) return;
+    const pb=item.pb||item.pn;
+    if(!map[pb]) map[pb]={pb,desc:item.desc,uom:item.uom,tq:0};
+    map[pb].tq+=(item.tq||0);
+  });
+  Object.values(map).forEach(function(r){
+    const rm=rawMatData[r.pb];
+    const fd=rm?MATERIAL_DB[rm.family]||{}:{};
+    const ff=rm?MATERIAL_FORMS.find(function(f){return f.id===rm.form;}):{};
+    let mass=0,cost=0;
+    if(rm){
+      if(IS_AR.test(r.uom)){
+        try{ const a=computeARAggregate(r.pb,true)||{}; mass=a.mass||0; cost=a.cost||0; }catch(e){}
+      } else {
+        const dens=parseFloat(rm.density)||(fd.density||2700);
+        const nd=Object.assign({},rm.dims||{},{L:'1000'});
+        const vol=calcRawMatVolume(rm.form||'sheet',nd);
+        const wasteFactor=1+(parseFloat(rm.wastePct)||0)/100;
+        mass=vol*dens*wasteFactor*r.tq;
+        const uc=parseFloat(rm.unitCost)||0;
+        cost=uc>0?mass*uc:0;
+      }
+    }
+    rows2.push({
+      'PN':r.pb,'תיאור':r.desc,'UOM':r.uom,'כמות':r.tq,
+      'משפחה':rm?(fd.label||rm.family):'','סגסוגת':rm?rm.grade||'':'',
+      'צורה':rm?(ff&&ff.label||rm.form):'','מידות':rm?_fmtDims(rm.dims):'',
+      'צפיפות':rm?rm.density:'','מחיר ליחידה':rm?rm.unitCost:'',
+      'יחידת מחיר':rm?rm.costUnit:'','% פסולת':rm?rm.wastePct||0:'',
+      'משקל כולל (kg)':mass>0?mass.toFixed(3):'','עלות כוללת':cost>0?cost.toFixed(2):''
+    });
+  });
+  if(!rows2.length){ alert('אין חומרי גלם לייצוא'); return; }
+  const hdrs=Object.keys(rows2[0]);
+  const csv=[hdrs.join(',')].concat(rows2.map(function(r){
+    return hdrs.map(function(h){ const v=r[h]===undefined||r[h]===null?'':String(r[h]); return v.includes(',')?'"'+v+'"':v; }).join(',');
+  })).join('\n');
+  const bom=new Uint8Array([0xEF,0xBB,0xBF]);
+  const blob=new Blob([bom,csv],{type:'text/csv;charset=utf-8'});
+  const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
+  a.download='raw_materials.csv'; a.click();
+}
+
 // ─── Init ────────────────────────────────────────────────
 try {
   const savedW = JSON.parse(localStorage.getItem(COL_WIDTHS_KEY));
@@ -4989,6 +3587,23 @@ try {
   // Enforce minimum width for proc column (index 0)
   if (colWidths[0] < 55) colWidths[0] = 55;
 } catch(e) {}
+// Wire up search input
+const _si = document.getElementById('searchInput');
+if (_si) {
+  _si.addEventListener('input', function(){
+    searchTerm = _si.value.trim().toLowerCase();
+    applyFilters();
+  });
+}
+// Close type dropdown on outside click
+document.addEventListener('click', function(e){
+  const tw = document.getElementById('typeWrap');
+  if (tw && !tw.contains(e.target)) {
+    const dd = document.getElementById('typeDD');
+    if (dd) dd.classList.remove('open');
+  }
+});
+
 buildHeader();
 buildTable();
 buildCumulativeHours();
@@ -6270,6 +4885,117 @@ async function loadProcFromFile() {
   }
 }
 
+
+// ─── Backup Export / Import ───────────────────────────────────────────────────
+
+function exportBackup() {
+  const buyPrices = {};
+  for (let i = 0; i < localStorage.length; i++) {
+    const k = localStorage.key(i);
+    if (k && k.startsWith('px_')) {
+      try { buyPrices[k.slice(3)] = JSON.parse(localStorage.getItem(k)); } catch(e) {}
+    }
+  }
+  const backup = {
+    version: 2,
+    exportedAt: new Date().toISOString(),
+    project: 'ZMAG-6910W021',
+    customProcTypes: PROC_TYPES,
+    processes: procData,
+    procMeta: procMeta,
+    flaggedRows: Array.from(flaggedRows),
+    subcontractors: subData,
+    buyNotes: buyNotes,
+    rawMaterials: rawMatData,
+    matFamPrices: matFamPrices,
+    buyPrices: buyPrices
+  };
+  const blob = new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  const ts = new Date().toISOString().slice(0, 10);
+  a.href = url; a.download = 'ZMAG_backup_' + ts + '.json';
+  document.body.appendChild(a); a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  setFileSyncStatus('✓ גיבוי יוצא', 'ok');
+}
+
+function importBackup() {
+  const inp = document.getElementById('importFileInput');
+  if (inp) inp.click();
+}
+
+function _importFileSelected(evt) {
+  const file = evt.target.files && evt.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = function(e) {
+    try {
+      const obj = JSON.parse(e.target.result);
+      if (!obj || typeof obj !== 'object' || !obj.processes) {
+        alert('קובץ גיבוי לא תקין'); return;
+      }
+      if (!confirm('ייבוא הגיבוי ידרוס את כל הנתונים הנוכחיים. להמשיך?')) return;
+      _restoreFromBackup(obj);
+      setFileSyncStatus('✓ גיבוי יובא בהצלחה', 'ok');
+    } catch(err) {
+      alert('שגיאה בקריאת קובץ: ' + err.message);
+    }
+    // Reset so same file can be imported again if needed
+    evt.target.value = '';
+  };
+  reader.readAsText(file);
+}
+
+function _restoreFromBackup(obj) {
+  if (obj.customProcTypes && Array.isArray(obj.customProcTypes) && obj.customProcTypes.length) {
+    PROC_TYPES = obj.customProcTypes;
+    localStorage.setItem(TYPES_STORAGE_KEY, JSON.stringify(PROC_TYPES));
+  }
+  if (obj.processes && typeof obj.processes === 'object') {
+    procData = obj.processes;
+    localStorage.setItem(PROC_STORAGE_KEY, JSON.stringify(procData));
+  }
+  if (obj.procMeta && typeof obj.procMeta === 'object') {
+    procMeta = obj.procMeta;
+  }
+  if (obj.rawMaterials && typeof obj.rawMaterials === 'object') {
+    rawMatData = obj.rawMaterials;
+    localStorage.setItem(RM_STORAGE_KEY, JSON.stringify(rawMatData));
+  }
+  if (obj.matFamPrices && typeof obj.matFamPrices === 'object') {
+    matFamPrices = obj.matFamPrices;
+    localStorage.setItem(MAT_FAM_PRICE_KEY, JSON.stringify(matFamPrices));
+  }
+  if (obj.buyPrices && typeof obj.buyPrices === 'object') {
+    Object.entries(obj.buyPrices).forEach(function([pb, val]) {
+      localStorage.setItem('px_' + pb, JSON.stringify(val));
+    });
+  }
+  if (obj.buyNotes && typeof obj.buyNotes === 'object') {
+    buyNotes = obj.buyNotes;
+    Object.entries(buyNotes).forEach(function([k, v]) {
+      if (v && v.price != null && v.price > 0) {
+        localStorage.setItem('px_' + k, JSON.stringify({ p: v.price, src: v.url || '', currency: v.currency || 'USD' }));
+      }
+    });
+  }
+  if (obj.subcontractors) subData = obj.subcontractors;
+  if (Array.isArray(obj.flaggedRows)) {
+    flaggedRows = new Set(obj.flaggedRows.map(Number));
+    localStorage.setItem(FLAG_KEY, JSON.stringify([...flaggedRows]));
+  }
+  // Rebuild UI
+  try { buildTable(); } catch(e) {}
+  try { buildCumulativeHours(); } catch(e) {}
+  try { updateWHCells(); } catch(e) {}
+  try { applyFilters(); } catch(e) {}
+  try { computeTreeCosts(); } catch(e) {}
+  // Optionally persist to connected file
+  saveProcToFile();
+}
+
 function _mergeLoadedProc(obj) {
   // Merge procMeta from loaded object, backfilling any entries that lack it
   if (obj.procMeta && typeof obj.procMeta === 'object') {
@@ -6282,6 +5008,34 @@ function _mergeLoadedProc(obj) {
       procMeta[pn] = { analyzedAt: fallback, analyzedBy: by, updatedAt: fallback, updatedBy: by };
     }
   });
+  // Restore all additional data stores
+  if (obj.rawMaterials && typeof obj.rawMaterials === 'object') {
+    rawMatData = obj.rawMaterials;
+    localStorage.setItem(RM_STORAGE_KEY, JSON.stringify(rawMatData));
+  }
+  if (obj.matFamPrices && typeof obj.matFamPrices === 'object') {
+    matFamPrices = obj.matFamPrices;
+    localStorage.setItem(MAT_FAM_PRICE_KEY, JSON.stringify(matFamPrices));
+  }
+  if (obj.buyPrices && typeof obj.buyPrices === 'object') {
+    Object.entries(obj.buyPrices).forEach(function([pb, val]) {
+      localStorage.setItem('px_' + pb, JSON.stringify(val));
+    });
+  }
+  if (obj.buyNotes && typeof obj.buyNotes === 'object') {
+    buyNotes = obj.buyNotes;
+    Object.entries(buyNotes).forEach(function([k, v]) {
+      if (v && v.price != null && v.price > 0) {
+        localStorage.setItem('px_' + k, JSON.stringify({ p: v.price, src: v.url || '', currency: v.currency || 'USD' }));
+      }
+    });
+  }
+  if (obj.subcontractors) subData = obj.subcontractors;
+  if (Array.isArray(obj.flaggedRows)) {
+    const serverFlags = new Set(obj.flaggedRows.map(Number));
+    flaggedRows = new Set([...flaggedRows, ...serverFlags]);
+    localStorage.setItem(FLAG_KEY, JSON.stringify([...flaggedRows]));
+  }
 }
 
 async function saveProcToFile() {
@@ -6316,6 +5070,13 @@ async function saveProcToFile() {
 async function _graphWriteProcFile() {
   const token = await _graphToken();
   const url = await _graphFileUrl();
+  const buyPrices = {};
+  for (let i = 0; i < localStorage.length; i++) {
+    const k = localStorage.key(i);
+    if (k && k.startsWith('px_')) {
+      try { buyPrices[k.slice(3)] = JSON.parse(localStorage.getItem(k)); } catch(e) {}
+    }
+  }
   const payload = JSON.stringify({
     version: 1, project: 'ZMAG-6910W021',
     lastSaved: new Date().toISOString(),
@@ -6326,7 +5087,9 @@ async function _graphWriteProcFile() {
     flaggedRows: Array.from(flaggedRows),
     subcontractors: subData,
     buyNotes: buyNotes,
-    rawMaterials: rawMatData
+    rawMaterials: rawMatData,
+    matFamPrices: matFamPrices,
+    buyPrices: buyPrices
   }, null, 2);
   const r = await fetch(url, {
     method: 'PUT',
@@ -6398,6 +5161,15 @@ async function loadProcFromGraph() {
       rawMatData = obj.rawMaterials;
       localStorage.setItem(RM_STORAGE_KEY, JSON.stringify(rawMatData));
     }
+    if (obj.matFamPrices && typeof obj.matFamPrices === 'object') {
+      matFamPrices = obj.matFamPrices;
+      localStorage.setItem(MAT_FAM_PRICE_KEY, JSON.stringify(matFamPrices));
+    }
+    if (obj.buyPrices && typeof obj.buyPrices === 'object') {
+      Object.entries(obj.buyPrices).forEach(function([pb, val]) {
+        localStorage.setItem('px_' + pb, JSON.stringify(val));
+      });
+    }
     {
       // MERGE flags: server + local → union (preserves all users' flags)
       const preLocal = new Set([...flaggedRows]);
@@ -6428,13 +5200,25 @@ async function loadProcFromGraph() {
 
 async function _writeProcFile() {
   if (!_procFileHandle) return;
+  const buyPrices = {};
+  for (let i = 0; i < localStorage.length; i++) {
+    const k = localStorage.key(i);
+    if (k && k.startsWith('px_')) {
+      try { buyPrices[k.slice(3)] = JSON.parse(localStorage.getItem(k)); } catch(e) {}
+    }
+  }
   const payload = JSON.stringify({
     version: 1, project: 'ZMAG-6910W021',
     lastSaved: new Date().toISOString(),
     customProcTypes: PROC_TYPES,
     processes: procData,
     procMeta: procMeta,
-    rawMaterials: rawMatData
+    flaggedRows: Array.from(flaggedRows),
+    subcontractors: subData,
+    buyNotes: buyNotes,
+    rawMaterials: rawMatData,
+    matFamPrices: matFamPrices,
+    buyPrices: buyPrices
   }, null, 2);
   const w = await _procFileHandle.createWritable();
   await w.write(payload); await w.close();
