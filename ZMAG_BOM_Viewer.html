@@ -891,17 +891,11 @@ function getItemUnitCost(item, bomIdx) {
       if (isARUnit(uom)) {
         // Per-parent: each BOM occurrence has a different parent assembly → different blank size
         const parentPb = getParentPbForBOMIndex(bomIdx);
+        const dims = getARDimsForParent(pb, parentPb);
+        if (!dims.L) return 0;
         const rm = rawMatData[pb];
         const density = parseFloat(rm.density) || (MATERIAL_DB[rm.family]||{}).density || 1000;
         const uc = parseFloat(rm.unitCost) || 0;
-        // Prefer exact mesh volume from STEP (geometry-independent)
-        const perP = rm.perParent && rm.perParent[parentPb];
-        if (perP && perP.meshVolume_m3 > 0) {
-          return perP.meshVolume_m3 * density * uc;  // exact piece cost
-        }
-        // Fallback: estimated dims
-        const dims = getARDimsForParent(pb, parentPb);
-        if (!dims.L) return 0;
         const vol = calcRawMatVolume(rm.form, dims);
         const mass = vol * density;
         if (rm.costUnit === 'm2' && dims.W)
@@ -934,15 +928,11 @@ function getItemUnitCost(item, bomIdx) {
       if (isARUnit(uom)) {
         // Per-parent blank cost (same logic as Buy above)
         const parentPb = getParentPbForBOMIndex(bomIdx);
+        const dims = getARDimsForParent(pb, parentPb);
+        if (!dims.L) return 0;
         const rm = rawMatData[pb];
         const density = parseFloat(rm.density) || (MATERIAL_DB[rm.family]||{}).density || 1000;
         const uc = parseFloat(rm.unitCost) || 0;
-        const perP = rm.perParent && rm.perParent[parentPb];
-        if (perP && perP.meshVolume_m3 > 0) {
-          return perP.meshVolume_m3 * density * uc;
-        }
-        const dims = getARDimsForParent(pb, parentPb);
-        if (!dims.L) return 0;
         const vol = calcRawMatVolume(rm.form, dims);
         const mass = vol * density;
         if (rm.costUnit === 'm2' && dims.W)
@@ -1008,11 +998,11 @@ function computeTreeCosts() {
   // Bottom-up: tree cost = own extended cost + children tree costs
   for (let i = n - 1; i >= 0; i--) {
     const lv = BOM[i].lv;
-    let tsum = unitCosts[i] * getEffectiveTq(BOM[i], i);
+    let tsum = unitCosts[i] * (BOM[i].tq || 0);
     let ssum = itemSetupCost[i];
     for (let j = i + 1; j < n; j++) {
       if (BOM[j].lv <= lv) break;
-      tsum += unitCosts[j] * getEffectiveTq(BOM[j], j);
+      tsum += unitCosts[j] * (BOM[j].tq || 0);
       ssum += itemSetupCost[j];
     }
     treeCosts[i]    = tsum;
@@ -3680,7 +3670,7 @@ function refreshCostCells() {
     const i = parseInt(td.dataset.buyIdx);
     const item = BOM[i];
     if (!item || item.type === 'ELTDesign') { td.textContent = ''; return; }
-    const cost = (unitCosts[i] || 0) * getEffectiveTq(item, i);
+    const cost = (unitCosts[i] || 0) * (item.tq || 0);
     td.textContent = cost > 0 ? fmtC(cost) : '—';
   });
   document.querySelectorAll('[data-cost-idx]').forEach(function(td){
