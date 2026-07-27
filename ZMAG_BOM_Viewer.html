@@ -2566,7 +2566,7 @@ function openRawMatEditor(pb, desc, tq) {
           (hasStep
             ? '<button onclick="runARStepEstimateForParent(\''+safePb+'\','+i+',this)" data-stp="'+stpEsc+'" '+
               'style="padding:2px 6px;background:#ed8936;color:#fff;border:none;border-radius:3px;cursor:pointer;font-size:10px" title="'+stpEsc+'">📐</button>'
-            : '<span style="font-size:9px;color:var(--text3)">—</span>')+
+            : '<input type="file" id="stepBrowse-'+i+'" accept=".stp,.step" style="display:none" '+'onchange="onManualStepSelected(\''+safePb+'\','+i+',this)">'+'<button onclick="document.getElementById(\'stepBrowse-'+i+'\').click()" '+'title="בחר קובץ STEP לחישוב נפח" '+'style="padding:2px 5px;background:var(--surface2);color:var(--text3);border:1px solid var(--border);border-radius:3px;cursor:pointer;font-size:10px">📂</button>')+
           (p.plPdfPath
             ? ' <button onclick="runPLPdfLookup(\''+safePb+'\','+i+',this)" data-pdf="'+(p.plPdfPath||'').replace(/"/g,'&quot;')+'" '+
               'style="padding:2px 5px;background:#2b6cb0;color:#fff;border:none;border-radius:3px;cursor:pointer;font-size:10px" title="קליטת מידע מ-PL PDF">📄</button>'
@@ -2781,6 +2781,23 @@ function arRefreshRow(pb, rowIdx) {
     if (inp.value && inp.dataset.dim && !dims[inp.dataset.dim]) dims[inp.dataset.dim] = inp.value;
   });
 
+  // ── Restore STEP toggle if meshVolume already computed ──────────────────────
+  const resEl = document.getElementById('ar-presult-'+rowIdx);
+  if (resEl && rawMatData[pb] && rawMatData[pb].perParent && rawMatData[pb].perParent[parentPb]) {
+    const perP = rawMatData[pb].perParent[parentPb];
+    if (perP.meshVolume_m3 > 0 && !resEl.querySelector('button')) {
+      const massG = perP.meshVolume_m3 * density * 1000;
+      const massStr = massG >= 1000 ? (massG/1000).toFixed(3)+' kg' : massG.toFixed(1)+' g';
+      const vol_cm3 = (perP.meshVolume_m3 * 1e6).toFixed(1);
+      const useStep = !!perP.useStepVolume;
+      resEl.innerHTML =
+        '<span style="color:#68d391;font-size:9px" title="נפח STEP שמור">✓ '+vol_cm3+'cm³ · '+massStr+'</span>'
+        +' <button data-pb="'+pb+'" data-ppb="'+parentPb+'" onclick="toggleStepVolume(this.dataset.pb,this.dataset.ppb,this)"'
+        +' title="'+(useStep?'מחושב מנפח STEP — לחץ לביטול':'לחץ לחישוב עלות מנפח STEP')+'"'
+        +' style="font-size:10px;padding:1px 6px;border-radius:3px;border:1px solid var(--border);cursor:pointer;background:'+(useStep?'rgba(56,161,105,.2)':'var(--surface2)')+';color:'+(useStep?'#68d391':'var(--text3)')+'">STEP '+(useStep?'☑':'☐')+'</button>';
+    }
+  }
+
   if (isARUnit(uom)) {
     // AR: tqRaw = number of blanks. Per-blank dims required.
     if (!dims.L) { massTd.textContent = ''; subTd.textContent = ''; return; }
@@ -2868,6 +2885,50 @@ function arInitRowDisplays(pb) {
 }
 
 // Toggle whether this per-parent BOM row uses STEP mesh volume or dims-based for cost
+// Handle manual STEP file selection (for rows without a linked STEP path in BOM)
+async function onManualStepSelected(pb, rowIdx, input) {
+  const file = input.files && input.files[0];
+  if (!file) return;
+  const row = document.getElementById('ar-prow-'+rowIdx);
+  const resultEl = document.getElementById('ar-presult-'+rowIdx);
+  if (!row) return;
+  const parentPb = row.dataset.ppb;
+  if (resultEl) resultEl.innerHTML = '<span style="color:var(--text3);font-size:9px">⏳</span>';
+  try {
+    const buf = await file.arrayBuffer();
+    const meshData = await parseStepInWorker(buf);
+    if (!meshData || !meshData.length) throw new Error('אין גיאומטריה ב-STEP');
+    const _meshVol_mm3 = computeMeshVolume(meshData);
+    const _meshVol_m3  = _meshVol_mm3 / 1e9;
+    const dens = parseFloat(document.getElementById('rmDensity')?.value)
+      || parseFloat((rawMatData[pb]||{}).density)
+      || 2700;
+    const massG = _meshVol_m3 * dens * 1000;
+    const massStr = massG >= 1000 ? (massG/1000).toFixed(3)+' kg' : massG.toFixed(1)+' g';
+    // Persist
+    if (rawMatData[pb]) {
+      if (!rawMatData[pb].perParent) rawMatData[pb].perParent = {};
+      if (!rawMatData[pb].perParent[parentPb]) rawMatData[pb].perParent[parentPb] = {dims:{}};
+      rawMatData[pb].perParent[parentPb].meshVolume_m3 = _meshVol_m3;
+      const T_mm = parseFloat((rawMatData[pb].dims||{}).T) || 0;
+      if (T_mm > 0) rawMatData[pb].perParent[parentPb].stepArea_m2 = _meshVol_m3 / (T_mm/1000);
+      localStorage.setItem(RM_STORAGE_KEY, JSON.stringify(rawMatData));
+    }
+    if (resultEl) {
+      resultEl.innerHTML =
+        '<span style="color:#68d391;font-size:9px" title="'+file.name+'">✓ '+(_meshVol_mm3/1000).toFixed(1)+'cm³ · '+massStr+'</span>'
+        +' <button data-pb="'+pb+'" data-ppb="'+parentPb+'" onclick="toggleStepVolume(this.dataset.pb,this.dataset.ppb,this)"'
+        +' title="לחץ לחישוב עלות מנפח STEP"'
+        +' style="font-size:10px;padding:1px 6px;border-radius:3px;border:1px solid var(--border);cursor:pointer;background:var(--surface2);color:var(--text3)">STEP ☐</button>';
+    }
+    arRefreshRow(pb, rowIdx);
+    arRefreshAggregate(pb);
+  } catch(e) {
+    if (resultEl) resultEl.innerHTML = '<span style="color:#fc8181;font-size:9px" title="'+e.message+'">⚠ '+e.message.slice(0,30)+'</span>';
+  }
+  input.value = '';
+}
+
 function toggleStepVolume(pb, parentPb, btn) {
   if (!rawMatData[pb] || !rawMatData[pb].perParent || !rawMatData[pb].perParent[parentPb]) return;
   const perP = rawMatData[pb].perParent[parentPb];
