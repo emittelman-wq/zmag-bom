@@ -2571,7 +2571,7 @@ function openRawMatEditor(pb, desc, tq) {
             ? ' <button onclick="runPLPdfLookup(\''+safePb+'\','+i+',this)" data-pdf="'+(p.plPdfPath||'').replace(/"/g,'&quot;')+'" '+
               'style="padding:2px 5px;background:#2b6cb0;color:#fff;border:none;border-radius:3px;cursor:pointer;font-size:10px" title="קליטת מידע מ-PL PDF">📄</button>'
             : '')+
-          '<span id="ar-presult-'+i+'" style="font-size:9px;margin-left:2px"></span>'+
+          '<div id="ar-presult-'+i+'" style="font-size:9px;margin-top:2px;white-space:normal;max-width:110px"></div>'+
         '</td>'+
       '</tr>';
     }).join('');
@@ -2792,9 +2792,9 @@ function arRefreshRow(pb, rowIdx) {
       const useStep = !!perP.useStepVolume;
       resEl.innerHTML =
         '<span style="color:#68d391;font-size:9px" title="נפח STEP שמור">✓ '+vol_cm3+'cm³ · '+massStr+'</span>'
-        +' <button data-pb="'+pb+'" data-ppb="'+parentPb+'" onclick="toggleStepVolume(this.dataset.pb,this.dataset.ppb,this)"'
+        +'<br><button data-pb="'+pb+'" data-ppb="'+parentPb+'" onclick="toggleStepVolume(this.dataset.pb,this.dataset.ppb,this)"'
         +' title="'+(useStep?'מחושב מנפח STEP — לחץ לביטול':'לחץ לחישוב עלות מנפח STEP')+'"'
-        +' style="font-size:10px;padding:1px 6px;border-radius:3px;border:1px solid var(--border);cursor:pointer;background:'+(useStep?'rgba(56,161,105,.2)':'var(--surface2)')+';color:'+(useStep?'#68d391':'var(--text3)')+'">STEP '+(useStep?'☑':'☐')+'</button>';
+        +' style="font-size:9px;padding:1px 5px;margin-top:2px;border-radius:3px;border:1px solid var(--border);cursor:pointer;background:'+(useStep?'rgba(56,161,105,.2)':'var(--surface2)')+';color:'+(useStep?'#68d391':'var(--text3)')+'">STEP '+(useStep?'☑':'☐')+'</button>';
     }
   }
 
@@ -2998,9 +2998,11 @@ async function runARStepEstimateForParent(pb, rowIdx, btn) {
     var _btnBg6 = _curUseStep6 ? 'rgba(56,161,105,.2)' : 'var(--surface2)';
     var _btnCl6 = _curUseStep6 ? '#68d391' : 'var(--text3)';
     var _btnTx6 = 'STEP '+(_curUseStep6 ? '\u2611' : '\u2610');
-    if (resultEl) resultEl.innerHTML = '<span style="color:#68d391;cursor:help" title="'+est.note.replace(/"/g,'&quot;')+'">\u2713</span>'
-      + ' <span style="color:var(--text3);font-size:10px">' + (_meshVol_mm3/1000).toFixed(1)+'cm\u00b3 \u00b7 '+_massStr6+'</span>'
-      + ' <button onclick="toggleStepVolume(\''+pb+'\',\''+parentPb+'\',this)" title="'+(_curUseStep6?'מחושב מנפח STEP — לחץ לביטול':'לחץ לחישוב עלות מנפח STEP')+'" style="font-size:10px;padding:1px 6px;border-radius:3px;border:1px solid var(--border);cursor:pointer;background:'+_btnBg6+';color:'+_btnCl6+'">'+_btnTx6+'</button>';
+    if (resultEl) resultEl.innerHTML =
+      '<span style="color:#68d391;font-size:9px" title="'+est.note.replace(/"/g,'&quot;')+'">\u2713 '+(_meshVol_mm3/1000).toFixed(1)+'cm\u00b3 \u00b7 '+_massStr6+'</span>'
+      +'<br><button data-pb="'+pb+'" data-ppb="'+parentPb+'" onclick="toggleStepVolume(this.dataset.pb,this.dataset.ppb,this)"'
+      +' title="'+(_curUseStep6?'\u05de\u05d7\u05d5\u05e9\u05d1 \u05de\u05e0\u05e4\u05d7 STEP \u2014 \u05dc\u05d7\u05e5 \u05dc\u05d1\u05d9\u05d8\u05d5\u05dc':'\u05dc\u05d7\u05e5 \u05dc\u05d7\u05d9\u05e9\u05d5\u05d1 \u05e2\u05dc\u05d5\u05ea \u05de\u05e0\u05e4\u05d7 STEP')+'"'
+      +' style="font-size:9px;padding:1px 5px;border-radius:3px;border:1px solid var(--border);cursor:pointer;margin-top:2px;background:'+_btnBg6+';color:'+_btnCl6+'">'+_btnTx6+'</button>';
     // Persist to rawMatData only if item already saved
     if (rawMatData[pb]) {
       if (!rawMatData[pb].perParent) rawMatData[pb].perParent = {};
@@ -4639,15 +4641,13 @@ function _computeLinearMass(rm, uom, tq) {
     return tq * (T/1000) * density;
   }
   if (uomL === 'm') {
-    const D  = parseFloat(dims.D || dims.OD) || 0;
-    const W  = parseFloat(dims.W) || 0;
-    const Th = parseFloat(dims.T || dims.TH) || 0;
-    let A = 0;
-    if (D) A = Math.PI * (D/2000) * (D/2000);
-    else if (W && Th) A = (W/1000) * (Th/1000);
-    else if (W) A = (W/1000) * (W/1000);
-    if (!A) return 0;
-    return tq * A * density;
+    // Use calcRawMatVolume for accurate section area (works for all form types)
+    const Lmm = parseFloat(dims.L) || 0;
+    if (!Lmm) return 0;
+    const vol = calcRawMatVolume(rm.form || 'bar_round', dims);  // m³ for one stock unit
+    if (!vol) return 0;
+    const massPerM = vol * density / (Lmm / 1000);  // kg/m
+    return tq * massPerM;
   }
   return 0;
 }
