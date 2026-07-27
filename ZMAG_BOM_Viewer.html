@@ -634,6 +634,10 @@ let disabledRows = new Set(); // BOM indices that are unchecked
 function isRowExcluded(i) {
   return disabledRows.has(i);
 }
+// For rawmat/buy TAB display: also respect the visual filter (type/level/status)
+function isRowHiddenForTabs(i) {
+  return disabledRows.has(i) || !!(rows[i] && rows[i].classList.contains('hid'));
+}
 let flaggedRows = new Set();
 try{flaggedRows=new Set(JSON.parse(localStorage.getItem('zmag_flagged_6910W021')||'[]').map(Number));}catch(e){}
 if(localStorage.getItem('zmag_theme')==='light'){document.body.classList.add('light-mode');}
@@ -887,11 +891,17 @@ function getItemUnitCost(item, bomIdx) {
       if (isARUnit(uom)) {
         // Per-parent: each BOM occurrence has a different parent assembly → different blank size
         const parentPb = getParentPbForBOMIndex(bomIdx);
-        const dims = getARDimsForParent(pb, parentPb);
-        if (!dims.L) return 0;
         const rm = rawMatData[pb];
         const density = parseFloat(rm.density) || (MATERIAL_DB[rm.family]||{}).density || 1000;
         const uc = parseFloat(rm.unitCost) || 0;
+        // Prefer exact mesh volume from STEP (geometry-independent)
+        const perP = rm.perParent && rm.perParent[parentPb];
+        if (perP && perP.meshVolume_m3 > 0) {
+          return perP.meshVolume_m3 * density * uc;  // exact piece cost
+        }
+        // Fallback: estimated dims
+        const dims = getARDimsForParent(pb, parentPb);
+        if (!dims.L) return 0;
         const vol = calcRawMatVolume(rm.form, dims);
         const mass = vol * density;
         if (rm.costUnit === 'm2' && dims.W)
@@ -924,11 +934,15 @@ function getItemUnitCost(item, bomIdx) {
       if (isARUnit(uom)) {
         // Per-parent blank cost (same logic as Buy above)
         const parentPb = getParentPbForBOMIndex(bomIdx);
-        const dims = getARDimsForParent(pb, parentPb);
-        if (!dims.L) return 0;
         const rm = rawMatData[pb];
         const density = parseFloat(rm.density) || (MATERIAL_DB[rm.family]||{}).density || 1000;
         const uc = parseFloat(rm.unitCost) || 0;
+        const perP = rm.perParent && rm.perParent[parentPb];
+        if (perP && perP.meshVolume_m3 > 0) {
+          return perP.meshVolume_m3 * density * uc;
+        }
+        const dims = getARDimsForParent(pb, parentPb);
+        if (!dims.L) return 0;
         const vol = calcRawMatVolume(rm.form, dims);
         const mass = vol * density;
         if (rm.costUnit === 'm2' && dims.W)
@@ -959,6 +973,27 @@ function getItemSetupCost(item) {
     return sum + qty * t.cost;
   }, 0);
 }
+// Returns effective quantity multiplier for cost accumulation.
+// M2 + STEP meshVolume_m3: uses vol/T (actual flat blank area).
+// AR + STEP meshVolume_m3: returns 1 (unitCosts already holds piece cost).
+// Otherwise: item.tq as normal.
+function getEffectiveTq(item, bomIdx) {
+  var pb = item.pb || item.pn;
+  var uom = (item.uom || '').trim();
+  if (rawMatData[pb]) {
+    var parentPb = getParentPbForBOMIndex(bomIdx);
+    var perP = rawMatData[pb].perParent && rawMatData[pb].perParent[parentPb];
+    if (perP && perP.meshVolume_m3 > 0) {
+      if (/^m2$/i.test(uom)) {
+        var T_mm = parseFloat((rawMatData[pb].dims || {}).T) || 0;
+        if (T_mm > 0) return perP.meshVolume_m3 / (T_mm / 1000);  // actual area m²
+      }
+      if (isARUnit(uom)) return 1;  // piece cost already in unitCosts[i]
+    }
+  }
+  return item.tq || 0;
+}
+
 function computeTreeCosts() {
   const n = BOM.length;
   unitCosts    = new Array(n);
@@ -973,11 +1008,11 @@ function computeTreeCosts() {
   // Bottom-up: tree cost = own extended cost + children tree costs
   for (let i = n - 1; i >= 0; i--) {
     const lv = BOM[i].lv;
-    let tsum = unitCosts[i] * (BOM[i].tq || 0);
+    let tsum = unitCosts[i] * getEffectiveTq(BOM[i], i);
     let ssum = itemSetupCost[i];
     for (let j = i + 1; j < n; j++) {
       if (BOM[j].lv <= lv) break;
-      tsum += unitCosts[j] * (BOM[j].tq || 0);
+      tsum += unitCosts[j] * getEffectiveTq(BOM[j], j);
       ssum += itemSetupCost[j];
     }
     treeCosts[i]    = tsum;
@@ -1969,11 +2004,11 @@ function getARDimsForParent(pb, parentPb) {
 }
 
 // Generic: collect unique parent PBs for ANY raw-material (M / M2 / AR), with total BOM tq + STEP + PL PDF paths
-function getParentsForRawMat(pb) {
+function getParentsForRawMat(pb, tabMode) {
   const map = new Map();
   const RAW_UOM = /^(m2|m|ar|a\/r)$/i;
   BOM.forEach(function(item, idx) {
-    if (isRowExcluded(idx)) return;
+    if (tabMode ? isRowHiddenForTabs(idx) : isRowExcluded(idx)) return;
     if ((item.pb || item.pn) !== pb) return;
     if (!RAW_UOM.test((item.uom||'').trim())) return;
     const tq = item.tq || 0;
@@ -2032,14 +2067,14 @@ function getParentsForARMaterial(pb) {
 }
 
 // Total mass & cost across ALL AR occurrences — each parent uses its own perParent dims
-function computeARAggregate(pb) {
+function computeARAggregate(pb, tabMode) {
   const rm = rawMatData[pb];
   if (!rm) return {mass:0, cost:0, area:0, hasAny:false};
   const density = parseFloat(rm.density) || (MATERIAL_DB[rm.family]||{}).density || 1000;
   const uc = parseFloat(rm.unitCost) || 0;
   let totalMass = 0, totalArea = 0, count = 0;
   BOM.forEach(function(item, idx) {
-    if (isRowExcluded(idx)) return;
+    if (tabMode ? isRowHiddenForTabs(idx) : isRowExcluded(idx)) return;
     if ((item.pb || item.pn) !== pb) return;
     if (!isARUnit(item.uom)) return;
     const tq = item.tq || 0;
@@ -2102,6 +2137,23 @@ function getBBoxFromMeshData(meshData) {
   }
   if(x0===Infinity) return null;
   return {dx:x1-x0, dy:y1-y0, dz:z1-z0};
+}
+
+// Exact mesh volume via signed-tetrahedra (divergence theorem). Coords assumed in mm → returns mm³
+function computeMeshVolume(meshData) {
+  var vol = 0;
+  for (var mi = 0; mi < meshData.length; mi++) {
+    var m = meshData[mi], pos = m.pos, idx = m.idx;
+    if (!pos || !idx) continue;
+    for (var ti = 0; ti < idx.length; ti += 3) {
+      var i0=idx[ti]*3, i1=idx[ti+1]*3, i2=idx[ti+2]*3;
+      var x0=pos[i0],y0=pos[i0+1],z0=pos[i0+2];
+      var x1=pos[i1],y1=pos[i1+1],z1=pos[i1+2];
+      var x2=pos[i2],y2=pos[i2+1],z2=pos[i2+2];
+      vol += x0*(y1*z2-y2*z1) + x1*(y2*z0-y0*z2) + x2*(y0*z1-y1*z0);
+    }
+  }
+  return Math.abs(vol)/6;  // mm³
 }
 
 // Estimate required raw material dims (mm) from part bbox + form (+10% margin)
@@ -2549,6 +2601,9 @@ async function runARStepEstimateForParent(pb, rowIdx, btn) {
       if (!meshData || !meshData.length) throw new Error('אין גאומטריה ב-STEP');
       _geomCache.set(stpPath, meshData);
     }
+    // Compute exact mesh volume (geometry-independent mass/cost)
+    const _meshVol_mm3 = computeMeshVolume(meshData);
+    const _meshVol_m3  = _meshVol_mm3 / 1e9;
     const bbox = getBBoxFromMeshData(meshData);
     if (!bbox) throw new Error('אין bounding box');
     const form = document.getElementById('rmForm')?.value || (rawMatData[pb]||{}).form || 'sheet';
@@ -2571,13 +2626,21 @@ async function runARStepEstimateForParent(pb, rowIdx, btn) {
         }
       });
     }
-    if (resultEl) resultEl.innerHTML = '<span style="color:#68d391;cursor:help" title="'+est.note.replace(/"/g,'&quot;')+'">\u2713</span>';
+    const _dens6 = parseFloat((rawMatData[pb]||{}).density) || ((MATERIAL_DB[(rawMatData[pb]||{}).family]||{}).density) || 1000;
+    const _mass6_g = _meshVol_m3 * _dens6 * 1000;
+    if (resultEl) resultEl.innerHTML = '<span style="color:#68d391;cursor:help" title="'+est.note.replace(/"/g,'&quot;')+'">\u2713</span>'
+      + ' <span style="color:var(--text3);font-size:10px">'
+      + (_meshVol_mm3/1000).toFixed(1)+'cm³·'+(_mass6_g>=1000?(_mass6_g/1000).toFixed(2)+'kg':_mass6_g.toFixed(0)+'g')+'</span>';
     // Persist to rawMatData only if item already saved
     if (rawMatData[pb]) {
       if (!rawMatData[pb].perParent) rawMatData[pb].perParent = {};
       if (!rawMatData[pb].perParent[parentPb]) rawMatData[pb].perParent[parentPb] = {dims:{}};
       rawMatData[pb].perParent[parentPb].dims.L = String(est.L);
       if (est.W) rawMatData[pb].perParent[parentPb].dims.W = String(est.W);
+      // Store exact volume (geometry-independent cost base)
+      rawMatData[pb].perParent[parentPb].meshVolume_m3 = _meshVol_m3;
+      var _T_mm6 = parseFloat((rawMatData[pb].dims||{}).T) || 0;
+      if (_T_mm6 > 0) rawMatData[pb].perParent[parentPb].stepArea_m2 = _meshVol_m3 / (_T_mm6 / 1000);
       // Also persist cross-section hints to stock dims (only fills zeros, won't overwrite manual values)
       if (est.stockHints && Object.keys(est.stockHints).length) {
         if (!rawMatData[pb].dims) rawMatData[pb].dims = {};
@@ -3606,7 +3669,7 @@ function refreshCostCells() {
     const i = parseInt(td.dataset.buyIdx);
     const item = BOM[i];
     if (!item || item.type === 'ELTDesign') { td.textContent = ''; return; }
-    const cost = (unitCosts[i] || 0) * (item.tq || 0);
+    const cost = (unitCosts[i] || 0) * getEffectiveTq(item, i);
     td.textContent = cost > 0 ? fmtC(cost) : '—';
   });
   document.querySelectorAll('[data-cost-idx]').forEach(function(td){
@@ -4227,7 +4290,7 @@ function _populateRawmatTab(force) {
   const IS_AR=/^(ar|a\/r)$/i;
   const aggMap={};
   BOM.forEach(function(b, _idx){
-    if(isRowExcluded(_idx)) return;
+    if(isRowHiddenForTabs(_idx)) return;
     if(b.type!=='Buy') return;
     const uom=(b.uom||'').trim();
     if(!RAW_UOM.test(uom)) return;
@@ -4244,7 +4307,7 @@ function _populateRawmatTab(force) {
     if(rm) configured++;
     let mass=0, cost=0;
     if(rm){
-      if(IS_AR.test(r.uom)){ try{ const a=computeARAggregate(r.pb)||{}; mass=a.mass||0; cost=a.cost||0; }catch(e){} }
+      if(IS_AR.test(r.uom)){ try{ const a=computeARAggregate(r.pb,true)||{}; mass=a.mass||0; cost=a.cost||0; }catch(e){} }
       else{ mass=_computeLinearMass(rm,r.uom,r.tq); cost=mass*(parseFloat(rm.unitCost)||0); }
     }
     totalMass+=mass; totalCost+=cost;
@@ -4272,7 +4335,7 @@ function _populateRawmatTab(force) {
     const isAR=IS_AR.test(r.uom);
     let mass=0, cost=0;
     if(isConfigured){
-      if(isAR){ try{ const a=computeARAggregate(r.pb)||{}; mass=a.mass||0; cost=a.cost||0; }catch(e){} }
+      if(isAR){ try{ const a=computeARAggregate(r.pb,true)||{}; mass=a.mass||0; cost=a.cost||0; }catch(e){} }
       else{ mass=_computeLinearMass(rm,r.uom,r.tq); const uc=parseFloat(rm.unitCost)||0; cost=mass*uc; }
     }
     const safePb=r.pb.replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'&quot;');
@@ -4327,7 +4390,7 @@ function _toggleRawmatExpand(pb) {
   if(sub){ sub.style.display=sub.style.display==='none'?'':'none'; if(btn) btn.textContent=sub.style.display===''?'▼':'▶'; return; }
 
   const rm=rawMatData[pb]; if(!rm) return;
-  const parents=getParentsForRawMat(pb); if(!parents.length) return;
+  const parents=getParentsForRawMat(pb,true); if(!parents.length) return;
   const density=parseFloat(rm.density)||(MATERIAL_DB[rm.family]||{}).density||2700;
   const uc=parseFloat(rm.unitCost)||0;
 
@@ -4421,7 +4484,7 @@ function _saveRawmatCost(pb, val) {
   const IS_AR=/^(ar|a\/r)$/i;
   let mass=0, cost=0;
   const rm=rawMatData[pb]; const uom=rm._uom||'';
-  if(IS_AR.test(uom)){ try{ const a=computeARAggregate(pb)||{}; mass=a.mass||0; cost=a.cost||0; }catch(e){} }
+  if(IS_AR.test(uom)){ try{ const a=computeARAggregate(pb,true)||{}; mass=a.mass||0; cost=a.cost||0; }catch(e){} }
   else{ const tqEl=document.getElementById('rmrow-'+rmId); const tq=tqEl?parseFloat(tqEl.dataset.tq||0):0; mass=_computeLinearMass(rm,uom,tq); cost=mass*(parseFloat(rm.unitCost)||0); }
   const tc=document.getElementById('rmtotal-'+rmId);
   const tm=document.getElementById('rmmass-'+rmId);
@@ -4859,7 +4922,7 @@ function buildBuyData() {
   const map = new Map();
   BOM.forEach((item, idx) => {
     if (item.type !== 'Buy') return;
-    if (isRowExcluded(idx)) return;
+    if (isRowHiddenForTabs(idx)) return;
     const key = item.pb || item.pn;
     if (!map.has(key)) {
       map.set(key, {
