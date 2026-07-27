@@ -3063,7 +3063,7 @@ function showPreview(item){
 }
 
 // ─── switchTab ───────────────────────────────────────────────────────────────
-function switchTab(tab){
+async function switchTab(tab){
   curTab=tab;
   const tabDrw=document.getElementById('tabDrw');
   const tabCad=document.getElementById('tabCad');
@@ -3076,12 +3076,26 @@ function switchTab(tab){
   body.innerHTML='';
   if(!curItem) return;
   if(tab==='drawing'){
-    const pdfs=Array.isArray(curItem.pdf)?curItem.pdf:(curItem.pdf?[curItem.pdf]:[]);
+    const pdfs=Array.isArray(curItem.pdfs)?curItem.pdfs:(curItem.pdf?[curItem.pdf]:[]);
     if(!pdfs.length){
       body.innerHTML='<div class="no-files">No drawing available.</div>';
     } else {
-      const src=pdfs[0];
-      body.innerHTML='<iframe src="'+src+'" style="width:100%;height:100%;border:none"></iframe>';
+      const relPath=pdfs[0];
+      body.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:200px;color:var(--text3)">⏳ Loading drawing...</div>';
+      try {
+        const ab = await getFileBuffer(relPath);
+        const blob = new Blob([ab], {type:'application/pdf'});
+        const blobUrl = URL.createObjectURL(blob);
+        body.innerHTML='<iframe src="'+blobUrl+'" style="width:100%;height:100%;border:none"></iframe>';
+      } catch(e) {
+        // Folder not selected or file not found — show link fallback
+        const name=relPath.split('/').pop();
+        body.innerHTML='<div style="padding:16px;text-align:center">'+
+          '<div style="color:var(--text3);margin-bottom:12px;font-size:13px">⚠ '+e.message+'</div>'+
+          '<a href="'+relPath+'" target="_blank" style="color:var(--accent);font-size:12px">📄 '+name+'</a>'+
+          '<div style="color:var(--text3);font-size:11px;margin-top:8px">בחר תיקיה (Select Folder) כדי לצפות בקובץ</div>'+
+          '</div>';
+      }
     }
   } else if(tab==='cad'){
     const cadFiles=curItem.cads||[];
@@ -3464,15 +3478,15 @@ function _populateRawmatTab(force){
     '<col style="width:100px"><col style="width:80px"><col style="width:80px"><col style="width:90px"><col>'+
     '</colgroup><thead><tr style="background:var(--header-bg);position:sticky;top:0;z-index:1">'+
     '<th style="padding:4px 6px"></th>'+
-    '<th style="text-align:left;padding:4px 8px;color:var(--text3)"><span class="rh">PN</span></th>'+
-    '<th style="text-align:left;padding:4px 8px;color:var(--text3)"><span class="rh">תיאור</span></th>'+
-    '<th style="text-align:right;padding:4px 8px;color:var(--text3)"><span class="rh">כמות</span></th>'+
-    '<th style="text-align:left;padding:4px 8px;color:var(--text3)"><span class="rh">UOM</span></th>'+
-    '<th style="text-align:left;padding:4px 8px;color:var(--text3)"><span class="rh">חומר / צורה</span></th>'+
-    '<th style="text-align:left;padding:4px 8px;color:var(--text3)"><span class="rh">מידות</span></th>'+
-    '<th style="text-align:right;padding:4px 8px;color:var(--text3)"><span class="rh">משקל</span></th>'+
-    '<th style="text-align:right;padding:4px 8px;color:var(--text3)"><span class="rh">עלות</span></th>'+
-    '<th style="text-align:right;padding:4px 8px;color:var(--text3)"><span class="rh">מחיר/ק"ג</span></th>'+
+    '<th style="text-align:left;padding:4px 8px;color:var(--text3)">PN</th>'+
+    '<th style="text-align:left;padding:4px 8px;color:var(--text3)">תיאור</th>'+
+    '<th style="text-align:right;padding:4px 8px;color:var(--text3)">כמות</th>'+
+    '<th style="text-align:left;padding:4px 8px;color:var(--text3)">UOM</th>'+
+    '<th style="text-align:left;padding:4px 8px;color:var(--text3)">חומר / צורה</th>'+
+    '<th style="text-align:left;padding:4px 8px;color:var(--text3)">מידות</th>'+
+    '<th style="text-align:right;padding:4px 8px;color:var(--text3)">משקל</th>'+
+    '<th style="text-align:right;padding:4px 8px;color:var(--text3)">עלות</th>'+
+    '<th style="text-align:right;padding:4px 8px;color:var(--text3)">מחיר/ק"ג</th>'+
     '</tr></thead><tbody>';
   items.forEach(function(r){
     const rm=rawMatData[r.pb];
@@ -5252,6 +5266,9 @@ async function syncProcFromFile() {
         localStorage.setItem(PROC_STORAGE_KEY, JSON.stringify(procData));
         localStorage.setItem(TYPES_STORAGE_KEY, JSON.stringify(PROC_TYPES));
         buildTable();
+        buildCumulativeHours();
+        updateWHCells();
+        applyFilters();
         if (typeof curItem !== 'undefined' && curItem && curItem.type === 'ELTDesign') renderMfgSide(curItem);
         setFileSyncStatus('✓ סונכרן מ-SharePoint', 'ok');
       }
@@ -5272,6 +5289,9 @@ async function syncProcFromFile() {
       localStorage.setItem(PROC_STORAGE_KEY, JSON.stringify(procData));
       localStorage.setItem(TYPES_STORAGE_KEY, JSON.stringify(PROC_TYPES));
       buildTable();
+      buildCumulativeHours();
+      updateWHCells();
+      applyFilters();
       if (typeof curItem !== 'undefined' && curItem && curItem.type === 'ELTDesign') renderMfgSide(curItem);
       setFileSyncStatus('✓ סונכרן', 'ok');
     }
