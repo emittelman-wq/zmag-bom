@@ -2578,8 +2578,8 @@ function openRawMatEditor(pb, desc, tq) {
     const _uomLabel = (window._arUom||'').toUpperCase();
     const _uomTitle = bomInfo.isAR ? 'AR — As Required' : _uomLabel+' — חומר גלם';
     return '<div style="background:rgba(237,137,54,.1);border:1px solid rgba(237,137,54,.4);border-radius:6px;padding:8px 10px">'+
-      '<div style="font-size:11px;font-weight:700;color:#ed8936;margin-bottom:5px">📐 '+_uomTitle+' · '+_arParents.length+' פריטי אב</div>'+
-      '<div style="max-height:190px;overflow:auto;border:1px solid var(--border);border-radius:4px;direction:ltr">'+
+      '<div style="display:flex;align-items:center;gap:8px;margin-bottom:5px">'+'<span style="font-size:11px;font-weight:700;color:#ed8936">📐 '+_uomTitle+' · '+_arParents.length+' פריטי אב</span>'+'<span style="font-size:9px;color:#ed8936;opacity:.7;margin-right:auto" title="ערכי משקל/עלות מטור זה מוצגים בטבלה הראשית ובטבלת ח"ג"">→ טבלה ראשית + ח"ג</span>'+'</div>'+
+      '<div id="stepHelpPanel" style="display:none;background:rgba(66,153,225,.1);border:1px solid rgba(66,153,225,.3);border-radius:4px;padding:8px 10px;margin-bottom:6px;font-size:10px;line-height:1.5;direction:rtl">'+'<strong>מתי לסמן STEP ☑?</strong><br>'+'<b>☑ סמן STEP</b> — כאשר לפריט יש חיתוכים/חורים שמקטינים משמעותית את כמות החומר (לדוג\u0027: רשת קרינה, חלון מקושקש). הכלי משתמש בנפח המש המדויק.<br>'+'<b>☐ סגור (ברירת מחדל)</b> — כאשר הפריט מלא / כפוף ללא חיתוכים. הכלי משתמש במידות Bounding Box.<br>'+'<em style="color:var(--text3)">לחץ על כפתור הכתום 📐 כדי לטעון STEP, אחר כך לחץ STEP ☐/☑ לבחירת שיטת חישוב</em>'+'</div>'+'<div style="max-height:190px;overflow:auto;border:1px solid var(--border);border-radius:4px;direction:ltr">'+
       '<table style="width:100%;border-collapse:collapse;direction:ltr;min-width:480px">'+
       '<thead><tr style="background:var(--surface2);position:sticky;top:0;z-index:1">'+
         '<th style="padding:3px 4px;text-align:right;font-size:10px;font-weight:600">פריט אב</th>'+
@@ -2588,7 +2588,7 @@ function openRawMatEditor(pb, desc, tq) {
         '<th style="padding:3px 4px;font-size:10px;font-weight:600;text-align:right">g/blank</th>'+
         '<th style="padding:3px 4px;font-size:10px;font-weight:600">כמות</th>'+
         '<th style="padding:3px 4px;font-size:10px;font-weight:600;text-align:right">kg</th>'+
-        '<th style="padding:3px 4px;font-size:10px;font-weight:600">STEP</th>'+
+        '<th style="padding:3px 4px;font-size:10px;font-weight:600">STEP <span onclick="document.getElementById(\'stepHelpPanel\').style.display=document.getElementById(\'stepHelpPanel\').style.display===\'none\'?\'block\':\'none\'" style="cursor:pointer;color:var(--text3);font-size:9px;text-decoration:underline dotted" title="מה זה STEP?">(?)</span></th>'+
       '</tr></thead>'+
       '<tbody>'+rowsHTML+'</tbody>'+
       '</table></div>'+
@@ -2663,7 +2663,7 @@ function openRawMatEditor(pb, desc, tq) {
             '<input id="rmUnitCost" type="number" min="0" step="0.1" value="'+(existing.unitCost||'')+'" placeholder="₪" oninput="rmUpdateCalc()" style="width:100%;padding:5px 6px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:13px"></div>'+
         '</div>'+
         // Live calculation
-        '<div id="rmCalcResult" style="background:rgba(79,142,247,.08);border:1px solid rgba(79,142,247,.2);border-radius:6px;padding:10px;font-size:12px;min-height:52px"></div>'+
+        '<div style="font-size:9px;color:var(--text3);margin-bottom:3px;text-align:left">'+'↓ תיאור יחידת מלאי (L × חתך) | העלות/יחידה והמשקל/יחידה שלמטה אינם מועברים ישירות לטבלות — אך המחיר/קג משמש לחישובי החלק העליון'+'</div>'+'<div id="rmCalcResult" style="background:rgba(79,142,247,.08);border:1px solid rgba(79,142,247,.2);border-radius:6px;padding:10px;font-size:12px;min-height:52px"></div>'+
       '</div>'+
       '<div style="padding:10px 14px;border-top:1px solid var(--border);display:flex;justify-content:space-between;gap:8px">'+
         '<button onclick="deleteRawMat(\''+safePb+'\')" style="padding:5px 12px;background:rgba(229,62,62,.1);border:1px solid rgba(229,62,62,.4);color:#e53e3e;border-radius:4px;cursor:pointer;font-size:12px">🗑 הסר</button>'+
@@ -2859,6 +2859,7 @@ function arRefreshAggregate(pb) {
       // M / M2: mass derivable directly from BOM tq
       totalMass += _computeLinearMass(rm, item.uom, tq);
       if (uom === 'm2') totalArea += tq; // tq already in m²
+      if (uom === 'm') totalArea += tq; // tq in meters — reuse totalArea for total length
     }
   });
   let totalCost = 0;
@@ -2868,11 +2869,12 @@ function arRefreshAggregate(pb) {
   const total = window._arParents ? window._arParents.length : '?';
   if (counted > 0) {
     const qtyLabel = isARUnit(uom) ? '' : (uom==='m2' ? ' ('+totalArea.toFixed(3)+' m²)' : '');
+    var _areaLabel = uom==='m' ? totalArea.toFixed(2)+' m' : totalArea.toFixed(3)+' m²';
     aggEl.innerHTML =
-      '<strong style="color:#68d391">סה"כ: '+totalMass.toFixed(2)+' kg</strong>'+
-      (totalArea>0 ? ' <span style="color:var(--text3);font-size:10px">('+totalArea.toFixed(3)+(isARUnit(uom)?' m²':' m²')+')</span>' : '')+
+      '<strong style="color:#68d391">סה"\u05db: '+totalMass.toFixed(2)+' kg</strong>'+
+      (totalArea>0 ? ' <span style="color:var(--text3);font-size:10px">('+_areaLabel+')</span>' : '')+
       (uc ? ' · <strong style="color:var(--accent2)">'+fmtC(totalCost)+'</strong>' : '')+
-      ' <span style="color:var(--text3);font-size:10px">'+counted+'/'+total+' פריטי אב</span>';
+      ' <span style="color:var(--text3);font-size:10px">'+counted+'/'+total+' פריטי אב — <em>מזין את הטבלה הראשית</em></span>';
   } else {
     aggEl.textContent = isARUnit(uom) ? 'הזן L ו-W בטבלה כדי לחשב' : 'לא נמצאו פריטי אב ב-BOM';
   }
@@ -2905,6 +2907,18 @@ async function onManualStepSelected(pb, rowIdx, input) {
       || 2700;
     const massG = _meshVol_m3 * dens * 1000;
     const massStr = massG >= 1000 ? (massG/1000).toFixed(3)+' kg' : massG.toFixed(1)+' g';
+    // Auto-init rawMatData[pb] if not yet saved
+    if (!rawMatData[pb]) {
+      const _f3 = document.getElementById('rmForm')?.value   || 'sheet';
+      const _d3 = parseFloat(document.getElementById('rmDensity')?.value) || 2700;
+      const _m3 = (typeof rmGetDims === 'function') ? rmGetDims() : {};
+      rawMatData[pb] = {family: document.getElementById('rmFamily')?.value||'',
+                        grade:  document.getElementById('rmGrade')?.value||'',
+                        form: _f3, density: _d3, dims: _m3,
+                        costUnit: document.getElementById('rmCostUnit')?.value||'kg',
+                        unitCost: parseFloat(document.getElementById('rmUnitCost')?.value)||0,
+                        perParent:{}};
+    }
     // Persist
     if (rawMatData[pb]) {
       if (!rawMatData[pb].perParent) rawMatData[pb].perParent = {};
@@ -3003,7 +3017,19 @@ async function runARStepEstimateForParent(pb, rowIdx, btn) {
       +'<br><button data-pb="'+pb+'" data-ppb="'+parentPb+'" onclick="toggleStepVolume(this.dataset.pb,this.dataset.ppb,this)"'
       +' title="'+(_curUseStep6?'\u05de\u05d7\u05d5\u05e9\u05d1 \u05de\u05e0\u05e4\u05d7 STEP \u2014 \u05dc\u05d7\u05e5 \u05dc\u05d1\u05d9\u05d8\u05d5\u05dc':'\u05dc\u05d7\u05e5 \u05dc\u05d7\u05d9\u05e9\u05d5\u05d1 \u05e2\u05dc\u05d5\u05ea \u05de\u05e0\u05e4\u05d7 STEP')+'"'
       +' style="font-size:9px;padding:1px 5px;border-radius:3px;border:1px solid var(--border);cursor:pointer;margin-top:2px;background:'+_btnBg6+';color:'+_btnCl6+'">'+_btnTx6+'</button>';
-    // Persist to rawMatData only if item already saved
+    // Auto-init rawMatData[pb] from modal if not yet saved (so meshVolume can be stored)
+    if (!rawMatData[pb]) {
+      const _family2 = document.getElementById('rmFamily')?.value || '';
+      const _grade2  = document.getElementById('rmGrade')?.value  || '';
+      const _form2   = document.getElementById('rmForm')?.value   || 'sheet';
+      const _dens2   = parseFloat(document.getElementById('rmDensity')?.value) || 2700;
+      const _dims2   = (typeof rmGetDims === 'function') ? rmGetDims() : {};
+      const _cu2     = document.getElementById('rmCostUnit')?.value || 'kg';
+      const _uc2     = parseFloat(document.getElementById('rmUnitCost')?.value) || 0;
+      rawMatData[pb] = {family:_family2, grade:_grade2, form:_form2, density:_dens2,
+                        dims:_dims2, costUnit:_cu2, unitCost:_uc2, perParent:{}};
+    }
+    // Persist to rawMatData
     if (rawMatData[pb]) {
       if (!rawMatData[pb].perParent) rawMatData[pb].perParent = {};
       if (!rawMatData[pb].perParent[parentPb]) rawMatData[pb].perParent[parentPb] = {dims:{}};
@@ -4641,10 +4667,10 @@ function _computeLinearMass(rm, uom, tq) {
     return tq * (T/1000) * density;
   }
   if (uomL === 'm') {
-    // Use calcRawMatVolume for accurate section area (works for all form types)
-    const Lmm = parseFloat(dims.L) || 0;
-    if (!Lmm) return 0;
-    const vol = calcRawMatVolume(rm.form || 'bar_round', dims);  // m³ for one stock unit
+    // Use L=1000mm (1m reference) when stock length not set
+    const Lmm = parseFloat(dims.L) || 1000;
+    const refDims = (parseFloat(dims.L) > 0) ? dims : Object.assign({}, dims, {L: '1000'});
+    const vol = calcRawMatVolume(rm.form || 'bar_round', refDims);  // m³ for one stock unit
     if (!vol) return 0;
     const massPerM = vol * density / (Lmm / 1000);  // kg/m
     return tq * massPerM;
