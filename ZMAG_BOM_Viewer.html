@@ -2348,6 +2348,18 @@ function getARDimsForParent(pb, parentPb) {
 }
 
 // Generic: collect unique parent PBs for ANY raw-material (M / M2 / AR), with total BOM tq + STEP + PL PDF paths
+// Pick the STEP file from cads whose filename (basename without extension)
+// matches the part number — guarantees we use the PART's own STEP, not an assembly file.
+function pickOwnStep(stpFiles, partPb) {
+  if (!stpFiles.length) return null;
+  const norm = function(s){ return s.replace(/[^a-z0-9]/gi,'').toLowerCase(); };
+  const pbN = norm(partPb);
+  return stpFiles.find(function(c){
+    const base = c.split(/[\/\\]/).pop().replace(/\.s(te)?p$/i,'');
+    return norm(base) === pbN;
+  }) || stpFiles[0];  // fallback to first if no name match
+}
+
 function getParentsForRawMat(pb, tabMode) {
   const map = new Map();
   const RAW_UOM = /^(m2|m|ar|a\/r)$/i;
@@ -2371,7 +2383,7 @@ function getParentsForRawMat(pb, tabMode) {
             parentPb:   parentPb,
             parentDesc: (BOM[j].desc || BOM[j].pn || '').slice(0, 32),
             tq:         0,
-            stpPath:    stpFiles[0] || null,
+            stpPath:    pickOwnStep(stpFiles, parentPb),
             plPdfPath:  plFiles[0]  || null
           });
         }
@@ -2399,7 +2411,7 @@ function getParentsForARMaterial(pb) {
             parentPb: parentPb,
             parentDesc: (BOM[j].desc || BOM[j].pn || '').slice(0, 32),
             tq: 0,
-            stpPath: stpFiles[0] || null
+            stpPath: pickOwnStep(stpFiles, parentPb)
           });
         }
         map.get(parentPb).tq += tq;
@@ -2575,8 +2587,8 @@ function jumpToParentInBOM(parentPb) {
 // ─── STEP bbox analysis for raw material blank size estimation ─────────────
 async function rmAnalyzeStep(pb, stpPath, rowIdx) {
   if (!rootDirHandle) {
-    alert('בחר תיקיית פרויקט (לחץ Select Folder) כדי לטעון קובץ STEP');
-    return;
+    await grantAccess();          // auto-open folder picker
+    if (!rootDirHandle) return;   // user cancelled
   }
   const btn = document.getElementById('stpbtn-' + rowIdx);
   if (btn) { btn.textContent = '⏳'; btn.disabled = true; }
@@ -2591,14 +2603,37 @@ async function rmAnalyzeStep(pb, stpPath, rowIdx) {
       pts.push([parseFloat(m[1]), parseFloat(m[2]), parseFloat(m[3])]);
     }
     if (!pts.length) throw new Error('לא נמצאו נקודות גיאומטריות בקובץ STEP');
-    // Compute bounding box
+
+    // IQR outlier filtering — removes reference datums / other assembly parts
+    // that inflate the bounding box far beyond the actual part geometry.
+    function iqrBounds(vals) {
+      const s = [...vals].sort(function(a,b){ return a-b; });
+      const q1 = s[Math.floor(s.length * 0.25)];
+      const q3 = s[Math.floor(s.length * 0.75)];
+      const iqr = q3 - q1;
+      // Use 3×IQR fence (very conservative — only removes true outliers)
+      return { lo: q1 - 3*iqr, hi: q3 + 3*iqr };
+    }
+    const bx = iqrBounds(pts.map(function(p){ return p[0]; }));
+    const by = iqrBounds(pts.map(function(p){ return p[1]; }));
+    const bz = iqrBounds(pts.map(function(p){ return p[2]; }));
+    const filtered = pts.filter(function(p){
+      return p[0]>=bx.lo && p[0]<=bx.hi &&
+             p[1]>=by.lo && p[1]<=by.hi &&
+             p[2]>=bz.lo && p[2]<=bz.hi;
+    });
+    const work = filtered.length >= 4 ? filtered : pts; // fallback if too few remain
+    const filteredOut = pts.length - work.length;
+
+    // Compute bounding box on cleaned points
     let x0=Infinity,y0=Infinity,z0=Infinity,x1=-Infinity,y1=-Infinity,z1=-Infinity;
-    pts.forEach(function(p) {
+    work.forEach(function(p) {
       if(p[0]<x0) x0=p[0]; if(p[0]>x1) x1=p[0];
       if(p[1]<y0) y0=p[1]; if(p[1]>y1) y1=p[1];
       if(p[2]<z0) z0=p[2]; if(p[2]>z1) z1=p[2];
     });
-    const bbox = {dx: Math.abs(x1-x0), dy: Math.abs(y1-y0), dz: Math.abs(z1-z0)};
+    const bbox = {dx: Math.abs(x1-x0), dy: Math.abs(y1-y0), dz: Math.abs(z1-z0),
+                  filteredOut: filteredOut, totalPts: pts.length};
     const formId = (document.getElementById('rmForm')||{}).value || 'sheet';
     const est = estimateARDims(formId, bbox);
     if (!est) throw new Error('לא ניתן להעריך מידות מה-STEP');
@@ -2618,9 +2653,10 @@ async function rmAnalyzeStep(pb, stpPath, rowIdx) {
     arParentDimChanged(pb, Linp || {value:''}, rowIdx);
     rmUpdateCalc(pb);
     if (btn) { btn.textContent = '✓'; btn.style.borderColor = 'var(--accent2)'; btn.style.color = 'var(--accent2)'; }
-    // Show estimation note
+    // Show estimation note + filtered-outlier diagnostic
     const noteEl = document.getElementById('stpnote-'+rowIdx);
-    if (noteEl) noteEl.textContent = est.note || '';
+    const filterNote = bbox.filteredOut > 0 ? ' [סונן '+bbox.filteredOut+'/'+bbox.totalPts+' נק׳]' : '';
+    if (noteEl) noteEl.textContent = (est.note || '') + filterNote;
   } catch(e) {
     if (btn) { btn.textContent = '✕'; btn.disabled = false; }
     alert('שגיאה בניתוח STEP: ' + e.message);
