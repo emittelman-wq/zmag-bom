@@ -4942,7 +4942,9 @@ async function loadProcFromSP() {
     if (text && text.trim()) {
       const obj = JSON.parse(text);
       if (obj.customProcTypes && Array.isArray(obj.customProcTypes) && obj.customProcTypes.length) {
-        PROC_TYPES = obj.customProcTypes;
+        const _srv = obj.customProcTypes;
+        if (_srv.some(function(t){ return (t.cost||0)>0; })) PROC_TYPES = _srv;
+        else if (PROC_TYPES.every(function(t){ return (t.cost||0)===0; })) PROC_TYPES = _srv;
       }
       const loaded = obj.processes || obj;
       if (typeof loaded === 'object' && loaded !== null && Object.keys(loaded).length > 0) {
@@ -5082,7 +5084,9 @@ function _importFileSelected(evt) {
 
 function _restoreFromBackup(obj) {
   if (obj.customProcTypes && Array.isArray(obj.customProcTypes) && obj.customProcTypes.length) {
-    PROC_TYPES = obj.customProcTypes;
+    const _srv = obj.customProcTypes;
+    if (_srv.some(function(t){ return (t.cost||0)>0; })) PROC_TYPES = _srv;
+    else if (PROC_TYPES.every(function(t){ return (t.cost||0)===0; })) PROC_TYPES = _srv;
     localStorage.setItem(TYPES_STORAGE_KEY, JSON.stringify(PROC_TYPES));
   }
   if (obj.processes && typeof obj.processes === 'object') {
@@ -5255,7 +5259,15 @@ async function loadProcFromGraph() {
     if (!text || !text.trim()) return;
     const obj = JSON.parse(text);
     if (obj.customProcTypes && Array.isArray(obj.customProcTypes) && obj.customProcTypes.length) {
-      PROC_TYPES = obj.customProcTypes;
+      // Only apply server rates if at least one type has a non-zero cost
+      // (avoids overwriting good localStorage rates with stale cost:0 server data)
+      const serverHasRates = obj.customProcTypes.some(function(t){ return (t.cost||0) > 0; });
+      if (serverHasRates) {
+        PROC_TYPES = obj.customProcTypes;
+      } else if (PROC_TYPES.every(function(t){ return (t.cost||0) === 0; })) {
+        // Neither server nor local has rates — use server anyway (it may have custom types)
+        PROC_TYPES = obj.customProcTypes;
+      }
     }
     const loaded = obj.processes || obj;
     if (typeof loaded === 'object' && loaded !== null && Object.keys(loaded).length > 0) {
@@ -5384,7 +5396,9 @@ async function syncProcFromFile() {
       if (!r.ok) throw new Error('HTTP ' + r.status);
       const obj = JSON.parse(await r.text());
       if (obj.customProcTypes && Array.isArray(obj.customProcTypes) && obj.customProcTypes.length) {
-        PROC_TYPES = obj.customProcTypes;
+        const _srv = obj.customProcTypes;
+        if (_srv.some(function(t){ return (t.cost||0)>0; })) PROC_TYPES = _srv;
+        else if (PROC_TYPES.every(function(t){ return (t.cost||0)===0; })) PROC_TYPES = _srv;
       }
       const loaded = obj.processes || obj;
       if (typeof loaded === 'object' && loaded !== null) {
@@ -5409,7 +5423,15 @@ async function syncProcFromFile() {
     const file = await _procFileHandle.getFile();
     const obj = JSON.parse(await file.text());
     if (obj.customProcTypes && Array.isArray(obj.customProcTypes) && obj.customProcTypes.length) {
-      PROC_TYPES = obj.customProcTypes;
+      // Only apply server rates if at least one type has a non-zero cost
+      // (avoids overwriting good localStorage rates with stale cost:0 server data)
+      const serverHasRates = obj.customProcTypes.some(function(t){ return (t.cost||0) > 0; });
+      if (serverHasRates) {
+        PROC_TYPES = obj.customProcTypes;
+      } else if (PROC_TYPES.every(function(t){ return (t.cost||0) === 0; })) {
+        // Neither server nor local has rates — use server anyway (it may have custom types)
+        PROC_TYPES = obj.customProcTypes;
+      }
     }
     const loaded = obj.processes || obj;
     if (typeof loaded === 'object' && loaded !== null) {
@@ -6030,8 +6052,11 @@ function importProcJSON(input) {
       const loaded = obj.processes || obj;
       if (typeof loaded === 'object' && loaded !== null) {
         Object.assign(procData, loaded);
-        if (obj.customProcTypes && Array.isArray(obj.customProcTypes) && obj.customProcTypes.length)
-          PROC_TYPES = obj.customProcTypes;
+        if (obj.customProcTypes && Array.isArray(obj.customProcTypes) && obj.customProcTypes.length) {
+          const _srv = obj.customProcTypes;
+          if (_srv.some(function(t){ return (t.cost||0)>0; })) PROC_TYPES = _srv;
+          else if (PROC_TYPES.every(function(t){ return (t.cost||0)===0; })) PROC_TYPES = _srv;
+        }
         saveProcData();
         buildTable();
         buildMfgData(); renderMfgTable(getSortedMfgData()); filterMfgTable();
