@@ -2604,14 +2604,12 @@ async function rmAnalyzeStep(pb, stpPath, rowIdx) {
     }
     if (!pts.length) throw new Error('לא נמצאו נקודות גיאומטריות בקובץ STEP');
 
-    // IQR outlier filtering — removes reference datums / other assembly parts
-    // that inflate the bounding box far beyond the actual part geometry.
+    // ── Step 1: IQR outlier filter — removes stray datums / reference geometry ──
     function iqrBounds(vals) {
       const s = [...vals].sort(function(a,b){ return a-b; });
       const q1 = s[Math.floor(s.length * 0.25)];
       const q3 = s[Math.floor(s.length * 0.75)];
       const iqr = q3 - q1;
-      // Use 3×IQR fence (very conservative — only removes true outliers)
       return { lo: q1 - 3*iqr, hi: q3 + 3*iqr };
     }
     const bx = iqrBounds(pts.map(function(p){ return p[0]; }));
@@ -2622,41 +2620,132 @@ async function rmAnalyzeStep(pb, stpPath, rowIdx) {
              p[1]>=by.lo && p[1]<=by.hi &&
              p[2]>=bz.lo && p[2]<=bz.hi;
     });
-    const work = filtered.length >= 4 ? filtered : pts; // fallback if too few remain
+    const work = filtered.length >= 4 ? filtered : pts;
     const filteredOut = pts.length - work.length;
 
-    // Compute bounding box on cleaned points
-    let x0=Infinity,y0=Infinity,z0=Infinity,x1=-Infinity,y1=-Infinity,z1=-Infinity;
-    work.forEach(function(p) {
-      if(p[0]<x0) x0=p[0]; if(p[0]>x1) x1=p[0];
-      if(p[1]<y0) y0=p[1]; if(p[1]>y1) y1=p[1];
-      if(p[2]<z0) z0=p[2]; if(p[2]>z1) z1=p[2];
-    });
-    const bbox = {dx: Math.abs(x1-x0), dy: Math.abs(y1-y0), dz: Math.abs(z1-z0),
-                  filteredOut: filteredOut, totalPts: pts.length};
+    // ── Step 2: Body separation ───────────────────────────────────────────────
+    // SolidWorks sheet-metal STEPs often contain TWO bodies:
+    //   (A) formed part  — 3-D shape, smaller plan area
+    //   (B) flat pattern — planar blank, larger plan area (= the blank we want to order)
+    // We detect the gap between them and pick the LARGER-AREA body.
+    function bboxOf(group) {
+      let x0=Infinity,x1=-Infinity,y0=Infinity,y1=-Infinity,z0=Infinity,z1=-Infinity;
+      group.forEach(function(p){
+        if(p[0]<x0)x0=p[0]; if(p[0]>x1)x1=p[0];
+        if(p[1]<y0)y0=p[1]; if(p[1]>y1)y1=p[1];
+        if(p[2]<z0)z0=p[2]; if(p[2]>z1)z1=p[2];
+      });
+      return {dx:Math.abs(x1-x0), dy:Math.abs(y1-y0), dz:Math.abs(z1-z0)};
+    }
+    function planAreaOf(b) {
+      const d=[b.dx,b.dy,b.dz].sort(function(a,ba){return ba-a;});
+      return d[0]*d[1]; // product of two largest dims
+    }
+    function splitAtGap(group) {
+      // For each axis find the largest relative gap between consecutive point values
+      let best={ratio:0.05, axis:-1, split:0}; // min 5% gap to qualify
+      [[0,'x'],[1,'y'],[2,'z']].forEach(function(av){
+        const ax=av[0];
+        const s=[...group.map(function(p){return p[ax];})].sort(function(a,b){return a-b;});
+        const range=s[s.length-1]-s[0];
+        if(range<1) return;
+        for(let i=1;i<s.length;i++){
+          const r=(s[i]-s[i-1])/range;
+          if(r>best.ratio){best={ratio:r,axis:ax,split:(s[i]+s[i-1])/2};}
+        }
+      });
+      if(best.axis<0) return [group];
+      const g1=group.filter(function(p){return p[best.axis]<=best.split;});
+      const g2=group.filter(function(p){return p[best.axis]>best.split;});
+      if(g1.length<4||g2.length<4) return [group];
+      return [g1,g2];
+    }
+
     const formId = (document.getElementById('rmForm')||{}).value || 'sheet';
-    const est = estimateARDims(formId, bbox);
-    if (!est) throw new Error('לא ניתן להעריך מידות מה-STEP');
-    // Fill per-parent L/W inputs for this row
+    const bodies = splitAtGap(work);
+    let bbox, bodiesSplit = bodies.length;
+    if (bodies.length > 1) {
+      const bboxes = bodies.map(bboxOf);
+      if (formId === 'sheet') {
+        // Flat pattern has LARGER plan area → it is the blank outline
+        bbox = bboxes.reduce(function(best,b){ return planAreaOf(b)>planAreaOf(best)?b:best; });
+      } else {
+        // Linear stock: use body with the longest dimension
+        const longOf = function(b){ return Math.max(b.dx,b.dy,b.dz); };
+        bbox = bboxes.reduce(function(best,b){ return longOf(b)>longOf(best)?b:best; });
+      }
+    } else {
+      bbox = bboxOf(work);
+    }
+    bbox.filteredOut = filteredOut;
+    bbox.totalPts = pts.length;
+    bbox.bodiesSplit = bodiesSplit;
+
+    // ── Step 3: Volume from STEP metadata (SolidWorks AP214 STEP) ────────────
+    // SolidWorks writes VOLUME_MEASURE / MASS_MEASURE into the STEP file.
+    // These hold the ACTUAL part volume (after all cutouts), which is exactly what
+    // we need:  raw_material_mass = part_volume × density × (1 + waste%)
+    let stepVolMM3 = null;
+    // Try VOLUME_MEASURE first (value may be in mm³ or m³)
+    const volMeta = text.match(/VOLUME_MEASURE\s*\(\s*([\d.eE+\-]+)\s*\)/i);
+    if (volMeta) {
+      const v = parseFloat(volMeta[1]);
+      if (v > 0) stepVolMM3 = (v < 0.01) ? v * 1e9 : v; // convert m³→mm³ if tiny
+    }
+    // Fallback to MASS_MEASURE (SolidWorks: kg)
+    if (!stepVolMM3) {
+      const massMeta = text.match(/MASS_MEASURE\s*\(\s*([\d.eE+\-]+)\s*\)/i);
+      if (massMeta) {
+        const massKg = parseFloat(massMeta[1]);
+        if (massKg > 0) {
+          const rm2 = rawMatData[pb] || {};
+          const dens = parseFloat(rm2.density) || (MATERIAL_DB[rm2.family]||{}).density || 2700; // kg/m³
+          stepVolMM3 = (massKg / dens) * 1e9; // m³ → mm³
+        }
+      }
+    }
+
     const Linp = document.querySelector('#ar-prow-'+rowIdx+' .ar-pdim[data-dim="L"]');
     const Winp = document.querySelector('#ar-prow-'+rowIdx+' .ar-pdim[data-dim="W"]');
-    if (Linp) { Linp.value = est.L; }
-    if (Winp && est.W) { Winp.value = est.W; }
-    // Fill cross-section stock hints (T, D, S, W, H…) in the main dim form
-    if (est.stockHints) {
-      Object.entries(est.stockHints).forEach(function(kv) {
-        const inp = document.querySelector('#rawMatModal .rm-dim[data-key="'+kv[0]+'"]');
-        if (inp && !inp.value) inp.value = kv[1];
-      });
+    let noteText = '';
+
+    if (stepVolMM3 && stepVolMM3 > 0 && formId === 'sheet') {
+      // ── Volume-based fill (accurate): V = L × W × T ──────────────────────
+      // T from existing dim data or smallest bbox dim (e.g. 3mm sheet)
+      const rm2 = rawMatData[pb] || {};
+      const T_mm = parseFloat((rm2.dims||{}).T) || Math.min(bbox.dx, bbox.dy, bbox.dz) || 1;
+      // L = longest part dimension (from bbox)
+      const L_mm = Math.round(Math.max(bbox.dx, bbox.dy, bbox.dz));
+      // W back-calculated so that L × W × T = stepVolMM3
+      const W_mm = Math.round(stepVolMM3 / (T_mm * L_mm));
+      if (Linp) Linp.value = L_mm;
+      if (Winp && W_mm > 0) Winp.value = W_mm;
+      // Fill T in form if not yet set
+      const Tinp = document.querySelector('#rawMatModal .rm-dim[data-key="T"]');
+      if (Tinp && !Tinp.value) Tinp.value = T_mm;
+      noteText = 'V='+Math.round(stepVolMM3)+'mm³ → '+L_mm+'×'+W_mm+'×'+T_mm+'mm [נפח STEP]';
+    } else {
+      // ── Bbox fallback: body-separation + estimateARDims ───────────────────
+      const est = estimateARDims(formId, bbox);
+      if (!est) throw new Error('לא ניתן להעריך מידות מה-STEP');
+      if (Linp) Linp.value = est.L;
+      if (Winp && est.W) Winp.value = est.W;
+      if (est.stockHints) {
+        Object.entries(est.stockHints).forEach(function(kv) {
+          const inp = document.querySelector('#rawMatModal .rm-dim[data-key="'+kv[0]+'"]');
+          if (inp && !inp.value) inp.value = kv[1];
+        });
+      }
+      const splitNote = bbox.bodiesSplit > 1 ? ' ['+bbox.bodiesSplit+' גופים]' : '';
+      const filterNote = bbox.filteredOut > 0 ? ' [סונן '+bbox.filteredOut+'/'+bbox.totalPts+']' : '';
+      noteText = (est.note || '') + splitNote + filterNote;
     }
-    // Recompute row mass and aggregate
+
     arParentDimChanged(pb, Linp || {value:''}, rowIdx);
     rmUpdateCalc(pb);
     if (btn) { btn.textContent = '✓'; btn.style.borderColor = 'var(--accent2)'; btn.style.color = 'var(--accent2)'; }
-    // Show estimation note + filtered-outlier diagnostic
     const noteEl = document.getElementById('stpnote-'+rowIdx);
-    const filterNote = bbox.filteredOut > 0 ? ' [סונן '+bbox.filteredOut+'/'+bbox.totalPts+' נק׳]' : '';
-    if (noteEl) noteEl.textContent = (est.note || '') + filterNote;
+    if (noteEl) noteEl.textContent = noteText;
   } catch(e) {
     if (btn) { btn.textContent = '✕'; btn.disabled = false; }
     alert('שגיאה בניתוח STEP: ' + e.message);
