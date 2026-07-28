@@ -6231,6 +6231,8 @@ const _msalConfig = {
   auth: {
     clientId: 'fe62b5b2-7236-4149-9d44-038ae6f98545',
     authority: 'https://login.microsoftonline.com/fff493cd-fb80-4d62-b826-547a443f23de',
+    // Stable redirect URI — filename never changes, register ONCE in Azure AD:
+    // https://emittelman-wq.github.io/zmag-bom/ZMAG_BOM_Viewer.html
     redirectUri: window.location.origin + window.location.pathname
   },
   cache: { cacheLocation: 'localStorage', storeAuthStateInCookie: false }
