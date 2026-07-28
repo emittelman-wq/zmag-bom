@@ -662,9 +662,9 @@ function isDescendantOfDisabledAncestor(idx) {
 function isRowExcluded(i) {
   return disabledRows.has(i) || isDescendantOfDisabledAncestor(i);
 }
-// For rawmat/buy TAB display: also respect the visual filter (type/level/status)
+// For rawmat/buy TAB display: only respect manual disabledRows (ignore level/search/type visual filter)
 function isRowHiddenForTabs(i) {
-  return disabledRows.has(i) || !!(rows[i] && rows[i].classList.contains('hid'));
+  return disabledRows.has(i) || isDescendantOfDisabledAncestor(i);
 }
 let flaggedRows = new Set();
 try{flaggedRows=new Set(JSON.parse(localStorage.getItem('zmag_flagged_6910W021')||'[]').map(Number));}catch(e){}
@@ -673,6 +673,9 @@ let unitCosts = []; // cost per unit for each BOM index
 let treeCosts = []; // cumulative subtree cost for each BOM index
 let itemSetupCost = []; // setup cost per item (not × qty)
 let cumSetupCosts = []; // cumulative setup costs for subtree
+let treeMfgCost  = []; // cumulative manufacturing (ELTDesign) cost × tq in subtree
+let treeCotsCost = []; // cumulative COTS buy cost × tq in subtree
+let treeRawMatCost = []; // cumulative raw-material buy cost × tq in subtree
 let curTab = 'drawing';
 let curItem = null;
 let searchTerm = '';
@@ -747,15 +750,15 @@ const COLS = [
   {id:'type', label:'Type',       w:90,  sort:true},
   {id:'st',   label:'Status',     w:80,  sort:true},
   {id:'files',label:'Files',      w:60,  sort:false},
-  {id:'setupH',label:'⚙ Setup',      w:65,  sort:false},
-  {id:'cycleH',label:'⏱ ייצור',     w:65,  sort:false},
-  {id:'cumCH', label:'⏱ עץ',        w:65,  sort:false},
-  {id:'totalH',label:'⏱ כולל',      w:70,  sort:false},
-  {id:'lcost', label:'🔧 עלות ייצור', w:85,  sort:false},
-  {id:'bcost', label:'🛒 עלות רכש',  w:85,  sort:false},
-  {id:'ucost', label:'💰 עלות שורה', w:90,  sort:false},
-  {id:'tcost', label:'🌳 עלות עץ',   w:90,  sort:false},
-  {id:'pcost', label:'🌳 פרוייקט',  w:90,  sort:false},
+  {id:'setupH',label:'⚙ Setup (עץ)',   w:75,  sort:false},
+  {id:'cycleH',label:'⏱ ייצור (עץ)',  w:80,  sort:false},
+  {id:'cumCH', label:'⏱ כולל h×ערכות',w:90,  sort:false},
+  {id:'totalH',label:'⏱ h×ערכות',    w:80,  sort:false},
+  {id:'lcost', label:'🔧 ייצור (עץ)', w:90,  sort:false},
+  {id:'bcost', label:'🛒 COTS (עץ)',   w:85,  sort:false},
+  {id:'ucost', label:'🧱 ח"ג (עץ)',   w:85,  sort:false},
+  {id:'tcost', label:'⚙ Setup ₪',     w:85,  sort:false},
+  {id:'pcost', label:'💰 סה"כ פרויקט',w:100, sort:false},
 ];
 let colWidths = COLS.map(c=>c.w);
 let cumHours = [];
@@ -1285,12 +1288,21 @@ function getEffectiveTq(item, bomIdx) {
   return item.tq || 0;
 }
 
+// Classify a BOM item's cost type for tree breakdown
+function _isBuyRawMat(item) {
+  if (item.type === 'ELTDesign') return false;
+  return !!(rawMatData[item.pb || item.pn]);
+}
+
 function computeTreeCosts() {
   const n = BOM.length;
-  unitCosts    = new Array(n);
-  treeCosts    = new Array(n).fill(0);
-  itemSetupCost = new Array(n).fill(0);
-  cumSetupCosts = new Array(n).fill(0);
+  unitCosts      = new Array(n);
+  treeCosts      = new Array(n).fill(0);
+  itemSetupCost  = new Array(n).fill(0);
+  cumSetupCosts  = new Array(n).fill(0);
+  treeMfgCost    = new Array(n).fill(0);
+  treeCotsCost   = new Array(n).fill(0);
+  treeRawMatCost = new Array(n).fill(0);
   for (let i = 0; i < n; i++) {
     if (isRowExcluded(i)) { unitCosts[i] = 0; itemSetupCost[i] = 0; continue; }
     unitCosts[i]    = getItemUnitCost(BOM[i], i);
@@ -1301,13 +1313,28 @@ function computeTreeCosts() {
     const lv = BOM[i].lv;
     let tsum = unitCosts[i] * (BOM[i].tq || 0);
     let ssum = itemSetupCost[i];
+    let mfg  = 0, cots = 0, rawm = 0;
+
+    // Own item contribution
+    const ownExt = unitCosts[i] * (BOM[i].tq || 0);
+    if (BOM[i].type === 'ELTDesign')      mfg  += ownExt;
+    else if (_isBuyRawMat(BOM[i]))        rawm += ownExt;
+    else                                   cots += ownExt;
+
     for (let j = i + 1; j < n; j++) {
       if (BOM[j].lv <= lv) break;
-      tsum += unitCosts[j] * (BOM[j].tq || 0);
+      const ext = unitCosts[j] * (BOM[j].tq || 0);
+      tsum += ext;
       ssum += itemSetupCost[j];
+      if (BOM[j].type === 'ELTDesign')     mfg  += ext;
+      else if (_isBuyRawMat(BOM[j]))       rawm += ext;
+      else                                  cots += ext;
     }
-    treeCosts[i]    = tsum;
+    treeCosts[i]     = tsum;
     cumSetupCosts[i] = ssum;
+    treeMfgCost[i]   = mfg;
+    treeCotsCost[i]  = cots;
+    treeRawMatCost[i]= rawm;
   }
 }
 function fmtC(n) {
@@ -2407,10 +2434,11 @@ function computeARAggregate(pb, tabMode) {
       totalArea += (parseFloat(dims.L)/1000) * (parseFloat(dims.W)/1000) * tq;
     }
   });
+  const waste = 1 + (parseFloat(rm.wastePct)||0)/100;
   let totalCost = 0;
-  if (rm.costUnit === 'kg')  totalCost = totalMass * uc;
-  else if (rm.costUnit === 'm2') totalCost = totalArea * uc;
-  else totalCost = totalMass * uc;
+  if (rm.costUnit === 'kg')  totalCost = totalMass * uc * waste;
+  else if (rm.costUnit === 'm2') totalCost = totalArea * uc * waste;
+  else totalCost = totalMass * uc * waste;
   return {mass:totalMass, cost:totalCost, area:totalArea, hasAny:count>0};
 }
 
@@ -2637,6 +2665,9 @@ function openRawMatEditor(pb, desc, tq) {
   window._arParents = getParentsForRawMat(pb);
   const _arParents = window._arParents;
   const _isRawMatItem = /^(m2|m|ar|a\/r)$/i.test(window._arUom);
+  // Debug: log STEP path info so user can verify in browser console (F12)
+  console.log('[STEP debug] pb='+pb+' uom='+window._arUom+' isRawMat='+_isRawMatItem+' parents='+_arParents.length+' hasAnyStep='+_arParents.some(function(p){return!!p.stpPath;}));
+  if(_arParents.length) console.log('[STEP debug] first parent:', JSON.stringify({ppb:_arParents[0].parentPb, stp:_arParents[0].stpPath}));
   const arBanner = (_isRawMatItem && _arParents.length) ? (function(){
     const isSheet = (formId === 'sheet');
     const hasAnyStep = _arParents.some(function(p){ return !!p.stpPath; });
@@ -2658,7 +2689,7 @@ function openRawMatEditor(pb, desc, tq) {
           ? '<td style="padding:1px 2px"><input class="ar-pdim" data-dim="W" data-ppb="'+safePP+'" data-row="'+i+'" value="'+Wval+'" placeholder="mm" type="number" min="0" step="1" '+
             'style="width:60px;padding:2px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px;font-size:11px" '+
             'oninput="arParentDimChanged(\''+safePb+'\',this,'+i+')"></td>'
-          : '<td></td>')+
+          : '')+
         '<td id="ar-pmass-'+i+'" style="font-size:10px;color:var(--text3);text-align:right;padding:2px 4px"></td>'+
         '<td style="font-size:10px;color:var(--text3);text-align:center;padding:2px 3px">×'+p.tq+'</td>'+
         '<td id="ar-psub-'+i+'" style="font-size:10px;color:#68d391;text-align:right;padding:2px 4px;font-weight:600"></td>'+
@@ -2675,15 +2706,15 @@ function openRawMatEditor(pb, desc, tq) {
     const hdr =
       '<th style="font-size:10px;padding:2px 4px;color:var(--text3);font-weight:600">הורה</th>'+
       '<th style="font-size:10px;padding:2px 4px;color:var(--text3);font-weight:600">L (mm)</th>'+
-      (isSheet ? '<th style="font-size:10px;padding:2px 4px;color:var(--text3);font-weight:600">W (mm)</th>' : '<th></th>')+
+      (isSheet ? '<th style="font-size:10px;padding:2px 4px;color:var(--text3);font-weight:600">W (mm)</th>' : '')+
       '<th style="font-size:10px;padding:2px 4px;color:var(--text3);font-weight:600">משקל נטו</th>'+
       '<th style="font-size:10px;padding:2px 4px;color:var(--text3);font-weight:600">×TQ</th>'+
       '<th style="font-size:10px;padding:2px 4px;color:var(--text3);font-weight:600">גולמי</th>'+
       (hasAnyStep ? '<th style="font-size:10px;padding:2px 4px;color:var(--text3);font-weight:600">STEP</th>' : '');
     return '<div id="arBannerBox" style="margin:10px 0;background:rgba(66,153,225,.08);border:1px solid rgba(66,153,225,.35);border-radius:6px;padding:8px 10px">'+
       '<div style="font-size:11px;font-weight:600;color:var(--accent2);margin-bottom:5px">📐 מידות לפי הורה ('+_arParents.length+' הורים) — יש להזין L'+(isSheet?' ו-W':'')+' לכל הורה</div>'+
-      '<table style="width:100%;border-collapse:collapse"><thead><tr>'+hdr+'</tr></thead><tbody id="arParentsBody">'+
-      rowsHTML.join('')+'</tbody></table>'+
+      '<div style="overflow-x:auto"><table style="border-collapse:collapse;min-width:max-content"><thead><tr>'+hdr+'</tr></thead><tbody id="arParentsBody">'+
+      rowsHTML.join('')+'</tbody></table></div>'+
       '<div id="arAggRow" style="font-size:11px;color:var(--accent2);font-weight:600;margin-top:5px;text-align:right;padding:3px 0"></div>'+
       '</div>';
   })() : '';
@@ -3188,34 +3219,111 @@ async function switchTab(tab){
     if(!cadFiles.length){
       body.innerHTML='<div class="no-files">No CAD files available.</div>';
     } else {
+      const canFetch = (_graphMode && _msalAcct) || !!rootDirHandle;
+      // Auto-display: find first STP file and try to show it
+      const stpFile = cadFiles.find(function(f){ return /\.stp$|\.step$/i.test(f); });
+      const firstCad = stpFile || cadFiles[0];
+      const firstName = firstCad ? firstCad.split(/[\\/]/).pop() : '';
+
+      // Build file list rows
+      const fileRows = cadFiles.map(function(f){
+        const name=f.split(/[\\/]/).pop();
+        const esc=f.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+        const isStp=/\.stp$|\.step$/i.test(f);
+        const isXt=/\.x_t$/i.test(f);
+        const icon = isStp ? '📐' : isXt ? '🔷' : '🔩';
+        const dlBtn = canFetch
+          ? '<button onclick="downloadCadFile(\''+esc+'\')" style="margin-left:auto;flex-shrink:0;padding:2px 10px;background:var(--accent);color:#fff;border:none;border-radius:3px;cursor:pointer;font-size:11px;white-space:nowrap">⬇ הורד</button>'
+          : '<span style="margin-left:auto;font-size:10px;color:var(--text3)">דרוש Select Folder</span>';
+        return '<div style="display:flex;align-items:center;gap:8px;padding:6px 8px;background:var(--surface2);border-radius:5px;border:1px solid var(--border)">'+
+          '<span style="font-size:18px">'+icon+'</span>'+
+          '<span style="color:var(--accent);font-size:12px;font-family:monospace;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+f+'">'+name+'</span>'+
+          dlBtn+
+          '</div>';
+      }).join('');
+
+      // Auto-viewer area
+      let viewerHtml = '';
+      if (canFetch && stpFile) {
+        const stpEsc = stpFile.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+        viewerHtml =
+          '<div id="cadViewerBox" style="background:rgba(66,153,225,.07);border:1px solid rgba(66,153,225,.3);border-radius:7px;padding:12px;margin-bottom:8px">'+
+          '<div style="font-size:12px;font-weight:600;color:var(--accent2);margin-bottom:8px">🔩 תצוגה מקדימה: '+firstName+'</div>'+
+          '<div style="font-size:11px;color:var(--text2);margin-bottom:10px">קבצי STEP מוצגים בתוכנת CAD המותקנת במחשב. לחץ <b>פתח/הורד</b> כדי לצפות במודל.</div>'+
+          '<div style="display:flex;gap:8px;flex-wrap:wrap">'+
+          '<button onclick="autoOpenCad(\''+stpEsc+'\')" style="padding:6px 16px;background:var(--accent);color:#fff;border:none;border-radius:5px;cursor:pointer;font-size:12px;font-weight:600">🔩 פתח STEP בתוכנת CAD</button>'+
+          '</div>'+
+          '<div id="cadViewerMsg" style="font-size:10px;color:var(--text3);margin-top:6px"></div>'+
+          '</div>';
+      } else if (!canFetch) {
+        viewerHtml = '<div style="padding:8px 12px;background:rgba(255,165,0,.1);border:1px solid rgba(255,165,0,.4);border-radius:5px;font-size:11px;color:var(--warn);margin-bottom:8px">📂 לחץ <b>Select Folder</b> או התחבר ל-OneDrive כדי לפתוח קבצים</div>';
+      }
+
       body.innerHTML='<div style="display:flex;flex-direction:column;gap:6px;padding:8px">'+
-        cadFiles.map(function(f){
-          const name=f.split(/[\\/]/).pop();
-          return '<div style="display:flex;align-items:center;gap:8px;padding:6px 8px;background:var(--surface2);border-radius:5px;border:1px solid var(--border)">'+
-            '<span style="font-size:20px">🔩</span>'+
-            '<a href="'+f+'" target="_blank" style="color:var(--accent);text-decoration:none;font-size:12px;font-family:monospace">'+name+'</a>'+
-            '</div>';
-        }).join('')+
+        viewerHtml+
+        fileRows+
         '</div>';
     }
   } else {
     const files=[];
     const pdfs=Array.isArray(curItem.pdf)?curItem.pdf:(curItem.pdf?[curItem.pdf]:[]);
-    pdfs.forEach(function(f){ files.push({icon:'📄',file:f,color:'#e04040'}); });
-    (curItem.cads||[]).forEach(function(f){ files.push({icon:'🔩',file:f,color:'#4090e0'}); });
+    pdfs.forEach(function(f){ files.push({icon:'📄',file:f,color:'#e04040',isPdf:true}); });
+    (curItem.cads||[]).forEach(function(f){ files.push({icon:'🔩',file:f,color:'#4090e0',isPdf:false}); });
     if(!files.length){
       body.innerHTML='<div class="no-files">No files associated with this item.</div>';
     } else {
+      const canFetch = (_graphMode && _msalAcct) || !!rootDirHandle;
       body.innerHTML='<div style="display:flex;flex-direction:column;gap:6px;padding:8px">'+
         files.map(function(e){
           const name=e.file.split(/[\\/]/).pop();
+          const esc=e.file.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+          const dlBtn = canFetch
+            ? '<button onclick="downloadCadFile(\''+esc+'\')" style="margin-left:auto;padding:2px 10px;background:var(--accent);color:#fff;border:none;border-radius:3px;cursor:pointer;font-size:11px;white-space:nowrap">⬇ הורד</button>'
+            : '';
           return '<div style="display:flex;align-items:center;gap:8px;padding:6px 8px;background:var(--surface2);border-radius:5px;border:1px solid var(--border)">'+
             '<span style="font-size:20px">'+e.icon+'</span>'+
-            '<a href="'+e.file+'" target="_blank" style="color:'+e.color+';text-decoration:none;font-size:12px;font-family:monospace">'+name+'</a>'+
+            '<span style="color:'+e.color+';font-size:12px;font-family:monospace;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+e.file+'">'+name+'</span>'+
+            dlBtn+
             '</div>';
         }).join('')+
         '</div>';
     }
+  }
+}
+
+// ─── downloadCadFile ─────────────────────────────────────────────────────────
+async function downloadCadFile(relPath) {
+  try {
+    const ab = await getFileBuffer(relPath);
+    const name = relPath.split(/[\\/]/).pop();
+    const blob = new Blob([ab]);
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = name;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(function(){ URL.revokeObjectURL(url); }, 5000);
+  } catch(e) {
+    alert('שגיאה בטעינת קובץ: ' + e.message + '\n\nודא כי בחרת תיקיית פרויקט (Select Folder) או מחובר ל-OneDrive.');
+  }
+}
+
+// ─── autoOpenCad — download STP and trigger OS viewer ────────────────────────
+async function autoOpenCad(relPath) {
+  const msg = document.getElementById('cadViewerMsg');
+  if (msg) msg.textContent = '⏳ טוען קובץ...';
+  try {
+    const ab = await getFileBuffer(relPath);
+    const name = relPath.split(/[\\/]/).pop();
+    const blob = new Blob([ab]);
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = name;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(function(){ URL.revokeObjectURL(url); }, 10000);
+    if (msg) msg.textContent = '✅ הקובץ הורד — פתח אותו בתוכנת SolidWorks / CATIA / Creo';
+  } catch(e) {
+    if (msg) msg.textContent = '⚠ שגיאה: ' + e.message;
+    alert('שגיאה בטעינת קובץ: ' + e.message + '\n\nודא כי בחרת תיקיית פרויקט (Select Folder) או מחובר ל-OneDrive.');
   }
 }
 
@@ -3259,11 +3367,16 @@ function updateWHCells(){
     const sh=tr.querySelector('.cell-setupH');
     const ch=tr.querySelector('.cell-cycleH');
     const cumch=tr.querySelector('.cell-cumCH');
-    if(sh) sh.textContent=(setupHours[idx]||0)>0?fmtTimeAuto(setupHours[idx]*60):'';
-    if(ch) ch.textContent=(directCycleH[idx]||0)>0?fmtTimeAuto(directCycleH[idx]*60):'';
-    if(cumch) cumch.textContent=(cumCycleH[idx]||0)>0?fmtTimeAuto(cumCycleH[idx]*60):'';
+    // setupH → tree cumulative setup hours (NOT × projectQty — setup is ×1 per project)
+    const treeSetupH = (cumHours[idx]||0) - (cumCycleH[idx]||0);
+    if(sh) sh.textContent=treeSetupH>0?fmtTimeAuto(treeSetupH*60):'';
+    // cycleH → tree cumulative cycle hours (already × tq via cumCycleH)
+    if(ch) ch.textContent=(cumCycleH[idx]||0)>0?fmtTimeAuto(cumCycleH[idx]*60):'';
+    // cumCH → total (cycle+setup) × projectQty
+    const totHProj = (cumHours[idx]||0)*projectQty;
+    if(cumch) cumch.textContent=totHProj>0?fmtTimeAuto(totHProj*60):'';
   });
-  document.querySelectorAll('[data-totalHIdx]').forEach(function(td){
+  document.querySelectorAll('[data-total-h-idx]').forEach(function(td){
     const i=parseInt(td.dataset.totalHIdx);
     const h=(cumHours[i]||0)*projectQty;
     td.textContent=h>0?fmtTimeAuto(h*60):'';
@@ -3274,34 +3387,41 @@ function updateWHCells(){
 
 // ─── refreshCostCells ────────────────────────────────────────────────────────
 function refreshCostCells(){
-  document.querySelectorAll('[data-laborIdx]').forEach(function(td){
+  // NOTE: dataset.laborIdx sets attribute data-labor-idx (DOMStringMap hyphenates camelCase).
+  // Selectors must use the hyphenated form.
+  const pQty = projectQty || 1;
+
+  // lcost → tree manufacturing cost × projectQty
+  document.querySelectorAll('[data-labor-idx]').forEach(function(td){
     const i=parseInt(td.dataset.laborIdx);
-    const item=BOM[i];
-    if(!item||item.type!=='ELTDesign'){ td.textContent=''; return; }
-    const cost=(unitCosts[i]||0)*(item.tq||0);
-    td.textContent=cost>0?fmtC(cost):'—';
+    const v=(treeMfgCost[i]||0)*pQty;
+    td.textContent=v>0?fmtC(v):'—';
   });
-  document.querySelectorAll('[data-buyIdx]').forEach(function(td){
+  // bcost → tree COTS buy cost × projectQty
+  document.querySelectorAll('[data-buy-idx]').forEach(function(td){
     const i=parseInt(td.dataset.buyIdx);
-    const item=BOM[i];
-    if(!item||item.type==='ELTDesign'){ td.textContent=''; return; }
-    const cost=(unitCosts[i]||0)*(item.tq||0);
-    td.textContent=cost>0?fmtC(cost):'—';
+    const v=(treeCotsCost[i]||0)*pQty;
+    td.textContent=v>0?fmtC(v):'—';
   });
-  document.querySelectorAll('[data-costIdx]').forEach(function(td){
+  // ucost → tree raw-material cost × projectQty
+  document.querySelectorAll('[data-cost-idx]').forEach(function(td){
     const i=parseInt(td.dataset.costIdx);
-    const uc=unitCosts[i]||0;
-    td.textContent=uc>0?fmtC(uc):'—';
+    const v=(treeRawMatCost[i]||0)*pQty;
+    td.textContent=v>0?fmtC(v):'—';
   });
-  document.querySelectorAll('[data-treeCostIdx]').forEach(function(td){
+  // tcost → tree setup cost × 1 (NOT × projectQty — setup is once per project)
+  document.querySelectorAll('[data-tree-cost-idx]').forEach(function(td){
     const i=parseInt(td.dataset.treeCostIdx);
-    const tc=treeCosts[i];
-    td.textContent=tc?fmtC(tc):'—';
+    const v=cumSetupCosts[i]||0;
+    td.textContent=v>0?fmtC(v):'—';
   });
-  document.querySelectorAll('[data-projCostIdx]').forEach(function(td){
+  // pcost → total project cost = (mfg + COTS + RM) × projectQty + setup × 1
+  document.querySelectorAll('[data-proj-cost-idx]').forEach(function(td){
     const i=parseInt(td.dataset.projCostIdx);
-    const tc=treeCosts[i];
-    td.textContent=tc?fmtC(tc*(projectQty||1)):'—';
+    const varCost = ((treeMfgCost[i]||0)+(treeCotsCost[i]||0)+(treeRawMatCost[i]||0))*pQty;
+    const fixCost = cumSetupCosts[i]||0;
+    const total = varCost + fixCost;
+    td.textContent=total>0?fmtC(total):'—';
   });
 }
 
@@ -6341,31 +6461,180 @@ async function exportBomExcel() {
       document.head.appendChild(s);
     });
   }
+  const pQty = projectQty || 1;
   const wb = new ExcelJS.Workbook();
   wb.views = [{rightToLeft:true}];
-  const ws = wb.addWorksheet('BOM', {views:[{rightToLeft:true}]});
-  ws.columns = [
-    {header:'#',    key:'row',  width:5},
-    {header:'Level',key:'lv',   width:7},
-    {header:'PN',   key:'pn',   width:24},
-    {header:'PB',   key:'pb',   width:20},
-    {header:'Description',key:'desc',width:35},
-    {header:'Qty',  key:'qty',  width:8},
-    {header:'UOM',  key:'uom',  width:8},
-    {header:'TQ',   key:'tq',   width:8},
-    {header:'Type', key:'type', width:12},
+
+  // ── Shared column definitions ──────────────────────────────────────────────
+  const COL_DEFS = [
+    {header:'#',            key:'row',   width:5},
+    {header:'Level',        key:'lv',    width:7},
+    {header:'PN',           key:'pn',    width:24},
+    {header:'PB',           key:'pb',    width:20},
+    {header:'Description',  key:'desc',  width:38},
+    {header:'Qty',          key:'qty',   width:8},
+    {header:'UOM',          key:'uom',   width:8},
+    {header:'TQ',           key:'tq',    width:8},
+    {header:'Type',         key:'type',  width:12},
+    {header:'⚙ Setup (h)', key:'setupH',width:13},
+    {header:'⏱ Cycle (h)', key:'cycleH',width:13},
+    {header:'⏱ Tree (h)',  key:'cumCH', width:13},
+    {header:'🔧 Labor ₪',  key:'lcost', width:14},
+    {header:'🛒 Buy ₪',    key:'bcost', width:14},
+    {header:'💰 Unit ₪',   key:'ucost', width:14},
+    {header:'🌳 Tree ₪',   key:'tcost', width:14},
+    {header:'🌳 Project ₪',key:'pcost', width:15},
   ];
-  ws.getRow(1).eachCell(function(cell) {
-    cell.font={bold:true,color:{argb:'FFFFFFFF'}};
-    cell.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FF2D4A8A'}};
-    cell.alignment={horizontal:'center'};
+  const NUM_COLS = COL_DEFS.length;
+
+  function styleHeader(ws) {
+    ws.getRow(1).eachCell(function(cell) {
+      cell.font  = {bold:true, color:{argb:'FFFFFFFF'}};
+      cell.fill  = {type:'pattern', pattern:'solid', fgColor:{argb:'FF2D4A8A'}};
+      cell.alignment = {horizontal:'center', vertical:'middle'};
+    });
+    ws.getRow(1).height = 20;
+  }
+
+  function getRowData(item, idx) {
+    const tq = item.tq || 0;
+    const treeSetupH = (cumHours[idx]||0) - (cumCycleH[idx]||0);
+    const mfg  = (treeMfgCost[idx]  || 0) * pQty;
+    const cots = (treeCotsCost[idx] || 0) * pQty;
+    const rawm = (treeRawMatCost[idx]|| 0) * pQty;
+    const setup= cumSetupCosts[idx] || 0;
+    return {
+      row:   idx + 1,
+      lv:    item.lv,
+      pn:    item.pn,
+      pb:    item.pb || item.pn,
+      desc:  item.desc,
+      qty:   parseFloat(item.qty) || 0,
+      uom:   item.uom,
+      tq:    tq,
+      type:  item.type,
+      setupH: Math.round(treeSetupH * 100) / 100,
+      cycleH: Math.round((cumCycleH[idx]||0) * 100) / 100,
+      cumCH:  Math.round((cumHours[idx]||0) * pQty * 100) / 100,
+      lcost:  Math.round(mfg  * 100) / 100,
+      bcost:  Math.round(cots * 100) / 100,
+      ucost:  Math.round(rawm * 100) / 100,
+      tcost:  Math.round(setup* 100) / 100,
+      pcost:  Math.round((mfg + cots + rawm + setup) * 100) / 100,
+    };
+  }
+
+  // ── Sheet 1: Full BOM with all costs ──────────────────────────────────────
+  const ws1 = wb.addWorksheet('BOM', {views:[{rightToLeft:true}]});
+  ws1.columns = COL_DEFS;
+  styleHeader(ws1);
+
+  // Type colour palette
+  const TYPE_COLOR = {ELTDesign:'FFDBEAFE', Buy:'FFDCFCE7', 'default':'FFFFFFFF'};
+
+  BOM.forEach(function(item, idx) {
+    // Apply same filters as the BOM view: exclude disabled rows and rows above maxLevel
+    if (isRowExcluded(idx)) return;
+    if (item.lv > maxLevel) return;
+    const d = getRowData(item, idx);
+    const r = ws1.addRow(d);
+    // Zebra + type colour
+    const bgArgb = idx % 2 === 0
+      ? (TYPE_COLOR[item.type] || TYPE_COLOR['default'])
+      : (item.type === 'ELTDesign' ? 'FFBFDBFE' : item.type === 'Buy' ? 'FFB8F3CD' : 'FFF5F5F5');
+    r.eachCell(function(cell) {
+      cell.fill = {type:'pattern', pattern:'solid', fgColor:{argb: bgArgb}};
+    });
+    // Bold top-level rows
+    if (item.lv === 0) r.font = {bold:true};
+    // Right-align cost cells (columns 10-17, 1-based)
+    for (let c = 10; c <= NUM_COLS; c++) {
+      r.getCell(c).alignment = {horizontal:'right'};
+      r.getCell(c).numFmt = '#,##0.00';
+    }
   });
-  BOM.forEach(function(item,idx) {
-    ws.addRow({row:idx+1,lv:item.lv,pn:item.pn,pb:item.pb||item.pn,
-      desc:item.desc,qty:item.qty,uom:item.uom,tq:item.tq,type:item.type});
+
+  ws1.autoFilter = {from:{row:1,column:1}, to:{row:1,column:NUM_COLS}};
+  ws1.views = [{state:'frozen', ySplit:1, rightToLeft:true}];
+
+  // ── Sheet 2: Hierarchy view with outline grouping ─────────────────────────
+  const ws2 = wb.addWorksheet('היררכיה', {views:[{rightToLeft:true}]});
+  // Hierarchy sheet: Description with indent + subset of columns
+  const H_COLS = [
+    {header:'Level',        key:'lv',    width:7},
+    {header:'PN',           key:'pn',    width:24},
+    {header:'Description',  key:'desc',  width:45},
+    {header:'Type',         key:'type',  width:12},
+    {header:'UOM',          key:'uom',   width:8},
+    {header:'TQ',           key:'tq',    width:10},
+    {header:'⚙ Setup (h)', key:'setupH',width:13},
+    {header:'⏱ Cycle (h)', key:'cycleH',width:13},
+    {header:'⏱ Tree (h)',  key:'cumCH', width:13},
+    {header:'🔧 Labor ₪',  key:'lcost', width:14},
+    {header:'🛒 Buy ₪',    key:'bcost', width:14},
+    {header:'💰 Unit ₪',   key:'ucost', width:14},
+    {header:'🌳 Tree ₪',   key:'tcost', width:14},
+    {header:'🌳 Project ₪',key:'pcost', width:15},
+  ];
+  ws2.columns = H_COLS;
+  ws2.getRow(1).eachCell(function(cell) {
+    cell.font  = {bold:true, color:{argb:'FFFFFFFF'}};
+    cell.fill  = {type:'pattern', pattern:'solid', fgColor:{argb:'FF1E3A5F'}};
+    cell.alignment = {horizontal:'center', vertical:'middle'};
   });
-  ws.autoFilter={from:{row:1,column:1},to:{row:1,column:9}};
-  ws.views=[{state:'frozen',ySplit:1,rightToLeft:true}];
+  ws2.getRow(1).height = 20;
+
+  BOM.forEach(function(item, idx) {
+    if (isRowExcluded(idx)) return;
+    if (item.lv > maxLevel) return;
+    const d = getRowData(item, idx);
+    const indent = '  '.repeat(item.lv);
+    const r = ws2.addRow({
+      lv:    d.lv,
+      pn:    d.pn,
+      desc:  indent + d.desc,
+      type:  d.type,
+      uom:   d.uom,
+      tq:    d.tq,
+      setupH: d.setupH,
+      cycleH: d.cycleH,
+      cumCH:  d.cumCH,
+      lcost:  d.lcost,
+      bcost:  d.bcost,
+      ucost:  d.ucost,
+      tcost:  d.tcost,
+      pcost:  d.pcost,
+    });
+    // Row grouping by level (Excel outline)
+    if (item.lv > 0) {
+      r.outlineLevel = Math.min(item.lv, 7);
+    }
+    // Bold assemblies (items with children)
+    const hasKids = idx + 1 < BOM.length && BOM[idx+1].lv > item.lv;
+    if (hasKids || item.lv === 0) r.font = {bold:true};
+    // Right-align numeric cols (columns 7-14, 1-based)
+    for (let c = 7; c <= 14; c++) {
+      r.getCell(c).alignment = {horizontal:'right'};
+      r.getCell(c).numFmt = '#,##0.00';
+    }
+    // Type colour
+    const bgArgb2 = item.lv === 0 ? 'FF1E3A5F'
+      : item.type === 'ELTDesign' ? (hasKids ? 'FFBFDBFE' : 'FFDBEAFE')
+      : item.type === 'Buy'       ? 'FFDCFCE7'
+      : 'FFF8F8F8';
+    const fontColor2 = item.lv === 0 ? 'FFFFFFFF' : '00000000';
+    r.eachCell(function(cell) {
+      cell.fill = {type:'pattern', pattern:'solid', fgColor:{argb: bgArgb2}};
+      if (item.lv === 0) cell.font = {bold:true, color:{argb: fontColor2}};
+    });
+  });
+
+  ws2.autoFilter = {from:{row:1,column:1}, to:{row:1,column:H_COLS.length}};
+  ws2.views = [{state:'frozen', ySplit:1, rightToLeft:true}];
+  // Collapse all outline groups by default so top-level is visible
+  ws2.properties = ws2.properties || {};
+
+  // ── Write & download ───────────────────────────────────────────────────────
   const buf = await wb.xlsx.writeBuffer();
   const blob = new Blob([buf],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
   const a = document.createElement('a');
