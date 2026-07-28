@@ -2592,8 +2592,7 @@ function openRawMatEditor(pb, desc, tq) {
           : '<td></td>')+
         '<td id="ar-pmass-'+i+'" style="font-size:10px;color:var(--text3);text-align:right;padding:2px 4px"></td>'+
         '<td style="font-size:10px;color:var(--text3);text-align:center;padding:2px 3px">×'+p.tq+'</td>'+
-        '<td id="ar-psub-'+i+'" style="font-size:10px;color:#68d391;text-align:right;padding:2px 4px;font-weight:600"></td>'+
-        +'</tr>';
+        '<td id="ar-psub-'+i+'" style="font-size:10px;color:#68d391;text-align:right;padding:2px 4px;font-weight:600"></td></tr>';
     });
     const hdr =
       '<th style="font-size:10px;padding:2px 4px;color:var(--text3);font-weight:600">הורה</th>'+
@@ -3156,20 +3155,21 @@ function updateStats(visCount){
   let txt=n+' פריטים · '+vis+' מוצגים';
   if(projectQty>1) txt+=' · '+projectQty+' ערכות';
   if(tc>0) txt+=' · עלות: '+fmtC(tc*(projectQty||1));
-  if(th>0) txt+=' · '+fmtTimeAuto(th*60)+' ייצור';
+  if(th>0) txt+=' · ייצור: '+fmtTimeAuto(th*60);
   bar.textContent=txt;
 }
 
 // ─── updateWHCells ───────────────────────────────────────────────────────────
 function updateWHCells(){
-  rows.forEach(function(tr,idx){
-    if(!tr) return;
+  document.querySelectorAll('#bomBody tr[data-idx]').forEach(function(tr){
+    const idx=parseInt(tr.dataset.idx);
+    if(isNaN(idx)) return;
     const sh=tr.querySelector('.cell-setupH');
     const ch=tr.querySelector('.cell-cycleH');
     const cumch=tr.querySelector('.cell-cumCH');
-    if(sh) sh.textContent=setupHours[idx]>0?fmtTimeAuto(setupHours[idx]*60):'';
-    if(ch) ch.textContent=directCycleH[idx]>0?fmtTimeAuto(directCycleH[idx]*60):'';
-    if(cumch) cumch.textContent=cumCycleH[idx]>0?fmtTimeAuto(cumCycleH[idx]*60):'';
+    if(sh) sh.textContent=(setupHours[idx]||0)>0?fmtTimeAuto(setupHours[idx]*60):'';
+    if(ch) ch.textContent=(directCycleH[idx]||0)>0?fmtTimeAuto(directCycleH[idx]*60):'';
+    if(cumch) cumch.textContent=(cumCycleH[idx]||0)>0?fmtTimeAuto(cumCycleH[idx]*60):'';
   });
   document.querySelectorAll('[data-totalHIdx]').forEach(function(td){
     const i=parseInt(td.dataset.totalHIdx);
@@ -5162,11 +5162,16 @@ async function loadProcFromGraph() {
       });
       localStorage.setItem(PROC_STORAGE_KEY, JSON.stringify(procData));
       localStorage.setItem(TYPES_STORAGE_KEY, JSON.stringify(PROC_TYPES));
+      // Load supplementary data BEFORE buildTable so costs are computed correctly
+      _mergeLoadedProc(obj);
       buildTable();
       buildCumulativeHours();
       updateWHCells();
       detectAnomalies();
       applyFilters(); // restore saved filter state after table rebuild
+      try { computeTreeCosts(); } catch(e) {}
+      refreshCostCells();
+      updateStats();
       if (typeof curItem !== 'undefined' && curItem) renderMfgSide && renderMfgSide(curItem);
       const savedBy = obj.savedBy ? ' (נשמר ע"י ' + obj.savedBy + ')' : '';
       setFileSyncStatus('✅ נטען מ-SharePoint' + savedBy, 'ok');
@@ -5218,6 +5223,8 @@ async function loadProcFromGraph() {
     }
     try { _populateRawmatTab(true); } catch(e){}
     try { _populateMatFamTab(); } catch(e){}
+    // Final cost recompute after all supplementary data is loaded
+    try { computeTreeCosts(); refreshCostCells(); updateStats(); } catch(e){}
   } catch(e) {
     console.error('[loadProcFromGraph]', e);
     setFileSyncStatus('⚠ טעינה נכשלה: ' + e.message, 'err');
