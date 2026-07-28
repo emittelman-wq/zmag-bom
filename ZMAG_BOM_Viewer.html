@@ -3107,33 +3107,54 @@ function _toggleRawmatExpand(pb){
     return;
   }
   // Build expansion row
-  const _arParents=getParentsForRawMat(pb);
-  if(!_arParents.length) return;
+  const _parents=getParentsForRawMat(pb);
+  if(!_parents.length){ if(btn){btn.textContent='—';btn.disabled=true;} return; }
   const rm=rawMatData[pb]||{};
+  const uom=(rm._uom||'');
+  const IS_AR_loc=/^(ar|a\/r)$/i;
+  const isAR=IS_AR_loc.test(uom);
   const dens=parseFloat(rm.density)||(MATERIAL_DB[rm.family]||{}).density||2700;
   const waste=1+((parseFloat(rm.wastePct)||0)/100);
   let html='<tr id="rmexp-'+rmId+'" class="rm-exp-row"><td colspan="99" style="padding:4px 8px 8px 36px">';
-  html+='<table style="font-size:10px;border-collapse:collapse;width:100%"><thead><tr>'+
-    '<th style="text-align:left;color:var(--text3);padding:2px 6px">הורה</th>'+
-    '<th style="color:var(--text3);padding:2px 6px">L×W</th>'+
-    '<th style="color:var(--text3);padding:2px 6px">×TQ</th>'+
-    '<th style="color:var(--text3);padding:2px 6px">נטו</th>'+
-    '<th style="color:var(--text3);padding:2px 6px">גולמי</th>'+
-    '</tr></thead><tbody>';
-  _arParents.forEach(function(p){
-    const pp=p.parentPb;
-    const dims=getARDimsForParent(pb,pp);
-    const vol=dims.L?calcRawMatVolume(rm.form||'sheet',dims):0;
-    const net=vol*dens;
-    const gross=net*waste*p.tq;
-    const Lstr=dims.L?dims.L+' mm':'—';
-    const Wstr=dims.W?'×'+dims.W+' mm':'';
-    html+='<tr><td style="color:var(--text2);padding:1px 6px">'+pp+'</td>'+
-      '<td style="text-align:center;padding:1px 6px">'+Lstr+Wstr+'</td>'+
-      '<td style="text-align:center;padding:1px 6px">×'+p.tq+'</td>'+
-      '<td style="text-align:right;padding:1px 6px">'+(net>0?(net*1000).toFixed(0)+' g':'—')+'</td>'+
-      '<td style="text-align:right;padding:1px 6px;color:var(--accent2)">'+(gross>0?gross.toFixed(3)+' kg':'—')+'</td></tr>';
-  });
+
+  if(isAR){
+    // AR: per-parent blank L×W dims + net/gross mass
+    html+='<table style="font-size:10px;border-collapse:collapse;width:100%"><thead><tr>'+
+      '<th style="text-align:left;color:var(--text3);padding:2px 6px">הורה</th>'+
+      '<th style="color:var(--text3);padding:2px 6px">L×W</th>'+
+      '<th style="color:var(--text3);padding:2px 6px">×TQ</th>'+
+      '<th style="color:var(--text3);padding:2px 6px">נטו</th>'+
+      '<th style="color:var(--text3);padding:2px 6px">גולמי</th>'+
+      '</tr></thead><tbody>';
+    _parents.forEach(function(p){
+      const pp=p.parentPb;
+      const dims=getARDimsForParent(pb,pp);
+      const vol=dims.L?calcRawMatVolume(rm.form||'sheet',dims):0;
+      const net=vol*dens;
+      const gross=net*waste*p.tq;
+      const Lstr=dims.L?dims.L+' mm':'—';
+      const Wstr=dims.W?'×'+dims.W+' mm':'';
+      html+='<tr><td style="color:var(--text2);padding:1px 6px">'+pp+'</td>'+
+        '<td style="text-align:center;padding:1px 6px">'+Lstr+Wstr+'</td>'+
+        '<td style="text-align:center;padding:1px 6px">×'+p.tq+'</td>'+
+        '<td style="text-align:right;padding:1px 6px">'+(net>0?(net*1000).toFixed(0)+' g':'—')+'</td>'+
+        '<td style="text-align:right;padding:1px 6px;color:var(--accent2)">'+(gross>0?gross.toFixed(3)+' kg':'—')+'</td></tr>';
+    });
+  } else {
+    // M / M2 / other: show which assemblies consume this material + their qty
+    html+='<table style="font-size:10px;border-collapse:collapse;width:100%"><thead><tr>'+
+      '<th style="text-align:left;color:var(--text3);padding:2px 6px">הורה (PN)</th>'+
+      '<th style="text-align:left;color:var(--text3);padding:2px 6px">תיאור</th>'+
+      '<th style="color:var(--text3);padding:2px 6px">כמות ('+uom+')</th>'+
+      '</tr></thead><tbody>';
+    _parents.forEach(function(p){
+      html+='<tr>'+
+        '<td style="color:var(--accent);padding:1px 6px;font-family:monospace;cursor:pointer" onclick="selectBomByPb(\''+p.parentPb+'\')">'+p.parentPb+'</td>'+
+        '<td style="color:var(--text2);padding:1px 6px">'+p.parentDesc+'</td>'+
+        '<td style="text-align:center;padding:1px 6px;color:var(--text)">'+p.tq+'</td></tr>';
+    });
+  }
+
   html+='</tbody></table></td></tr>';
   const mainRow=document.getElementById('rmrow-'+rmId);
   if(mainRow) mainRow.insertAdjacentHTML('afterend',html);
@@ -3273,6 +3294,13 @@ function selectRow(idx){
   rows[idx].scrollIntoView({block:'nearest', behavior:'smooth'});
   showPreview(BOM[idx]);
   renderMfgSide(BOM[idx]);
+}
+
+// Navigate main BOM tab to first row whose pb matches, then select it
+function selectBomByPb(pb){
+  switchMainTab('main');
+  const idx=BOM.findIndex(function(item){ return (item.pb||item.pn)===pb; });
+  if(idx>=0 && rows[idx]){ selectRow(idx); }
 }
 
 // ─── closePreview ────────────────────────────────────────────────────────────
@@ -3867,7 +3895,11 @@ function _populateRawmatTab(force){
         try{ const a=computeARAggregate(r.pb,true)||{}; mass=a.mass||0; costStr=a.cost>0?fmtC(a.cost):'—'; }catch(e){}
       } else {
         const dens=parseFloat(rm.density)||(MATERIAL_DB[rm.family]||{}).density||2700;
-        const nd=Object.assign({},rm.dims||{},{L:'1000'});
+        // M2 items: normalise to 1 m² (L=1000, W=1000); M items: normalise to 1 m (L=1000 only)
+        const isM2uom=/^m2$/i.test((r.uom||'').trim());
+        const nd=isM2uom
+          ?Object.assign({},rm.dims||{},{L:'1000',W:'1000'})
+          :Object.assign({},rm.dims||{},{L:'1000'});
         const vol=calcRawMatVolume(rm.form||'sheet',nd);
         const massPerM=vol*dens;
         const wasteFactor=1+(parseFloat(rm.wastePct)||0)/100;
@@ -3881,8 +3913,8 @@ function _populateRawmatTab(force){
       if(uc>0&&rm.costUnit==='kg') kgStr=fmtC(uc)+'/kg';
       else if(uc>0) kgStr=fmtC(uc)+'/'+rm.costUnit;
     }
-    const isAR=IS_AR.test(r.uom);
-    const expandBtn=isAR?'<button id="rmbtn-'+rmId+'" data-pb="'+r.pb+'" onclick="_toggleRawmatExpand(this.dataset.pb)" style="background:none;border:none;cursor:pointer;color:var(--accent);font-size:11px;padding:1px 3px" title="הצג לפי הורים">▶</button>':'';
+    // ► expand button for ALL rows (AR: shows per-parent L×W; others: shows consuming items)
+    const expandBtn='<button id="rmbtn-'+rmId+'" data-pb="'+r.pb+'" onclick="_toggleRawmatExpand(this.dataset.pb)" style="background:none;border:none;cursor:pointer;color:var(--accent);font-size:11px;padding:1px 3px" title="הצג פירוט הורים">▶</button>';
     const rowBg=configured?'':'rgba(237,137,54,.08)';
     h+='<tr id="rmrow-'+rmId+'" class="rm-row" data-pb="'+r.pb+'" data-desc="'+(r.desc||'')+'" data-tq="'+r.tq+'" style="border-bottom:1px solid var(--border);background:'+rowBg+'">'+
       '<td style="padding:2px 4px;text-align:center">'+expandBtn+'</td>'+
@@ -3929,7 +3961,10 @@ function exportRawMaterials(){
         try{ const a=computeARAggregate(r.pb,true)||{}; mass=a.mass||0; cost=a.cost||0; }catch(e){}
       } else {
         const dens=parseFloat(rm.density)||(fd.density||2700);
-        const nd=Object.assign({},rm.dims||{},{L:'1000'});
+        const isM2exp=/^m2$/i.test((r.uom||'').trim());
+        const nd=isM2exp
+          ?Object.assign({},rm.dims||{},{L:'1000',W:'1000'})
+          :Object.assign({},rm.dims||{},{L:'1000'});
         const vol=calcRawMatVolume(rm.form||'sheet',nd);
         const wasteFactor=1+(parseFloat(rm.wastePct)||0)/100;
         mass=vol*dens*wasteFactor*r.tq;
@@ -4269,10 +4304,19 @@ function openPriceEdit(pb, currentPrice, currentSrc) {
   document.getElementById('priceEditBox').classList.remove('hidden');
   setTimeout(() => document.getElementById('pePrice').focus(), 50);
 }
+// Full protected refresh — called after any price change so no cells go blank
+function _priceRefreshAll() {
+  try { computeTreeCosts(); } catch(e) { console.error('[price] computeTreeCosts', e); }
+  try { buildCumulativeHours(); } catch(e) { console.error('[price] buildCumulativeHours', e); }
+  try { updateWHCells(); } catch(e) { console.error('[price] updateWHCells', e); }
+  // updateWHCells calls refreshCostCells + updateStats internally
+  buyBuilt = false;
+  try { buildBuyData(); renderBuyTable(getSortedBuyData()); filterBuyTable(); } catch(e) {}
+}
 function closePriceEdit() {
   document.getElementById('priceEditBox').classList.add('hidden');
   _peKey = null;
-  computeTreeCosts(); refreshCostCells();
+  _priceRefreshAll();
 }
 function savePriceEdit() {
   if (!_peKey) return;
@@ -4281,20 +4325,16 @@ function savePriceEdit() {
   if (!isNaN(val) && val >= 0) {
     localStorage.setItem('px_' + _peKey, JSON.stringify({p: val, src}));
   }
-  closePriceEdit();
-  buyBuilt = false;
-  buildBuyData();
-  renderBuyTable(getSortedBuyData());
-  filterBuyTable();
+  document.getElementById('priceEditBox').classList.add('hidden');
+  _peKey = null;
+  _priceRefreshAll();
 }
 function clearPriceEdit() {
   if (!_peKey) return;
   localStorage.removeItem('px_' + _peKey);
-  closePriceEdit();
-  buyBuilt = false;
-  buildBuyData();
-  renderBuyTable(getSortedBuyData());
-  filterBuyTable();
+  document.getElementById('priceEditBox').classList.add('hidden');
+  _peKey = null;
+  _priceRefreshAll();
 }
 document.getElementById('priceEditBox').addEventListener('click', e => {
   if (e.target === document.getElementById('priceEditBox')) closePriceEdit();
