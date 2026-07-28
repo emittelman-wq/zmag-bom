@@ -3211,22 +3211,248 @@ function _rmInitColResize(){
   });
 }
 
+// ─── Executive Report (דוח מנהלים) ────────────────────────────────────────────
+const EXEC_RPT_KEY = 'zmag_exec_report_v2';
+
+function _execLoad() {
+  try { return JSON.parse(localStorage.getItem(EXEC_RPT_KEY) || '{}'); } catch(e) { return {}; }
+}
+function _execSave(field, val) {
+  const d = _execLoad();
+  d[field] = val;
+  localStorage.setItem(EXEC_RPT_KEY, JSON.stringify(d));
+  _execRecalc();
+}
+function _execRecalc() {
+  // Re-read all values from DOM inputs
+  const g = function(id){ const el=document.getElementById(id); return el?(parseFloat(el.value)||0):0; };
+  const gs = function(id){ const el=document.getElementById(id); return el?(el.value||''):''; };
+
+  // Auto values
+  const mfgCostAuto = Math.round(treeMfgCost[0]||0);
+  const cotsAuto    = Math.round(treeCotsCost[0]||0);
+  const rmAuto      = Math.round(treeRawMatCost[0]||0);
+  const hourRate    = g('er-hourRate');
+
+  // Row costs (use auto if auto>0, else manual rate × hours)
+  const mfgCost  = mfgCostAuto > 0 ? mfgCostAuto : Math.round(g('er-mfgHours') * hourRate);
+  const cotsCost = cotsAuto;
+  const cotsExtra= g('er-cotsExtra');
+  const rmCost   = rmAuto;
+  const asmCost  = g('er-asmCost');
+
+  // Per-vehicle subtotal (mfg + cots_priced + cots_extra + rawmat)
+  const sub = mfgCost + cotsCost + cotsExtra + rmCost;
+  const subEl = document.getElementById('er-sub');
+  if(subEl) subEl.textContent = sub > 0 ? '₪'+Math.round(sub).toLocaleString() : '—';
+
+  // Project total = sub × projQty + FAI + tooling
+  const projQty   = g('er-projQty');
+  const nreFai    = g('er-nreFaiCost');
+  const nreTool   = g('er-nreToolCost');
+  const projTotal = sub * projQty + nreFai + nreTool;
+  const projEl    = document.getElementById('er-projTotal');
+  if(projEl) projEl.textContent = projTotal > 0 ? '₪'+Math.round(projTotal).toLocaleString() : '—';
+
+  // Update displayed auto-sourced mfg cost
+  const mfgCostEl = document.getElementById('er-mfgCostAuto');
+  if(mfgCostEl) mfgCostEl.textContent = mfgCost > 0 ? '₪'+Math.round(mfgCost).toLocaleString() : '—';
+  const cotsEl = document.getElementById('er-cotsAuto');
+  if(cotsEl) cotsEl.textContent = cotsCost > 0 ? '₪'+Math.round(cotsCost).toLocaleString() : '—';
+  const rmEl = document.getElementById('er-rmAuto');
+  if(rmEl) rmEl.textContent = rmCost > 0 ? '₪'+Math.round(rmCost).toLocaleString() : '—';
+}
+
 function _populateReportsTab() {
   const el=document.getElementById('reportsTabContent');
   if(!el) return;
-  // show summary stats
-  const elt=BOM.filter(function(b){ return b.type==='ELTDesign'; }).length;
-  const analyzed=BOM.filter(function(b){ return b.type==='ELTDesign' && procData[b.pb||b.pn] && procData[b.pb||b.pn].length; }).length;
-  el.innerHTML='<div style="display:flex;gap:20px;flex-wrap:wrap;padding:10px 0 20px">'
-    +'<div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:16px 20px">'
-    +'<div style="font-size:11px;color:var(--text3);text-transform:uppercase;margin-bottom:4px">ELTDesign rows</div>'
-    +'<div style="font-size:24px;font-weight:700;color:var(--accent)">'+elt+'</div></div>'
-    +'<div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:16px 20px">'
-    +'<div style="font-size:11px;color:var(--text3);text-transform:uppercase;margin-bottom:4px">Analyzed</div>'
-    +'<div style="font-size:24px;font-weight:700;color:var(--accent2)">'+analyzed+'</div></div>'
-    +'<div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:16px 20px">'
-    +'<div style="font-size:11px;color:var(--text3);text-transform:uppercase;margin-bottom:4px">Coverage</div>'
-    +'<div style="font-size:24px;font-weight:700;color:var(--warn)">'+(elt>0 ? Math.round(analyzed/elt*100) : 0)+'%</div></div>'
+
+  // ── BOM stats (existing summary) ──────────────────────────────────────
+  const elt      = BOM.filter(function(b){ return b.type==='ELTDesign'; }).length;
+  const analyzed = BOM.filter(function(b){ return b.type==='ELTDesign' && procData[b.pb||b.pn] && (procData[b.pb||b.pn]||[]).length; }).length;
+
+  // ── Auto data extraction ──────────────────────────────────────────────
+  const mfgCycleH  = Math.round((cumCycleH[0]||0)*10)/10;
+  const setupH     = Math.round(((cumHours[0]||0)-(cumCycleH[0]||0))*10)/10;
+  const mfgCostAuto= Math.round(treeMfgCost[0]||0);
+  const cotsAuto   = Math.round(treeCotsCost[0]||0);
+  const rmAuto     = Math.round(treeRawMatCost[0]||0);
+
+  // Buy items stats
+  const buyAllPb = new Set(), buyPricedPb = new Set();
+  BOM.forEach(function(item){
+    if(item.type!=='Buy') return;
+    const pb=item.pb||item.pn;
+    buyAllPb.add(pb);
+    if(getPriceEntry(pb)) buyPricedPb.add(pb);
+  });
+  const buyTotal  = buyAllPb.size;
+  const buyPriced = buyPricedPb.size;
+  const covPct    = buyTotal>0?Math.round(buyPriced/buyTotal*100):0;
+
+  // Raw material types
+  const rmSet = new Set();
+  BOM.forEach(function(item){ if(/^(m2|m|ar|a\/r)$/i.test((item.uom||'').trim())) rmSet.add(item.pb||item.pn); });
+  const rmCount = rmSet.size;
+
+  // ── Load saved manual values ──────────────────────────────────────────
+  const D = _execLoad();
+  const gd = function(k,def){ return D[k]!==undefined ? D[k] : def; };
+
+  const hourRate     = gd('hourRate',     mfgCostAuto>0&&mfgCycleH>0 ? Math.round(mfgCostAuto/mfgCycleH) : 130);
+  const mfgNote      = gd('mfgNote',      'יש לתקף שעתון');
+  const cotsNote     = gd('cotsNote',     'מתוך סה"כ '+buyTotal+' פריטים הנדרשים לתמחור');
+  const cotsExtraCost= gd('cotsExtraCost',0);
+  const cotsExtraNote= gd('cotsExtraNote','ע"ב כ'+covPct+'% מתוך '+buyTotal+' סוגי פריטים');
+  const rmNote       = gd('rmNote',       'ע"ב כ80% מתוך '+rmCount+' סוגי חומרים');
+  const asmHours     = gd('asmHours',     0);
+  const asmCost      = gd('asmCost',      0);
+  const asmNote      = gd('asmNote',      'לרבות שלדה, חשמל, כלל תכולות הייצור וכלל המכללים הנוספים');
+  const nreSetupCost = gd('nreSetupCost', 0);
+  const nreSetupNote = gd('nreSetupNote', 'יש לתקף שעתון');
+  const nreFaiQty    = gd('nreFaiQty',    2);
+  const nreFaiCost   = gd('nreFaiCost',   0);
+  const nreFaiNote   = gd('nreFaiNote',   'מוערך');
+  const nreToolCost  = gd('nreToolCost',  0);
+  const nreToolNote  = gd('nreToolNote',  'נדרש לתקף');
+  const projQty      = gd('projQty',      100);
+
+  // Calculated totals
+  const mfgCost = mfgCostAuto>0 ? mfgCostAuto : Math.round(mfgCycleH*hourRate);
+  const subTotal = mfgCost + cotsAuto + cotsExtraCost + rmAuto;
+  const projTotal= subTotal*projQty + nreFaiCost + nreToolCost;
+
+  // Helpers
+  const fmtILS = function(n){ return n>0?'₪'+Math.round(n).toLocaleString():'—'; };
+  const inp = function(id,val,field,type,placeholder,style){
+    type=type||'number'; placeholder=placeholder||''; style=style||'';
+    return '<input id="'+id+'" type="'+type+'" value="'+val+'" placeholder="'+placeholder+'"'+
+      ' oninput="_execSave(\''+field+'\',this.type===\'number\'?(parseFloat(this.value)||0):this.value)"'+
+      ' style="width:100%;box-sizing:border-box;background:var(--surface2);border:1px solid var(--border);border-radius:4px;color:var(--text);padding:3px 6px;font-size:12px;text-align:'+(type==='number'?'right':'right')+';direction:rtl;'+style+'">';
+  };
+  const autoTag = '<span style="font-size:9px;background:rgba(66,153,225,.15);color:var(--accent);border-radius:3px;padding:0 4px;margin-right:4px">🔄</span>';
+  const th = function(t){ return '<th style="padding:10px 12px;background:rgba(66,153,225,.12);color:var(--accent);font-weight:700;font-size:13px;text-align:right;border-bottom:2px solid var(--border);white-space:nowrap">'+t+'</th>'; };
+  const subRow = function(label,cost){ return '<tr style="background:rgba(66,153,225,.07);font-weight:700">'+
+    '<td style="padding:9px 12px;font-size:13px;color:var(--text)">'+label+'</td>'+
+    '<td></td>'+
+    '<td style="padding:9px 12px;font-family:monospace;font-size:14px;color:var(--accent2);text-align:right" id="'+cost+'">'+
+      (cost==='er-sub'?fmtILS(subTotal):fmtILS(projTotal))+'</td>'+
+    '<td></td></tr>'; };
+
+  // ── Table CSS (injected once) ─────────────────────────────────────────
+  const css = '<style>#execRptTable td,#execRptTable th{vertical-align:middle;border-bottom:1px solid var(--border)}'
+    +'#execRptTable tr:hover td{background:rgba(255,255,255,.03)}'
+    +'#execRptTable input:focus{outline:1px solid var(--accent);border-color:var(--accent)}'
+    +'</style>';
+
+  // ── Render ────────────────────────────────────────────────────────────
+  el.innerHTML = css
+
+    // ── Top stats row ──────────────────────────────────────────────────
+    +'<div style="display:flex;gap:14px;flex-wrap:wrap;padding:10px 0 18px">'
+      +'<div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:12px 16px">'
+        +'<div style="font-size:10px;color:var(--text3);text-transform:uppercase;margin-bottom:3px">ELTDesign</div>'
+        +'<div style="font-size:20px;font-weight:700;color:var(--accent)">'+elt+'</div></div>'
+      +'<div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:12px 16px">'
+        +'<div style="font-size:10px;color:var(--text3);text-transform:uppercase;margin-bottom:3px">עם תהליכים</div>'
+        +'<div style="font-size:20px;font-weight:700;color:var(--accent2)">'+analyzed+'</div></div>'
+      +'<div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:12px 16px">'
+        +'<div style="font-size:10px;color:var(--text3);text-transform:uppercase;margin-bottom:3px">כיסוי תהליכים</div>'
+        +'<div style="font-size:20px;font-weight:700;color:var(--warn)">'+(elt>0?Math.round(analyzed/elt*100):0)+'%</div></div>'
+      +'<div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:12px 16px">'
+        +'<div style="font-size:10px;color:var(--text3);text-transform:uppercase;margin-bottom:3px">פריטי רכש</div>'
+        +'<div style="font-size:20px;font-weight:700;color:var(--accent)">'+buyTotal+'</div></div>'
+      +'<div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:12px 16px">'
+        +'<div style="font-size:10px;color:var(--text3);text-transform:uppercase;margin-bottom:3px">רכש עם מחיר</div>'
+        +'<div style="font-size:20px;font-weight:700;color:var(--accent2)">'+buyPriced+' ('+covPct+'%)</div></div>'
+      +'<div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:12px 16px">'
+        +'<div style="font-size:10px;color:var(--text3);text-transform:uppercase;margin-bottom:3px">סוגי ח"ג</div>'
+        +'<div style="font-size:20px;font-weight:700;color:var(--accent)">'+rmCount+'</div></div>'
+    +'</div>'
+
+    // ── Rate setting bar ───────────────────────────────────────────────
+    +'<div style="display:flex;align-items:center;gap:16px;padding:8px 14px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;margin-bottom:16px;font-size:12px">'
+      +'<span style="color:var(--text2);font-weight:600">⚙ הגדרות דוח:</span>'
+      +'<label style="display:flex;align-items:center;gap:6px;color:var(--text2)">₪/שעה (ייצור)'
+        +'<input id="er-hourRate" type="number" value="'+hourRate+'" min="1" step="1"'
+          +' oninput="_execSave(\'hourRate\',parseFloat(this.value)||130);_execRecalc()"'
+          +' style="width:72px;padding:3px 6px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px;text-align:right"></label>'
+      +'<span style="color:var(--text3);font-size:11px">🔄 = חושב אוטומטית מנתוני BOM</span>'
+      +'<button onclick="window.print()" style="margin-right:auto;padding:4px 12px;background:none;border:1px solid var(--border);border-radius:5px;color:var(--text2);cursor:pointer;font-size:11px">🖨 הדפס</button>'
+    +'</div>'
+
+    // ── Executive Report table ─────────────────────────────────────────
+    +'<div style="font-size:15px;font-weight:700;color:var(--text);margin-bottom:10px;direction:rtl">📊 דוח מנהלים — הערכת עלויות</div>'
+    +'<div style="overflow-x:auto">'
+    +'<table id="execRptTable" style="border-collapse:collapse;width:100%;min-width:700px;direction:rtl;background:var(--surface);border:1px solid var(--border);border-radius:8px;overflow:hidden">'
+    +'<thead><tr>'+th('תכולה')+th('כמות')+th('עלות מוערכת (₪)')+th('הערות')+'</tr></thead>'
+    +'<tbody>'
+
+    // Row 1: Manufacturing hours
+    +'<tr><td style="padding:8px 12px;color:var(--text)">'+autoTag+'שעות ייצור – רכב 1</td>'
+      +'<td style="padding:8px 12px;text-align:right;color:var(--text2);font-family:monospace">'
+        +(mfgCycleH>0?mfgCycleH+' ש׳':'—')+'</td>'
+      +'<td style="padding:8px 12px;text-align:right;font-family:monospace;font-size:13px;color:var(--accent2)" id="er-mfgCostAuto">'+fmtILS(mfgCost)+'</td>'
+      +'<td style="padding:8px 12px;min-width:200px">'+inp('er-mfgNote',mfgNote,'mfgNote','text','הערות לשעות ייצור')+'</td></tr>'
+
+    // Row 2: COTS priced items
+    +'<tr><td style="padding:8px 12px;color:var(--text)">'+autoTag+'רכש קשיחים/COTS</td>'
+      +'<td></td>'
+      +'<td style="padding:8px 12px;text-align:right;font-family:monospace;font-size:13px;color:var(--accent2)" id="er-cotsAuto">'+fmtILS(cotsAuto)+'</td>'
+      +'<td style="padding:8px 12px;min-width:200px">'+inp('er-cotsNote',cotsNote,'cotsNote','text')+'</td></tr>'
+
+    // Row 3: COTS extrapolated
+    +'<tr><td style="padding:8px 12px;color:var(--text)">רכש קשיחים ו COTS (הערכה)</td>'
+      +'<td></td>'
+      +'<td style="padding:8px 12px">'+inp('er-cotsExtra',cotsExtraCost||'','cotsExtraCost','number','0')+'</td>'
+      +'<td style="padding:8px 12px;min-width:200px">'+inp('er-cotsExtraNote',cotsExtraNote,'cotsExtraNote','text')+'</td></tr>'
+
+    // Row 4: Raw materials
+    +'<tr><td style="padding:8px 12px;color:var(--text)">'+autoTag+'רכש ח"ג</td>'
+      +'<td></td>'
+      +'<td style="padding:8px 12px;text-align:right;font-family:monospace;font-size:13px;color:var(--accent2)" id="er-rmAuto">'+fmtILS(rmAuto)+'</td>'
+      +'<td style="padding:8px 12px;min-width:200px">'+inp('er-rmNote',rmNote,'rmNote','text')+'</td></tr>'
+
+    // Row 5: Assembly hours (informational)
+    +'<tr style="background:rgba(113,128,150,.05)"><td style="padding:8px 12px;color:var(--text2);font-style:italic">שעות הרכבת רכש שלם *</td>'
+      +'<td style="padding:8px 12px">'+inp('er-asmHours',asmHours||'','asmHours','number','שעות')+'</td>'
+      +'<td style="padding:8px 12px">'+inp('er-asmCost',asmCost||'','asmCost','number','₪')+'</td>'
+      +'<td style="padding:8px 12px;min-width:200px">'+inp('er-asmNote',asmNote,'asmNote','text')+'</td></tr>'
+
+    // Subtotal per vehicle
+    + subRow('סה"כ עלות ייצור רכב 1','er-sub')
+
+    // Row 7: NRE Setup hours
+    +'<tr><td style="padding:8px 12px;color:var(--text)">'+autoTag+'שעות סט-אפ (NRE)</td>'
+      +'<td style="padding:8px 12px;text-align:right;color:var(--text2);font-family:monospace">'
+        +(setupH>0?setupH+' ש׳':'—')+'</td>'
+      +'<td style="padding:8px 12px">'+inp('er-nreSetupCost',nreSetupCost||'','nreSetupCost','number','₪')+'</td>'
+      +'<td style="padding:8px 12px;min-width:200px">'+inp('er-nreSetupNote',nreSetupNote,'nreSetupNote','text')+'</td></tr>'
+
+    // Row 8: NRE FAI + prototypes
+    +'<tr><td style="padding:8px 12px;color:var(--text)">ייצור דגמים + FAI (NRE)</td>'
+      +'<td style="padding:8px 12px">'+inp('er-nreFaiQty',nreFaiQty||'','nreFaiQty','number','כמות')+'</td>'
+      +'<td style="padding:8px 12px">'+inp('er-nreFaiCost',nreFaiCost||'','nreFaiCost','number','₪')+'</td>'
+      +'<td style="padding:8px 12px;min-width:200px">'+inp('er-nreFaiNote',nreFaiNote,'nreFaiNote','text')+'</td></tr>'
+
+    // Row 9: NRE Tooling
+    +'<tr><td style="padding:8px 12px;color:var(--text)">אמצעי ייצור והרכבה (NRE)</td>'
+      +'<td></td>'
+      +'<td style="padding:8px 12px">'+inp('er-nreToolCost',nreToolCost||'','nreToolCost','number','₪')+'</td>'
+      +'<td style="padding:8px 12px;min-width:200px">'+inp('er-nreToolNote',nreToolNote,'nreToolNote','text')+'</td></tr>'
+
+    // Project total
+    +'<tr style="background:rgba(66,153,225,.1);font-weight:700">'
+      +'<td style="padding:10px 12px;font-size:14px;color:var(--text)">סה"כ פרוייקט ל-'
+        +'<input id="er-projQty" type="number" value="'+projQty+'" min="1" step="1"'
+          +' oninput="_execSave(\'projQty\',parseFloat(this.value)||1);_execRecalc()"'
+          +' style="width:56px;padding:2px 5px;background:rgba(66,153,225,.15);border:1px solid var(--accent);border-radius:4px;color:var(--accent);font-weight:700;font-size:13px;text-align:center;margin:0 3px"> רכבים</td>'
+      +'<td style="padding:10px 12px;text-align:right;color:var(--text2);font-family:monospace">'+projQty+'×</td>'
+      +'<td style="padding:10px 12px;font-family:monospace;font-size:15px;color:var(--accent2);text-align:right" id="er-projTotal">'+fmtILS(projTotal)+'</td>'
+      +'<td style="padding:10px 12px;font-size:11px;color:var(--text3)">= סה"כ ייצור × כמות + NRE</td></tr>'
+
+    +'</tbody></table>'
+    +'<div style="margin-top:8px;font-size:11px;color:var(--text3);direction:rtl">* שורות נטויות הן מידע בלבד ואינן נכללות בחישוב הסכומים  · 🔄 = נגזר אוטומטית מנתוני BOM</div>'
     +'</div>';
 }
 
