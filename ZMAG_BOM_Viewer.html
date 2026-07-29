@@ -3174,24 +3174,50 @@ function rmUpdateCalc(pb){
   const wastePct=parseFloat((document.getElementById('rmWastePct')||{}).value)||0;
   // Use exact CadQuery volume if available; otherwise compute from dims
   const _rmCur = rawMatData[pb] || {};
-  const _evol = _rmExactVol(_rmCur);
-  const vol = _evol !== null ? _evol : calcRawMatVolume(formId,dims);
-  const exactBadge = _evol !== null ? ' <span style="color:var(--accent2);font-size:11px">✅ CadQuery</span>' : '';
-  const mass=vol*density;
+  const _evol = _rmExactVol(_rmCur); // global only (no parentPb)
   const waste=1+wastePct/100;
-  const grossMass=mass*waste;
-  let cost=0;
-  if(costUnit==='kg') cost=grossMass*unitCost;
-  else if(costUnit==='m') cost=(parseFloat(dims.L)||0)/1000*unitCost;
-  else if(costUnit==='m2') cost=((parseFloat(dims.L)||0)/1000)*((parseFloat(dims.W)||0)/1000)*unitCost;
-  const massStr=mass>=0.001?(mass*1000).toFixed(0)+' g':'<1 g';
-  const grossStr=wastePct>0?' (גולמי: '+(grossMass*1000).toFixed(0)+' g)':'';
-  const costStr=cost>0?fmtC(cost):'—';
-  const wasteStr=wastePct>0?' + '+wastePct+'% פסולת':'';
-  el.innerHTML=exactBadge+'<b>נפח:</b> '+(vol*1e6).toFixed(2)+' cm³ · <b>משקל נטו:</b> '+massStr+grossStr+wasteStr+
-    (cost>0?' · <b>עלות/יחידה:</b> '+costStr:'');
+
+  // If no global exact vol and no manual dims — check if there are per-parent CadQuery vols
+  const _arParents = window._arParents || [];
+  const _hasPerParentVols = !_evol && _arParents.length > 0 &&
+    _arParents.some(function(p,i){
+      const row=document.getElementById('ar-prow-'+i);
+      return row && _rmExactVol(_rmCur, row.dataset.ppb) !== null;
+    });
+
+  if (_hasPerParentVols) {
+    // Sum across all visible parents — each parent has its own CadQuery volume
+    let totalNet=0, totalGross=0, countAnalyzed=0;
+    _arParents.forEach(function(p,i){
+      const row=document.getElementById('ar-prow-'+i);
+      if(!row) return;
+      const ev=_rmExactVol(_rmCur, row.dataset.ppb);
+      if(ev===null) return;
+      const tq=parseFloat(row.dataset.tq)||1;
+      const net=ev*density*tq; totalNet+=net; totalGross+=net*waste; countAnalyzed++;
+    });
+    const totalCost=costUnit==='kg'?totalGross*unitCost:0;
+    el.innerHTML='<span style="color:var(--accent2);font-size:11px">✅ CadQuery per-parent ('+countAnalyzed+' הורים)</span> · '+
+      '<b>סה"כ נטו:</b> '+(totalNet>=0.001?(totalNet*1000).toFixed(0)+' g':'<1 g')+
+      (wastePct>0?' → גולמי: '+(totalGross>=0.001?(totalGross*1000).toFixed(0)+' g':'<1 g'):'') +
+      (totalCost>0?' · <b>עלות כוללת:</b> '+fmtC(totalCost):'');
+  } else {
+    const vol = _evol !== null ? _evol : calcRawMatVolume(formId,dims);
+    const exactBadge = _evol !== null ? ' <span style="color:var(--accent2);font-size:11px">✅ CadQuery</span>' : '';
+    const mass=vol*density;
+    const grossMass=mass*waste;
+    let cost=0;
+    if(costUnit==='kg') cost=grossMass*unitCost;
+    else if(costUnit==='m') cost=(parseFloat(dims.L)||0)/1000*unitCost;
+    else if(costUnit==='m2') cost=((parseFloat(dims.L)||0)/1000)*((parseFloat(dims.W)||0)/1000)*unitCost;
+    const massStr=mass>=0.001?(mass*1000).toFixed(0)+' g':'<1 g';
+    const grossStr=wastePct>0?' (גולמי: '+(grossMass*1000).toFixed(0)+' g)':'';
+    const costStr=cost>0?fmtC(cost):'—';
+    const wasteStr=wastePct>0?' + '+wastePct+'% פסולת':'';
+    el.innerHTML=exactBadge+'<b>נפח:</b> '+(vol*1e6).toFixed(2)+' cm³ · <b>משקל נטו:</b> '+massStr+grossStr+wasteStr+
+      (cost>0?' · <b>עלות/יחידה:</b> '+costStr:'');
+  }
   // Update per-parent rows if visible
-  const _arParents=window._arParents||[];
   _arParents.forEach(function(p,i){ arRefreshRow(pb,i); });
   // Update aggregate
   arRefreshAggregate(pb);
