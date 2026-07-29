@@ -791,9 +791,9 @@ function loadStepVolsJSON() {
         const files = obj.files || obj;  // support both {files:{...}} and flat {filename:{...}}
         if (typeof files !== 'object') throw new Error('פורמט JSON לא תקין');
         stepVolsDB = files;
-        const count = Object.keys(files).filter(function(k){ return !k.startsWith('_'); }).length / 2 | 0;
-        setFileSyncStatus('✓ נטענו נפחי STEP: '+Object.keys(files).length+' קבצים ('+file.name+')', 'ok');
-        alert('✓ נטען step_volumes.json\nקבצים: '+Object.keys(files).length+'\n\nעכשיו לחיצה על STEP תשתמש בנפח המדויק מ-CadQuery.');
+        const populated = autoPopulateFromStepDB();
+        setFileSyncStatus('✓ נטענו נפחי STEP: '+Object.keys(files).length+' קבצים — '+populated+' חומרי גלם עודכנו', 'ok');
+        alert('✓ נטען step_volumes.json\nקבצים: '+Object.keys(files).length+'\nחומרי גלם שעודכנו אוטומטית: '+populated+'\n\nהמחיר נלקח מטבלת מחירון חומרי גלם לפי משפחה.');
       } catch(err) {
         alert('שגיאה בקריאת קובץ: '+err.message);
       }
@@ -801,6 +801,64 @@ function loadStepVolsJSON() {
     reader.readAsText(file);
   };
   inp.click();
+}
+
+// ── Auto-populate exact volumes from stepVolsDB for ALL raw material items ──
+// Called automatically after loadStepVolsJSON. Returns count of items updated.
+function autoPopulateFromStepDB() {
+  if (!Object.keys(stepVolsDB).length) return 0;
+  let count = 0;
+  const seenPairs = new Set();
+  BOM.forEach(function(item, idx) {
+    const pb = item.pb || item.pn;
+    if (!pb) return;
+    const uom = (item.uom||'').trim();
+    // Process all raw-material UOMs: M, M2, AR/A/R
+    if (!/^(m2?|ar|a[\/\\]r)$/i.test(uom)) return;
+    // Walk up BOM to find parent assembly
+    for (let j = idx - 1; j >= 0; j--) {
+      if (BOM[j].lv < item.lv) {
+        const parentPb = BOM[j].pb || BOM[j].pn;
+        const pairKey = pb + '||' + (parentPb||'');
+        // Skip duplicate (pb, parentPb) pairs
+        if (seenPairs.has(pairKey)) break;
+        seenPairs.add(pairKey);
+        const stpFiles = (BOM[j].cads||[]).filter(function(c){ return /\.stp$|\.step$/i.test(c); });
+        const stpPath = pickOwnStep(stpFiles, parentPb);
+        if (stpPath) {
+          const dbEntry = _stepVolsLookup(stpPath);
+          if (dbEntry && !dbEntry.error && dbEntry.volume_mm3 > 0) {
+            // Auto-init rawMatData entry using hints if not yet configured
+            if (!rawMatData[pb]) {
+              const hints = parseRawMatHints(pb, item.desc||'');
+              const famData = MATERIAL_DB[hints.family||''] || {};
+              rawMatData[pb] = {
+                family:   hints.family  || 'unknown',
+                grade:    hints.grade   || 'generic',
+                form:     hints.form    || 'sheet',
+                density:  hints.density || famData.density || 7850,
+                unitCost: 0,
+                costUnit: 'kg',
+                wastePct: 0,
+                perParent: {}
+              };
+            }
+            if (!rawMatData[pb].perParent) rawMatData[pb].perParent = {};
+            if (!rawMatData[pb].perParent[parentPb]) rawMatData[pb].perParent[parentPb] = {};
+            rawMatData[pb].perParent[parentPb].exact_volume_mm3 = dbEntry.volume_mm3;
+            count++;
+          }
+        }
+        break; // only nearest parent
+      }
+    }
+  });
+  if (count > 0) {
+    localStorage.setItem(RM_STORAGE_KEY, JSON.stringify(rawMatData));
+    saveProcToFile();
+    try { computeTreeCosts(); refreshCostCells(); } catch(e) {}
+  }
+  return count;
 }
 
 // Look up a STEP file path in the DB — tries bare filename, then full path tail
@@ -1247,7 +1305,8 @@ function getItemUnitCost(item, bomIdx) {
       const uom = item.uom || '';
       const rm = rawMatData[pb];
       const density = parseFloat(rm.density) || (MATERIAL_DB[rm.family]||{}).density || 1000;
-      const uc = parseFloat(rm.unitCost) || 0;
+      // Price: manual unitCost → matFamPrices by family/grade/form → 0
+      const uc = parseFloat(rm.unitCost) || parseFloat(matFamPrices[_famKey(rm)]) || 0;
       const waste = 1 + (parseFloat(rm.wastePct)||0)/100;
       // ── CadQuery exact volume: highest priority, any UOM ─────────────────
       const parentPb = getParentPbForBOMIndex(bomIdx);
@@ -1288,7 +1347,8 @@ function getItemUnitCost(item, bomIdx) {
       const uom = item.uom || '';
       const rm = rawMatData[pb];
       const density = parseFloat(rm.density) || (MATERIAL_DB[rm.family]||{}).density || 1000;
-      const uc = parseFloat(rm.unitCost) || 0;
+      // Price: manual unitCost → matFamPrices by family/grade/form → 0
+      const uc = parseFloat(rm.unitCost) || parseFloat(matFamPrices[_famKey(rm)]) || 0;
       const waste = 1 + (parseFloat(rm.wastePct)||0)/100;
       // ── CadQuery exact volume: highest priority, any UOM ─────────────────
       const parentPb = getParentPbForBOMIndex(bomIdx);
@@ -3023,52 +3083,38 @@ function openRawMatEditor(pb, desc, tq) {
   console.log('[STEP debug] pb='+pb+' uom='+window._arUom+' isRawMat='+_isRawMatItem+' parents='+_arParents.length+' hasAnyStep='+_arParents.some(function(p){return!!p.stpPath;}));
   if(_arParents.length) console.log('[STEP debug] first parent:', JSON.stringify({ppb:_arParents[0].parentPb, stp:_arParents[0].stpPath}));
   const arBanner = (_isRawMatItem && _arParents.length) ? (function(){
-    const isSheet = (formId === 'sheet');
-    const hasAnyStep = _arParents.some(function(p){ return !!p.stpPath; });
     const existPP = (rawMatData[pb]||{}).perParent || {};
     const rowsHTML = _arParents.map(function(p, i) {
       const pp = p.parentPb;
-      const savedDims = (existPP[pp] && existPP[pp].dims) || {};
-      const Lval = savedDims.L || '';
-      const Wval = savedDims.W || '';
-      const safePP = pp.replace(/\\\\/g,'\\\\\\\\').replace(/'/g,"\\'").replace(/"/g,'&quot;');
-      const stpEsc = p.stpPath ? p.stpPath.replace(/"/g,'&quot;') : '';
-      const hasStep = !!p.stpPath;
+      const hasVol = !!(existPP[pp] && existPP[pp].exact_volume_mm3 > 0);
+      const safePP = pp ? pp.replace(/\\\\/g,'\\\\\\\\').replace(/'/g,"\\'").replace(/"/g,'&quot;') : '';
+      const volCm3 = hasVol ? (existPP[pp].exact_volume_mm3/1000).toFixed(1) : null;
+      const statusBadge = hasVol
+        ? '<span style="color:var(--accent2);font-size:9px">✅ '+volCm3+' cm³</span>'
+        : '<span style="color:var(--warning,#e6a817);font-size:9px">⚠ אין JSON</span>';
       return '<tr id="ar-prow-'+i+'" data-ppb="'+safePP+'" data-tq="'+p.tq+'">'+
-        '<td style="font-size:10px;color:var(--text2);max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:2px 4px;cursor:pointer" title="'+p.parentPb+' — \u05dc\u05d7\u05e5 \u05dc\u05e0\u05d5\u05d5\u05d8 \u05d1\u05d2\u05d9\u05dc\u05d9\u05d5\u05df" onclick="jumpToParentInBOM(\'' + safePP + '\')">\u{1F441}\uFE0F '+p.parentDesc+'</td>'+
-        '<td style="padding:1px 2px"><input class="ar-pdim" data-dim="L" data-ppb="'+safePP+'" data-row="'+i+'" value="'+Lval+'" placeholder="mm" type="number" min="0" step="1" '+
-          'style="width:60px;padding:2px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px;font-size:11px" '+
-          'oninput="arParentDimChanged(\''+safePb+'\',this,'+i+')"></td>'+
-        (isSheet
-          ? '<td style="padding:1px 2px"><input class="ar-pdim" data-dim="W" data-ppb="'+safePP+'" data-row="'+i+'" value="'+Wval+'" placeholder="mm" type="number" min="0" step="1" '+
-            'style="width:60px;padding:2px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px;font-size:11px" '+
-            'oninput="arParentDimChanged(\''+safePb+'\',this,'+i+')"></td>'
-          : '')+
+        '<td style="font-size:10px;color:var(--text2);max-width:130px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:2px 4px;cursor:pointer" title="'+p.parentDesc+'" onclick="jumpToParentInBOM(\'' + safePP + '\')">\u{1F441}\uFE0F '+p.parentDesc+'</td>'+
+        '<td style="text-align:center;padding:2px 6px">'+statusBadge+'</td>'+
         '<td id="ar-pmass-'+i+'" style="font-size:10px;color:var(--text3);text-align:right;padding:2px 4px"></td>'+
         '<td style="font-size:10px;color:var(--text3);text-align:center;padding:2px 3px">×'+p.tq+'</td>'+
         '<td id="ar-psub-'+i+'" style="font-size:10px;color:#68d391;text-align:right;padding:2px 4px;font-weight:600"></td>'+
-        (hasStep
-          ? '<td style="padding:1px 3px;text-align:center">'+
-              '<button id="stpbtn-'+i+'" data-stppath="'+stpEsc+'" data-pbkey="'+safePb+'" data-rowidx="'+i+'" '+
-              'title="טען מידות מקובץ STEP" '+
-              'style="font-size:9px;padding:2px 5px;background:rgba(79,142,247,.15);border:1px solid var(--accent);color:var(--accent);border-radius:3px;cursor:pointer;white-space:nowrap" '+
-              'onclick="rmAnalyzeStep(this.dataset.pbkey,this.dataset.stppath,parseInt(this.dataset.rowidx))">📐 STEP</button>'+
-              '<div id="stpnote-'+i+'" style="font-size:8px;color:var(--text3);max-width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></div></td>'
-          : '')+
         '</tr>';
     });
+    const missingCount = _arParents.filter(function(p){ return !(existPP[p.parentPb] && existPP[p.parentPb].exact_volume_mm3>0); }).length;
     const hdr =
       '<th style="font-size:10px;padding:2px 4px;color:var(--text3);font-weight:600">הורה</th>'+
-      '<th style="font-size:10px;padding:2px 4px;color:var(--text3);font-weight:600">L (mm)</th>'+
-      (isSheet ? '<th style="font-size:10px;padding:2px 4px;color:var(--text3);font-weight:600">W (mm)</th>' : '')+
+      '<th style="font-size:10px;padding:2px 4px;color:var(--text3);font-weight:600">נפח</th>'+
       '<th style="font-size:10px;padding:2px 4px;color:var(--text3);font-weight:600">משקל נטו</th>'+
       '<th style="font-size:10px;padding:2px 4px;color:var(--text3);font-weight:600">×TQ</th>'+
-      '<th style="font-size:10px;padding:2px 4px;color:var(--text3);font-weight:600">גולמי</th>'+
-      (hasAnyStep ? '<th style="font-size:10px;padding:2px 4px;color:var(--text3);font-weight:600">STEP</th>' : '');
+      '<th style="font-size:10px;padding:2px 4px;color:var(--text3);font-weight:600">גולמי</th>';
+    const notice = missingCount > 0
+      ? '<div style="font-size:10px;color:var(--warning,#e6a817);margin-top:4px">⚠ '+missingCount+' הורים ללא נפח — טען 🔬 STEP JSON כדי לאכלס אוטומטית</div>'
+      : '';
     return '<div id="arBannerBox" style="margin:10px 0;background:rgba(66,153,225,.08);border:1px solid rgba(66,153,225,.35);border-radius:6px;padding:8px 10px">'+
-      '<div style="font-size:11px;font-weight:600;color:var(--accent2);margin-bottom:5px">📐 מידות לפי הורה ('+_arParents.length+' הורים) — יש להזין L'+(isSheet?' ו-W':'')+' לכל הורה</div>'+
+      '<div style="font-size:11px;font-weight:600;color:var(--accent2);margin-bottom:5px">⚖ נפח לפי הורה ('+_arParents.length+' הורים) — נתוני CadQuery מה-JSON</div>'+
       '<div style="overflow-x:auto"><table style="border-collapse:collapse;min-width:max-content"><thead><tr>'+hdr+'</tr></thead><tbody id="arParentsBody">'+
       rowsHTML.join('')+'</tbody></table></div>'+
+      notice+
       '<div id="arAggRow" style="font-size:11px;color:var(--accent2);font-weight:600;margin-top:5px;text-align:right;padding:3px 0"></div>'+
       '</div>';
   })() : '';
@@ -3099,6 +3145,12 @@ function openRawMatEditor(pb, desc, tq) {
 
   const existWaste = parseFloat(existing.wastePct)||0;
   const existCost  = parseFloat(existing.unitCost)||0;
+  // Auto price from matFamPrices if manual cost is 0
+  const _autoFamKey = (existing.family||'unknown')+'||'+(existing.grade||'generic')+'||'+(existing.form||'sheet');
+  const _autoPrice  = parseFloat(matFamPrices[_autoFamKey])||0;
+  const _priceLabel = existCost > 0 ? 'מחיר/יחידה'
+    : (_autoPrice > 0 ? 'מחיר/יחידה (₪'+_autoPrice+'/kg מהמחירון)' : 'מחיר/יחידה — הזן או הגדר במחירון חומרים');
+  const _pricePlaceholder = existCost > 0 ? '₪' : (_autoPrice > 0 ? '₪'+_autoPrice : 'אוטו ממחירון');
 
   m.innerHTML = '<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;width:640px;max-width:96vw;max-height:88vh;overflow-y:auto;padding:20px 22px;position:relative;box-shadow:0 12px 50px rgba(0,0,0,.8)">' +
     '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">'+
@@ -3124,8 +3176,8 @@ function openRawMatEditor(pb, desc, tq) {
       '<input id="rmDensity" type="number" value="'+curDens+'" min="100" max="25000" step="10" '+
       'style="padding:5px 6px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:5px;font-size:12px" '+
       'oninput="rmUpdateCalc(window._curRmPb)"></label>'+
-    '<label style="display:flex;flex-direction:column;gap:4px;font-size:11px;color:var(--text2)">מחיר/יחידה'+
-      '<input id="rmUnitCost" type="number" value="'+(existCost||'')+'" min="0" step="0.01" placeholder="₪" '+
+    '<label style="display:flex;flex-direction:column;gap:4px;font-size:11px;color:var(--text2)" title="ריק = מחיר אוטומטי מטבלת מחירון חומרים">'+_priceLabel+
+      '<input id="rmUnitCost" type="number" value="'+(existCost||'')+'" min="0" step="0.01" placeholder="'+_pricePlaceholder+'" '+
       'style="padding:5px 6px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:5px;font-size:12px" '+
       'oninput="rmUpdateCalc(window._curRmPb)"></label>'+
     '<label style="display:flex;flex-direction:column;gap:4px;font-size:11px;color:var(--text2)">יחידת מחיר'+
@@ -3194,11 +3246,13 @@ function rmUpdateCalc(pb){
   document.querySelectorAll('#rawMatModal .rm-dim').forEach(function(inp){ if(inp.value) dims[inp.dataset.key]=inp.value; });
   const formId=(document.getElementById('rmForm')||{}).value||'sheet';
   const density=parseFloat((document.getElementById('rmDensity')||{}).value)||2700;
-  const unitCost=parseFloat((document.getElementById('rmUnitCost')||{}).value)||0;
   const costUnit=(document.getElementById('rmCostUnit')||{}).value||'kg';
   const wastePct=parseFloat((document.getElementById('rmWastePct')||{}).value)||0;
   // Use exact CadQuery volume if available; otherwise compute from dims
   const _rmCur = rawMatData[pb] || {};
+  // Price: manual field → matFamPrices by family → 0
+  const unitCost = parseFloat((document.getElementById('rmUnitCost')||{}).value)
+                || parseFloat(matFamPrices[_famKey(_rmCur)]) || 0;
   const _evol = _rmExactVol(_rmCur); // global only (no parentPb)
   const waste=1+wastePct/100;
 
