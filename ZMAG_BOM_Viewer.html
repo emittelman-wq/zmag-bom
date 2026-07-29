@@ -435,6 +435,7 @@ tr.row-disabled .badge,tr.row-disabled .proc-btn{opacity:.5}
   <span id="fileSyncStatus" style="font-size:11px;color:var(--accent2);opacity:0;transition:opacity .5s;margin-right:4px"></span>
   <button class="btn" id="exportBtn" onclick="exportBackup()" title="ייצוא גיבוי מלא (JSON)" style="font-size:13px;padding:2px 7px">📤</button>
   <button class="btn" id="importBtn" onclick="importBackup()" title="ייבוא גיבוי (JSON)" style="font-size:13px;padding:2px 7px">📥</button>
+  <button class="btn" id="stepVolsBtn" onclick="loadStepVolsJSON()" title="טען step_volumes.json (נפחי STEP מ-CadQuery)" style="font-size:13px;padding:2px 7px">🔬 STEP JSON</button>
   <input type="file" id="importFileInput" accept=".json" style="display:none" onchange="_importFileSelected(event)">
   <button class="btn" id="themeBtn" onclick="toggleTheme()" title="Toggle light/dark mode">☀️</button>
   <span id="projectQtyWrap" style="font-size:11px;color:var(--text2);display:flex;align-items:center;gap:4px">
@@ -771,6 +772,54 @@ let projectQty = 1;
 let buyNotes = {};
 let subData = {};
 let rawMatData = {};   // {pb: {family,grade,form,dims,density,unitCost,costUnit}}
+
+// ── CadQuery STEP volumes DB ──────────────────────────────────────────────────
+// Loaded from step_volumes.json produced by zmag_step_analyzer.py
+// Key = STEP filename (bare name or relative path); value = {volume_mm3, area_mm2}
+let stepVolsDB = {};   // populated by loadStepVolsJSON()
+
+function loadStepVolsJSON() {
+  const inp = document.createElement('input');
+  inp.type = 'file'; inp.accept = '.json';
+  inp.onchange = function(e) {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = function(ev) {
+      try {
+        const obj = JSON.parse(ev.target.result);
+        const files = obj.files || obj;  // support both {files:{...}} and flat {filename:{...}}
+        if (typeof files !== 'object') throw new Error('פורמט JSON לא תקין');
+        stepVolsDB = files;
+        const count = Object.keys(files).filter(function(k){ return !k.startsWith('_'); }).length / 2 | 0;
+        setFileSyncStatus('✓ נטענו נפחי STEP: '+Object.keys(files).length+' קבצים ('+file.name+')', 'ok');
+        alert('✓ נטען step_volumes.json\nקבצים: '+Object.keys(files).length+'\n\nעכשיו לחיצה על STEP תשתמש בנפח המדויק מ-CadQuery.');
+      } catch(err) {
+        alert('שגיאה בקריאת קובץ: '+err.message);
+      }
+    };
+    reader.readAsText(file);
+  };
+  inp.click();
+}
+
+// Look up a STEP file path in the DB — tries bare filename, then full path tail
+function _stepVolsLookup(stpPath) {
+  if (!stpPath || !Object.keys(stepVolsDB).length) return null;
+  // Try exact key
+  if (stepVolsDB[stpPath]) return stepVolsDB[stpPath];
+  // Try bare filename
+  const bare = stpPath.split(/[\\/]/).pop();
+  if (stepVolsDB[bare]) return stepVolsDB[bare];
+  // Try case-insensitive
+  const bareLow = bare.toLowerCase();
+  for (const k of Object.keys(stepVolsDB)) {
+    if (k.toLowerCase() === bareLow || k.split(/[\\/]/).pop().toLowerCase() === bareLow) {
+      return stepVolsDB[k];
+    }
+  }
+  return null;
+}
 // ══ Material Family Prices ══════════════════════════════════════════════════
 const MAT_FAM_PRICE_KEY = 'zmag_mat_fam_prices_v1';
 let matFamPrices = {};
@@ -2621,6 +2670,59 @@ async function rmAnalyzeStep(pb, stpPath, rowIdx) {
   }
   const btn = document.getElementById('stpbtn-' + rowIdx);
   if (btn) { btn.textContent = '⏳'; btn.disabled = true; }
+
+  // ── Priority 0: CadQuery DB (step_volumes.json) ───────────────────────────
+  // If the user loaded a step_volumes.json produced by zmag_step_analyzer.py,
+  // use the exact OCC-computed volume/area — no regex, no heuristics.
+  const dbEntry = _stepVolsLookup(stpPath);
+  if (dbEntry && !dbEntry.error && dbEntry.volume_mm3 > 0) {
+    try {
+      const rm2    = rawMatData[pb] || {};
+      const formId = (document.getElementById('rmForm')||{}).value || 'sheet';
+      const Linp   = document.querySelector('#ar-prow-'+rowIdx+' .ar-pdim[data-dim="L"]');
+      const Winp   = document.querySelector('#ar-prow-'+rowIdx+' .ar-pdim[data-dim="W"]');
+
+      const volMM3 = dbEntry.volume_mm3;
+      const bboxMinFallback = 3; // sheet default if T unknown
+
+      // T: use stored dim, or infer from area/volume ratio (≈ thickness of thin sheet)
+      let T_mm = parseFloat((rm2.dims||{}).T) || 0;
+      if (!T_mm && dbEntry.area_mm2 > 0) {
+        // For a thin flat part: area ≈ 2 × flat_blank_area; vol = flat_area × T
+        // → T ≈ 2 × vol / area
+        const tInferred = (2 * volMM3) / dbEntry.area_mm2;
+        T_mm = (tInferred >= 0.5 && tInferred <= 50) ? Math.round(tInferred * 10) / 10 : bboxMinFallback;
+      }
+      if (!T_mm) T_mm = bboxMinFallback;
+
+      // L: use the square root of (vol/T) as the "longer" dim (order-of-magnitude estimate)
+      const flatAreaMM2 = volMM3 / T_mm;                      // actual blank area
+      const L_mm = Math.round(Math.sqrt(flatAreaMM2 * 1.5));  // aspect-ratio hint: L ≈ 1.22×W
+      const W_mm = Math.round(flatAreaMM2 / L_mm);
+
+      if (Linp) Linp.value = L_mm;
+      if (Winp) Winp.value = W_mm;
+      const Tinp = document.querySelector('#rawMatModal .rm-dim[data-key="T"]');
+      if (Tinp && !Tinp.value) Tinp.value = T_mm;
+
+      const volCm3    = (volMM3 / 1000).toFixed(2);
+      const areaCm2   = dbEntry.area_mm2 ? (dbEntry.area_mm2 / 100).toFixed(1) : '?';
+      const massEstG  = Math.round(volMM3 * (parseFloat(rm2.density)||(window.MATERIAL_DB&&MATERIAL_DB[rm2.family]||{}).density||2700) / 1e6);
+      const noteText  = '✅ CadQuery OCC: V='+volCm3+'cm³  A='+areaCm2+'cm²  → '+L_mm+'×'+W_mm+'×'+T_mm+'mm  (~'+massEstG+'g)';
+
+      arParentDimChanged(pb, Linp || {value:''}, rowIdx);
+      rmUpdateCalc(pb);
+      if (btn) { btn.textContent = '✓'; btn.disabled = false; btn.style.borderColor = 'var(--accent2)'; btn.style.color = 'var(--accent2)'; }
+      const noteEl = document.getElementById('stpnote-'+rowIdx);
+      if (noteEl) noteEl.textContent = noteText;
+    } catch(e) {
+      if (btn) { btn.textContent = '✕'; btn.disabled = false; }
+      alert('שגיאה בשימוש בנתוני CadQuery: ' + e.message);
+    }
+    return;  // done — no need to read or parse the STEP file at all
+  }
+
+  // ── Fallback: read + parse STEP text (regex heuristics) ──────────────────
   try {
     const ab = await getFileBuffer(stpPath);
     const text = new TextDecoder().decode(new Uint8Array(ab));
@@ -2732,7 +2834,7 @@ async function rmAnalyzeStep(pb, stpPath, rowIdx) {
         else                 { stepVolMM3 = v;        stepVolSource = 'VOLUME_MEASURE[mm³]'; }
       }
     }
-    // Fallback to MASS_MEASURE (SolidWorks writes mass in kg)
+    // Fallback 2: MASS_MEASURE (SolidWorks writes mass in kg)
     if (!stepVolMM3) {
       const massMeta = text.match(/MASS_MEASURE\s*\(\s*([\d.eE+\-]+)\s*\)/i);
       if (massMeta) {
@@ -2745,6 +2847,31 @@ async function rmAnalyzeStep(pb, stpPath, rowIdx) {
           if (dens < 30) dens = dens * 1000;
           stepVolMM3 = (massKg / dens) * 1e9; // m³ → mm³
           stepVolSource = 'MASS_MEASURE['+massKg.toFixed(4)+'kg]';
+        }
+      }
+    }
+    // Fallback 3: AREA_MEASURE (SolidWorks writes surface area in m²)
+    // For a thin sheet metal part: surface_area ≈ 2 × flat_blank_area
+    // → flat_blank_area = surface_area / 2
+    // → volume = flat_blank_area × T
+    // Example: Area=1.236 m² → blank_area=0.618 m² → with T=3mm → mass ≈ 4.97 kg ✓
+    if (!stepVolMM3) {
+      const areaMeta = text.match(/AREA_MEASURE\s*\(\s*([\d.eE+\-]+)\s*\)/i);
+      if (areaMeta) {
+        const areaVal = parseFloat(areaMeta[1]);
+        if (areaVal > 0) {
+          // Unit detection: SolidWorks AP214 writes in m²
+          let areaM2;
+          if      (areaVal < 10)    { areaM2 = areaVal; }          // m² (typical for sheet parts)
+          else if (areaVal < 1e4)   { areaM2 = areaVal / 1e4; }    // cm²
+          else                      { areaM2 = areaVal / 1e6; }    // mm²
+          // Surface area = both sides + edge area; for thin sheet edge area ≈ 0
+          const flatAreaMM2 = (areaM2 / 2) * 1e6; // half surface = one flat face (mm²)
+          const rm2 = rawMatData[pb] || {};
+          const bboxMinDimA = Math.min(bbox.dx, bbox.dy, bbox.dz);
+          const T_mmA = parseFloat((rm2.dims||{}).T) || (bboxMinDimA < 50 ? bboxMinDimA : 3) || 1;
+          stepVolMM3 = flatAreaMM2 * T_mmA;
+          stepVolSource = 'AREA_MEASURE['+areaM2.toFixed(4)+'m² → blank='+(flatAreaMM2/1e6).toFixed(4)+'m² × T='+T_mmA+'mm]';
         }
       }
     }
@@ -2794,7 +2921,11 @@ async function rmAnalyzeStep(pb, stpPath, rowIdx) {
       }
       const splitNote = bbox.bodiesSplit > 1 ? ' ['+bbox.bodiesSplit+' גופים]' : '';
       const filterNote = bbox.filteredOut > 0 ? ' [סונן '+bbox.filteredOut+'/'+bbox.totalPts+']' : '';
-      noteText = (est.note || '') + splitNote + filterNote;
+      // Extra warning for flat-pattern bbox: fill ratio can be very low for complex parts
+      const flatPatternWarn = (formId === 'sheet' && Math.min(bbox.dx,bbox.dy,bbox.dz) < 15)
+        ? ' ⚠ Bounding Box בלבד — לחלקים מורכבים עם חריצים רבים עשוי לאמוד עודף משמעותי. הזן מסת CAD ידנית.'
+        : '';
+      noteText = (est.note || '') + splitNote + filterNote + flatPatternWarn;
     }
 
     arParentDimChanged(pb, Linp || {value:''}, rowIdx);
