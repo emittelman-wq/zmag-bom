@@ -842,11 +842,11 @@ function computeTotalMassForPb(pb) {
     const tq  = item.tq || 0;
     if (!tq) return;
     if (isARUnit(uom)) {
-      const _ev = _rmExactVol(rm);
+      const parentPb = getParentPbForBOMIndex(idx);
+      const _ev = _rmExactVol(rm, parentPb);
       if (_ev !== null) {
         totalMass += _ev * dens * tq;
       } else {
-        const parentPb = getParentPbForBOMIndex(idx);
         const dims = getARDimsForParent(pb, parentPb);
         if (dims.L) totalMass += calcRawMatVolume(rm.form||'sheet', dims) * dens * tq;
       }
@@ -1253,7 +1253,7 @@ function getItemUnitCost(item, bomIdx) {
         const uc = parseFloat(rm.unitCost) || 0;
         // If STEP volume was computed AND user chose to trust it → use exact mesh mass
         const waste = 1 + (parseFloat(rm.wastePct)||0)/100;
-        const _evol = _rmExactVol(rm);
+        const _evol = _rmExactVol(rm, parentPb);
         if (_evol !== null) return _evol * density * uc * waste;
         const dims = getARDimsForParent(pb, parentPb);
         if (!dims.L) return 0;
@@ -1291,9 +1291,9 @@ function getItemUnitCost(item, bomIdx) {
         const rm = rawMatData[pb];
         const density = parseFloat(rm.density) || (MATERIAL_DB[rm.family]||{}).density || 1000;
         const uc = parseFloat(rm.unitCost) || 0;
-        const _evol = _rmExactVol(rm);
-        if (_evol !== null) return _evol * density * uc;
         const parentPb = getParentPbForBOMIndex(bomIdx);
+        const _evol = _rmExactVol(rm, parentPb);
+        if (_evol !== null) return _evol * density * uc;
         const dims = getARDimsForParent(pb, parentPb);
         if (!dims.L) return 0;
         const vol = calcRawMatVolume(rm.form, dims);
@@ -2195,8 +2195,15 @@ const MATERIAL_FORMS = [
 ];
 
 // Returns exact part volume in m³ from CadQuery JSON, or null if not available.
-// mass_kg = _rmExactVol(rm) * density_kg_m3
-function _rmExactVol(rm) {
+// For AR items pass parentPb — per-parent volume checked first.
+// mass_kg = _rmExactVol(rm, parentPb) * density_kg_m3
+function _rmExactVol(rm, parentPb) {
+  // Per-parent first (AR items: each parent assembly has its own blank)
+  if (parentPb && rm && rm.perParent && rm.perParent[parentPb]) {
+    const pv = parseFloat(rm.perParent[parentPb].exact_volume_mm3);
+    if (pv > 0) return pv / 1e9;
+  }
+  // Global fallback (EA/TQ items or backward-compat)
   const v = rm && parseFloat(rm.exact_volume_mm3);
   return (v > 0) ? v / 1e9 : null;
 }
@@ -2502,13 +2509,13 @@ function computeARAggregate(pb, tabMode) {
     if (!isARUnit(item.uom)) return;
     const tq = item.tq || 0;
     if (!tq) return;
-    const _evol = _rmExactVol(rm);
+    const parentPb = getParentPbForBOMIndex(idx);
+    const _evol = _rmExactVol(rm, parentPb);
     let vol;
     if (_evol !== null) {
       vol = _evol;
       count++;
     } else {
-      const parentPb = getParentPbForBOMIndex(idx);
       const dims = getARDimsForParent(pb, parentPb);
       if (!dims.L) return;
       count++;
@@ -2699,10 +2706,18 @@ async function rmAnalyzeStep(pb, stpPath, rowIdx) {
   if (dbEntry && !dbEntry.error && dbEntry.volume_mm3 > 0) {
     try {
       const volMM3 = dbEntry.volume_mm3;
-      // Store the exact volume directly — no L/W/T guessing needed.
-      // All mass/cost calculations will use exact_volume_mm3 × density.
+      // Store exact volume per-parent (AR items have different blank sizes per parent).
+      // All mass/cost calculations use perParent[parentPb].exact_volume_mm3 × density.
       if (!rawMatData[pb]) rawMatData[pb] = {};
-      rawMatData[pb].exact_volume_mm3 = volMM3;
+      if (!rawMatData[pb].perParent) rawMatData[pb].perParent = {};
+      const _ppbRow = document.getElementById('ar-prow-'+rowIdx);
+      const _ppb = _ppbRow ? _ppbRow.dataset.ppb : null;
+      if (_ppb) {
+        if (!rawMatData[pb].perParent[_ppb]) rawMatData[pb].perParent[_ppb] = {};
+        rawMatData[pb].perParent[_ppb].exact_volume_mm3 = volMM3;
+      } else {
+        rawMatData[pb].exact_volume_mm3 = volMM3; // fallback for non-AR
+      }
       localStorage.setItem(RM_STORAGE_KEY, JSON.stringify(rawMatData));
       saveProcToFile();
 
@@ -3201,8 +3216,8 @@ function arRefreshRow(pb,rowIdx){
   const form=(document.getElementById('rmForm')||{}).value||(rm||{}).form||'sheet';
   const density=parseFloat((document.getElementById('rmDensity')||{}).value)||parseFloat((rm||{}).density)||2700;
   const wastePct=parseFloat((document.getElementById('rmWastePct')||{}).value)||parseFloat((rm||{}).wastePct)||0;
-  // Use exact CadQuery volume if available; otherwise use per-parent L/W dims
-  const _evol=_rmExactVol(rm);
+  // Use exact CadQuery volume if available (per-parent first); otherwise use L/W dims
+  const _evol=_rmExactVol(rm, parentPb);
   let vol, mass;
   if(_evol!==null){
     vol=_evol; mass=vol*density;
@@ -3238,11 +3253,12 @@ function arRefreshAggregate(pb){
   const waste=1+wastePct/100;
   let totalGross=0;
   const _rmAgg=rawMatData[pb]||{};
-  const _evolAgg=_rmExactVol(_rmAgg);
   _arParents.forEach(function(p,i){
     const row=document.getElementById('ar-prow-'+i);
     if(!row) return;
     const tq=parseFloat(row.dataset.tq)||1;
+    const _ppbAgg=row.dataset.ppb;
+    const _evolAgg=_rmExactVol(_rmAgg, _ppbAgg);
     let vol;
     if(_evolAgg!==null){
       vol=_evolAgg;
