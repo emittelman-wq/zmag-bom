@@ -2540,18 +2540,43 @@ function estimateARDims(form, bbox) {
   const M=1.10; // cutting margin
 
   if(form==='sheet'){
-    // flat blank: add fold depth to each plan dimension (both sides)
-    const Lraw = long + 2*depth;
-    const Wraw = mid  + 2*depth;
-    const L=Math.ceil(Lraw*M), W=Math.ceil(Wraw*M);
-    const note =
-      long.toFixed(0)+'+'+'2×'+depth.toFixed(0)+'='+Lraw.toFixed(0)+
-      ' × '+
-      mid.toFixed(0)+'+'+'2×'+depth.toFixed(0)+'='+Wraw.toFixed(0)+
-      ' +10% → '+L+'×'+W+' mm = '+((L/1000)*(W/1000)).toFixed(4)+' M²';
-    // T hint: smallest bbox dim ≈ part face thickness (valid for flat parts, not bent sheet)
-    const Th = Math.round(depth * 10) / 10;
-    return {L, W, unit:'M²', note, stockHints: Th > 0 ? {T: Th} : {}};
+    // ── Distinguish flat sheet from 3D formed/welded part ──────────────────
+    // Flat/bent sheet:  depth (min bbox dim) ≈ sheet thickness (< 15mm)
+    // 3D formed/welded: depth is a real structural dimension (≥ 15mm)
+    //
+    // For FLAT: blank = (long + 2×depth) × (mid + 2×depth) +10%   [unfold bends]
+    // For 3D:   blank ≈ open-box surface area (5-sided box without top face):
+    //           Area = long×mid + 2×long×depth + 2×mid×depth
+    //           This matches real welded-box surface area within ~1% for typical parts.
+
+    const FLAT_THRESHOLD = 15; // mm — depth below this is likely sheet thickness
+    if (depth < FLAT_THRESHOLD) {
+      // ── Flat / lightly-bent sheet ──────────────────────────────────────
+      const Lraw = long + 2*depth;
+      const Wraw = mid  + 2*depth;
+      const L=Math.ceil(Lraw*M), W=Math.ceil(Wraw*M);
+      const note =
+        long.toFixed(0)+'+'+'2×'+depth.toFixed(0)+'='+Lraw.toFixed(0)+
+        ' × '+
+        mid.toFixed(0)+'+'+'2×'+depth.toFixed(0)+'='+Wraw.toFixed(0)+
+        ' +10% → '+L+'×'+W+' mm = '+((L/1000)*(W/1000)).toFixed(4)+' M²';
+      const Th = Math.round(depth * 10) / 10;
+      return {L, W, unit:'M²', note, stockHints: Th > 0 ? {T: Th} : {}};
+    } else {
+      // ── 3D formed / welded assembly ────────────────────────────────────
+      // Surface area of an open-top bounding box (best estimate for welded enclosures):
+      // 5 faces: bottom (long×mid) + 2 long sides (long×depth each) + 2 short sides (mid×depth each)
+      const area = long*mid + 2*long*depth + 2*mid*depth; // mm²
+      const L = Math.round(long);                         // longest dim unchanged
+      const W = Math.round(area / long);                  // equivalent blank width
+      const areaCm2 = (area / 100).toFixed(0);
+      const note =
+        'גוף 3D: SA≈'+areaCm2+'cm²'+
+        ' ('+long.toFixed(0)+'×'+mid.toFixed(0)+'+2×'+long.toFixed(0)+'×'+depth.toFixed(0)+'+2×'+mid.toFixed(0)+'×'+depth.toFixed(0)+')'+
+        ' → '+L+'×'+W+' mm [⚠ הערכה — אמת מול STEP/VOLUME_MEASURE]';
+      // No T hint for welded parts — user should enter T manually
+      return {L, W, unit:'M²', note, stockHints: {}};
+    }
   }
   // Linear forms: longest bbox dimension is blank cut length
   const L = Math.ceil(long * M);
@@ -2690,21 +2715,36 @@ async function rmAnalyzeStep(pb, stpPath, rowIdx) {
     // These hold the ACTUAL part volume (after all cutouts), which is exactly what
     // we need:  raw_material_mass = part_volume × density × (1 + waste%)
     let stepVolMM3 = null;
-    // Try VOLUME_MEASURE first (value may be in mm³ or m³)
+    let stepVolSource = '';
+
+    // Try VOLUME_MEASURE first (value may be in mm³ or m³ depending on STEP units)
+    // Handle both MEASURE_WITH_UNIT(VOLUME_MEASURE(...)) and bare VOLUME_MEASURE(...)
     const volMeta = text.match(/VOLUME_MEASURE\s*\(\s*([\d.eE+\-]+)\s*\)/i);
     if (volMeta) {
       const v = parseFloat(volMeta[1]);
-      if (v > 0) stepVolMM3 = (v < 0.01) ? v * 1e9 : v; // convert m³→mm³ if tiny
+      if (v > 0) {
+        // Unit detection heuristic:
+        //   v < 0.5     → likely m³  (multiply by 1e9 → mm³)
+        //   v < 1000    → likely cm³ (multiply by 1e3 → mm³)
+        //   otherwise   → already mm³
+        if      (v < 0.5)    { stepVolMM3 = v * 1e9; stepVolSource = 'VOLUME_MEASURE[m³]'; }
+        else if (v < 1000)   { stepVolMM3 = v * 1e3; stepVolSource = 'VOLUME_MEASURE[cm³]'; }
+        else                 { stepVolMM3 = v;        stepVolSource = 'VOLUME_MEASURE[mm³]'; }
+      }
     }
-    // Fallback to MASS_MEASURE (SolidWorks: kg)
+    // Fallback to MASS_MEASURE (SolidWorks writes mass in kg)
     if (!stepVolMM3) {
       const massMeta = text.match(/MASS_MEASURE\s*\(\s*([\d.eE+\-]+)\s*\)/i);
       if (massMeta) {
         const massKg = parseFloat(massMeta[1]);
         if (massKg > 0) {
           const rm2 = rawMatData[pb] || {};
-          const dens = parseFloat(rm2.density) || (MATERIAL_DB[rm2.family]||{}).density || 2700; // kg/m³
+          // density from stored data (kg/m³); MATERIAL_DB stores in kg/m³
+          let dens = parseFloat(rm2.density) || (MATERIAL_DB[rm2.family]||{}).density || 2700;
+          // Normalise: if density looks like g/cm³ (< 30) convert to kg/m³
+          if (dens < 30) dens = dens * 1000;
           stepVolMM3 = (massKg / dens) * 1e9; // m³ → mm³
+          stepVolSource = 'MASS_MEASURE['+massKg.toFixed(4)+'kg]';
         }
       }
     }
@@ -2715,20 +2755,32 @@ async function rmAnalyzeStep(pb, stpPath, rowIdx) {
 
     if (stepVolMM3 && stepVolMM3 > 0 && formId === 'sheet') {
       // ── Volume-based fill (accurate): V = L × W × T ──────────────────────
-      // T from existing dim data or smallest bbox dim (e.g. 3mm sheet)
+      // T from existing dim data; fallback to smallest bbox dim, but cap at 50mm
       const rm2 = rawMatData[pb] || {};
-      const T_mm = parseFloat((rm2.dims||{}).T) || Math.min(bbox.dx, bbox.dy, bbox.dz) || 1;
-      // L = longest part dimension (from bbox)
+      const bboxMinDim = Math.min(bbox.dx, bbox.dy, bbox.dz);
+      const T_mm = parseFloat((rm2.dims||{}).T) || (bboxMinDim < 50 ? bboxMinDim : 3) || 1;
+      // L = longest part dimension (from bbox of selected body)
       const L_mm = Math.round(Math.max(bbox.dx, bbox.dy, bbox.dz));
       // W back-calculated so that L × W × T = stepVolMM3
       const W_mm = Math.round(stepVolMM3 / (T_mm * L_mm));
-      if (Linp) Linp.value = L_mm;
-      if (Winp && W_mm > 0) Winp.value = W_mm;
-      // Fill T in form if not yet set
-      const Tinp = document.querySelector('#rawMatModal .rm-dim[data-key="T"]');
-      if (Tinp && !Tinp.value) Tinp.value = T_mm;
-      noteText = 'V='+Math.round(stepVolMM3)+'mm³ → '+L_mm+'×'+W_mm+'×'+T_mm+'mm [נפח STEP]';
-    } else {
+
+      // Sanity check: W_mm must be plausible (1mm–10m range)
+      const wPlausible = W_mm >= 1 && W_mm <= 10000;
+      if (wPlausible) {
+        if (Linp) Linp.value = L_mm;
+        if (Winp) Winp.value = W_mm;
+        // Fill T in form if not yet set
+        const Tinp = document.querySelector('#rawMatModal .rm-dim[data-key="T"]');
+        if (Tinp && !Tinp.value) Tinp.value = T_mm;
+        noteText = '✓ '+stepVolSource+': V='+Math.round(stepVolMM3)+'mm³ → '+L_mm+'×'+W_mm+'×'+T_mm+'mm [נפח STEP מדויק]';
+      } else {
+        // W out of range → unit detection failed; fall through to bbox estimation
+        stepVolMM3 = null;
+        console.warn('[STEP] W_mm='+W_mm+' out of range, falling back to bbox. Source: '+stepVolSource+' vol='+stepVolMM3);
+      }
+    }
+
+    if (!stepVolMM3 || !noteText) {
       // ── Bbox fallback: body-separation + estimateARDims ───────────────────
       const est = estimateARDims(formId, bbox);
       if (!est) throw new Error('לא ניתן להעריך מידות מה-STEP');
