@@ -891,12 +891,16 @@ function _populateMatFamTab() {
 }
 
 // Live price input → save to matFamPrices + refresh cost cell + footer
+var _matFamSaveTimer = null;
 function onMatFamPriceInput(inp) {
   const key   = inp.dataset.key;
   const price = parseFloat(inp.value) || 0;
   if (price > 0) matFamPrices[key] = price;
   else            delete matFamPrices[key];
   localStorage.setItem(MAT_FAM_PRICE_KEY, JSON.stringify(matFamPrices));
+  // Sync to cloud/file so prices survive page refresh
+  clearTimeout(_matFamSaveTimer);
+  _matFamSaveTimer = setTimeout(function(){ saveProcToFile(); }, 1200);
 
   const idx = parseInt(inp.dataset.idx);
   // Update cost cell for this row
@@ -5822,7 +5826,17 @@ async function loadProcFromGraph() {
       localStorage.setItem(RM_STORAGE_KEY, JSON.stringify(rawMatData));
     }
     if (obj.matFamPrices && typeof obj.matFamPrices === 'object') {
-      matFamPrices = obj.matFamPrices;
+      // Merge: cloud wins for keys it has; preserve local-only keys (entered since last cloud save)
+      const merged = Object.assign({}, matFamPrices, obj.matFamPrices);
+      // Cloud zeros should not erase local non-zero prices
+      Object.keys(merged).forEach(function(k){
+        const cloudVal = parseFloat(obj.matFamPrices[k]) || 0;
+        const localVal = parseFloat(matFamPrices[k]) || 0;
+        if (cloudVal > 0) merged[k] = cloudVal;       // cloud has a real price → use it
+        else if (localVal > 0) merged[k] = localVal;  // cloud missing/zero → keep local
+        else delete merged[k];                         // both zero → remove
+      });
+      matFamPrices = merged;
       localStorage.setItem(MAT_FAM_PRICE_KEY, JSON.stringify(matFamPrices));
     }
     if (obj.buyPrices && typeof obj.buyPrices === 'object') {
