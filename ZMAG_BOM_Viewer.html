@@ -1311,7 +1311,12 @@ function getItemUnitCost(item, bomIdx) {
       // ── CadQuery exact volume: highest priority, any UOM ─────────────────
       const parentPb = getParentPbForBOMIndex(bomIdx);
       const _evol = _rmExactVol(rm, parentPb);
-      if (_evol !== null) return _evol * density * uc * waste;
+      if (_evol !== null) {
+        // Volume = material for ONE piece (no TQ). computeTreeCosts multiplies by item.tq,
+        // so we divide here — net tree cost = volume × density × price × waste (TQ-neutral).
+        const _tq = item.tq || 1;
+        return (_tq > 0) ? _evol * density * uc * waste / _tq : 0;
+      }
       // ── Fallback: UOM-based calculation ───────────────────────────────────
       if (isARUnit(uom)) {
         const dims = getARDimsForParent(pb, parentPb);
@@ -1353,7 +1358,10 @@ function getItemUnitCost(item, bomIdx) {
       // ── CadQuery exact volume: highest priority, any UOM ─────────────────
       const parentPb = getParentPbForBOMIndex(bomIdx);
       const _evol = _rmExactVol(rm, parentPb);
-      if (_evol !== null) return _evol * density * uc * waste;
+      if (_evol !== null) {
+        const _tq = item.tq || 1;
+        return (_tq > 0) ? _evol * density * uc * waste / _tq : 0;
+      }
       // ── Fallback: UOM-based calculation ───────────────────────────────────
       if (isARUnit(uom)) {
         const dims = getARDimsForParent(pb, parentPb);
@@ -2577,37 +2585,36 @@ function computeARAggregate(pb, tabMode) {
   const rm = rawMatData[pb];
   if (!rm) return {mass:0, cost:0, area:0, hasAny:false};
   const density = parseFloat(rm.density) || (MATERIAL_DB[rm.family]||{}).density || 1000;
-  const uc = parseFloat(rm.unitCost) || 0;
+  const uc = parseFloat(rm.unitCost) || parseFloat(matFamPrices[_famKey(rm)]) || 0;
+  const seenParents = new Set();
   let totalMass = 0, totalArea = 0, count = 0;
   BOM.forEach(function(item, idx) {
     if (tabMode ? isRowHiddenForTabs(idx) : isRowExcluded(idx)) return;
     if ((item.pb || item.pn) !== pb) return;
-    if (!isARUnit(item.uom)) return;
-    const tq = item.tq || 0;
-    if (!tq) return;
+    if (!/^(m2?|ar|a[\/\\]r)$/i.test((item.uom||'').trim())) return;
     const parentPb = getParentPbForBOMIndex(idx);
     const _evol = _rmExactVol(rm, parentPb);
-    let vol;
     if (_evol !== null) {
-      vol = _evol;
+      // With CadQuery: each unique parent contributes its volume once (no TQ)
+      if (seenParents.has(parentPb)) return;
+      seenParents.add(parentPb);
+      totalMass += _evol * density;
       count++;
     } else {
+      const tq = item.tq || 0;
+      if (!tq) return;
       const dims = getARDimsForParent(pb, parentPb);
       if (!dims.L) return;
       count++;
-      vol = calcRawMatVolume(rm.form, dims);
+      const vol = calcRawMatVolume(rm.form, dims);
       if (rm.form === 'sheet' && dims.W) {
         totalArea += (parseFloat(dims.L)/1000) * (parseFloat(dims.W)/1000) * tq;
       }
+      totalMass += vol * density * tq;
     }
-    const mass = vol * density;
-    totalMass += mass * tq;
   });
   const waste = 1 + (parseFloat(rm.wastePct)||0)/100;
-  let totalCost = 0;
-  if (rm.costUnit === 'kg')  totalCost = totalMass * uc * waste;
-  else if (rm.costUnit === 'm2') totalCost = totalArea * uc * waste;
-  else totalCost = totalMass * uc * waste;
+  const totalCost = totalMass * uc * waste;
   return {mass:totalMass, cost:totalCost, area:totalArea, hasAny:count>0};
 }
 
@@ -3272,8 +3279,8 @@ function rmUpdateCalc(pb){
       if(!row) return;
       const ev=_rmExactVol(_rmCur, row.dataset.ppb);
       if(ev===null) return;
-      const tq=parseFloat(row.dataset.tq)||1;
-      const net=ev*density*tq; totalNet+=net; totalGross+=net*waste; countAnalyzed++;
+      // No TQ multiplication — volume is the actual material for one occurrence of this parent
+      const net=ev*density; totalNet+=net; totalGross+=net*waste; countAnalyzed++;
     });
     const totalCost=costUnit==='kg'?totalGross*unitCost:0;
     const _missingPrice = unitCost<=0 ? ' · <span style="color:var(--danger,#e53)">⚠ הזן מחיר/ק"ג ולחץ שמור</span>' : '';
@@ -3341,8 +3348,8 @@ function arRefreshRow(pb,rowIdx){
   const waste=1+wastePct/100;
   const grossMass=mass*waste;
   massTd.textContent=mass>=0.001?(mass*1000).toFixed(0)+' g':'<1 g';
-  const subKg=grossMass*tqRaw;
-  subTd.textContent=(subKg>=0.001?subKg.toFixed(3):'<0.001')+' kg'+(wastePct>0?' *':'');
+  // No TQ multiplication — volume already represents material for one occurrence
+  if(subTd) subTd.textContent=(grossMass>=0.001?grossMass.toFixed(3):'<0.001')+' kg'+(wastePct>0?' *':'');
 }
 
 function arRefreshAggregate(pb){
