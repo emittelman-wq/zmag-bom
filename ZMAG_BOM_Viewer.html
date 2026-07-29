@@ -2724,6 +2724,9 @@ async function rmAnalyzeStep(pb, stpPath, rowIdx) {
       const volMM3 = dbEntry.volume_mm3;
       // Store exact volume per-parent (AR items have different blank sizes per parent).
       // All mass/cost calculations use perParent[parentPb].exact_volume_mm3 × density.
+      // IMPORTANT: only cloud-save if this entry already has pricing data (family/unitCost).
+      // Creating a fresh empty entry and cloud-saving it would wipe previously-saved prices.
+      const _hadPricingData = !!(rawMatData[pb] && (rawMatData[pb].family || rawMatData[pb].unitCost));
       if (!rawMatData[pb]) rawMatData[pb] = {};
       if (!rawMatData[pb].perParent) rawMatData[pb].perParent = {};
       const _ppbRow = document.getElementById('ar-prow-'+rowIdx);
@@ -2735,7 +2738,7 @@ async function rmAnalyzeStep(pb, stpPath, rowIdx) {
         rawMatData[pb].exact_volume_mm3 = volMM3; // fallback for non-AR
       }
       localStorage.setItem(RM_STORAGE_KEY, JSON.stringify(rawMatData));
-      saveProcToFile();
+      if (_hadPricingData) saveProcToFile(); // only cloud-save when pricing data exists
 
       const rm2      = rawMatData[pb];
       const density  = parseFloat(rm2.density) || (MATERIAL_DB[rm2.family]||{}).density || 2700;
@@ -2748,6 +2751,8 @@ async function rmAnalyzeStep(pb, stpPath, rowIdx) {
       if (btn) { btn.textContent = '✓'; btn.disabled = false; btn.style.borderColor = 'var(--accent2)'; btn.style.color = 'var(--accent2)'; }
       const noteEl = document.getElementById('stpnote-'+rowIdx);
       if (noteEl) noteEl.textContent = noteText;
+      // ── Refresh BOM table cost cells immediately (no need to press שמור) ──
+      try { computeTreeCosts(); refreshCostCells(); } catch(e2) {}
     } catch(e) {
       if (btn) { btn.textContent = '✕'; btn.disabled = false; }
       alert('שגיאה בשימוש בנתוני CadQuery: ' + e.message);
@@ -3217,10 +3222,11 @@ function rmUpdateCalc(pb){
       const net=ev*density*tq; totalNet+=net; totalGross+=net*waste; countAnalyzed++;
     });
     const totalCost=costUnit==='kg'?totalGross*unitCost:0;
+    const _missingPrice = unitCost<=0 ? ' · <span style="color:var(--danger,#e53)">⚠ הזן מחיר/ק"ג ולחץ שמור</span>' : '';
     el.innerHTML='<span style="color:var(--accent2);font-size:11px">✅ CadQuery per-parent ('+countAnalyzed+' הורים)</span> · '+
       '<b>סה"כ נטו:</b> '+(totalNet>=0.001?(totalNet*1000).toFixed(0)+' g':'<1 g')+
       (wastePct>0?' → גולמי: '+(totalGross>=0.001?(totalGross*1000).toFixed(0)+' g':'<1 g'):'') +
-      (totalCost>0?' · <b>עלות כוללת:</b> '+fmtC(totalCost):'');
+      (totalCost>0?' · <b>עלות כוללת:</b> '+fmtC(totalCost):_missingPrice);
   } else {
     const vol = _evol !== null ? _evol : calcRawMatVolume(formId,dims);
     const exactBadge = _evol !== null ? ' <span style="color:var(--accent2);font-size:11px">✅ CadQuery</span>' : '';
