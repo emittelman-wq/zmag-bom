@@ -1245,16 +1245,16 @@ function getItemUnitCost(item, bomIdx) {
     // Normalise to BOM unit (M→per meter, M2→per m², AR/EA→per piece)
     if (rawMatData[pb]) {
       const uom = item.uom || '';
+      const rm = rawMatData[pb];
+      const density = parseFloat(rm.density) || (MATERIAL_DB[rm.family]||{}).density || 1000;
+      const uc = parseFloat(rm.unitCost) || 0;
+      const waste = 1 + (parseFloat(rm.wastePct)||0)/100;
+      // ── CadQuery exact volume: highest priority, any UOM ─────────────────
+      const parentPb = getParentPbForBOMIndex(bomIdx);
+      const _evol = _rmExactVol(rm, parentPb);
+      if (_evol !== null) return _evol * density * uc * waste;
+      // ── Fallback: UOM-based calculation ───────────────────────────────────
       if (isARUnit(uom)) {
-        // Per-parent: each BOM occurrence has a different parent assembly → different blank size
-        const parentPb = getParentPbForBOMIndex(bomIdx);
-        const rm = rawMatData[pb];
-        const density = parseFloat(rm.density) || (MATERIAL_DB[rm.family]||{}).density || 1000;
-        const uc = parseFloat(rm.unitCost) || 0;
-        // If STEP volume was computed AND user chose to trust it → use exact mesh mass
-        const waste = 1 + (parseFloat(rm.wastePct)||0)/100;
-        const _evol = _rmExactVol(rm, parentPb);
-        if (_evol !== null) return _evol * density * uc * waste;
         const dims = getARDimsForParent(pb, parentPb);
         if (!dims.L) return 0;
         const vol = calcRawMatVolume(rm.form, dims);
@@ -1263,8 +1263,8 @@ function getItemUnitCost(item, bomIdx) {
           return (parseFloat(dims.L)/1000)*(parseFloat(dims.W)/1000)*uc*waste;
         return mass * uc * waste;
       }
-      const rm = getRawMatCostPerUnit(pb, uom);
-      return rm ? rm.cost : 0;
+      const rmCost = getRawMatCostPerUnit(pb, uom);
+      return rmCost ? rmCost.cost : 0;
     }
     const e = getPriceEntry(pb);
     return e ? toILS(e.p, e.currency || 'USD') : 0;  // always returns ILS
@@ -1286,14 +1286,16 @@ function getItemUnitCost(item, bomIdx) {
     const pb = item.pb || item.pn;
     if (rawMatData[pb]) {
       const uom = item.uom || '';
+      const rm = rawMatData[pb];
+      const density = parseFloat(rm.density) || (MATERIAL_DB[rm.family]||{}).density || 1000;
+      const uc = parseFloat(rm.unitCost) || 0;
+      const waste = 1 + (parseFloat(rm.wastePct)||0)/100;
+      // ── CadQuery exact volume: highest priority, any UOM ─────────────────
+      const parentPb = getParentPbForBOMIndex(bomIdx);
+      const _evol = _rmExactVol(rm, parentPb);
+      if (_evol !== null) return _evol * density * uc * waste;
+      // ── Fallback: UOM-based calculation ───────────────────────────────────
       if (isARUnit(uom)) {
-        // Per-parent blank cost — use exact CadQuery volume if available
-        const rm = rawMatData[pb];
-        const density = parseFloat(rm.density) || (MATERIAL_DB[rm.family]||{}).density || 1000;
-        const uc = parseFloat(rm.unitCost) || 0;
-        const parentPb = getParentPbForBOMIndex(bomIdx);
-        const _evol = _rmExactVol(rm, parentPb);
-        if (_evol !== null) return _evol * density * uc;
         const dims = getARDimsForParent(pb, parentPb);
         if (!dims.L) return 0;
         const vol = calcRawMatVolume(rm.form, dims);
@@ -1302,8 +1304,8 @@ function getItemUnitCost(item, bomIdx) {
           return (parseFloat(dims.L)/1000)*(parseFloat(dims.W)/1000)*uc;
         return mass * uc;
       }
-      const rm = getRawMatCostPerUnit(pb, uom);
-      return rm ? rm.cost : 0;
+      const rmCost = getRawMatCostPerUnit(pb, uom);
+      return rmCost ? rmCost.cost : 0;
     }
   }
   return 0;
@@ -2333,6 +2335,15 @@ function parseRawMatHints(pb, desc) {
     h.form = 'sheet';
     if (d1 && d2 && d3) h.dims = {L:String(Math.max(d1,d2)), W:String(Math.min(d1,d2)), T:String(d3)};
     else if (d1 && d2)  h.dims = {W:String(Math.max(d1,d2)), T:String(Math.min(d1,d2))};
+    // Detect standalone thickness like "1.5MM", "3MM" when no NxN pattern found
+    if (!h.dims || !h.dims.T) {
+      const tStandalone = src.match(/(?<![0-9])(\d+(?:\.\d+)?)\s*MM\b/);
+      const tVal = tStandalone ? parseFloat(tStandalone[1]) : 0;
+      if (tVal > 0 && tVal <= 50) { // sanity: 0–50mm is realistic sheet thickness
+        if (!h.dims) h.dims = {};
+        h.dims.T = String(tVal);
+      }
+    }
   }
   // Angle
   else if (/\b(ANGLE\b|L\s*PROFILE|UA\b|EQUAL\s*ANGLE|UNEQUAL\s*ANGLE)/.test(src)) {
@@ -2382,8 +2393,13 @@ function getRawMatCostPerUnit(pb, uom) {
   }
 
   if (uom === 'M2') {
-    // Normalise to 1 m² reference
-    const nd  = Object.assign({}, rm.dims||{}, {L:'1000', W:'1000'});
+    // Normalise to 1 m² reference; infer T from part name if not stored in dims
+    let T = parseFloat((rm.dims||{}).T) || 0;
+    if (!T) {
+      const h = parseRawMatHints(pb, '');
+      T = parseFloat((h.dims||{}).T) || 0;
+    }
+    const nd  = Object.assign({}, rm.dims||{}, {L:'1000', W:'1000'}, T ? {T:String(T)} : {});
     const vol  = calcRawMatVolume('sheet', nd);                // m³ for 1 m²
     const mass = vol * dens;                                   // kg/m²
     const cost = (rm.costUnit === 'm2') ? uc : mass * uc;      // ₪/m²
@@ -2964,8 +2980,8 @@ function openRawMatEditor(pb, desc, tq) {
   let m = document.getElementById('rawMatModal');
   if (!m) { m=document.createElement('div'); m.id='rawMatModal'; m.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:3500;display:none;align-items:center;justify-content:center'; document.body.appendChild(m); }
 
-  // Auto-detect hints from PN + desc for new items
-  const hints = isNew ? parseRawMatHints(pb, desc) : {};
+  // Auto-detect hints — always computed so missing dims (e.g. T for M2 items) are filled in
+  const hints = parseRawMatHints(pb, desc);
   const detectedFields = isNew ? Object.keys(hints).filter(function(k){ return k!=='dims'; }) : [];
 
   const fam = existing.family || hints.family || 'aluminum';
@@ -2973,7 +2989,11 @@ function openRawMatEditor(pb, desc, tq) {
   const grade = existing.grade || hints.grade || 'generic';
   const formId  = existing.form || hints.form || 'sheet';
   const formData = MATERIAL_FORMS.find(function(f){return f.id===formId;})||MATERIAL_FORMS[0];
-  const mergedDims = Object.assign({}, hints.dims||{}, existing.dims||{});
+  // Smart merge: hints supply defaults, existing non-empty values win
+  const _hDims = hints.dims || {};
+  const _eDims = existing.dims || {};
+  const mergedDims = Object.assign({}, _hDims);
+  Object.keys(_eDims).forEach(function(k){ if (_eDims[k] !== '' && _eDims[k] != null) mergedDims[k] = _eDims[k]; });
   const curDens = existing.density || hints.density || famData.density;
   const curCostUnit = existing.costUnit || 'kg';
 
