@@ -940,6 +940,8 @@ function _buildMatFamMap() {
   return famMap;
 }
 
+function escHtml(s){ return String(s===null||s===undefined?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
+
 function _populateMatFamTab() {
   const el = document.getElementById('matFamContent');
   const st = document.getElementById('matFamStats');
@@ -1005,34 +1007,46 @@ function _populateMatFamTab() {
   });
   html += '</tr></thead><tbody>';
 
+  var rowBuildErr = null;
   rows.forEach(function(r, idx) {
-    const famData  = MATERIAL_DB[r.family]||{label:r.family, color:'#888'};
-    const formData = MATERIAL_FORMS.find(function(f){ return f.id===r.form; })||{label:r.form};
-    const price    = matFamPrices[r.key] ? parseFloat(matFamPrices[r.key]) : 0;
-    const cost     = price && r.totalMass ? r.totalMass * price : 0;
-    if (cost) totalCost += cost;
-    const safeIdx  = idx;
-    const massTxt  = r.totalMass > 0 ? r.totalMass.toFixed(2) : '—';
-    const costTxt  = cost > 0 ? '₪'+cost.toFixed(0) : '—';
-    const densGcc  = (r.density/1000).toFixed(2);
+    try {
+      const famData  = MATERIAL_DB[r.family]||{label:String(r.family||''), color:'#888'};
+      const formData = MATERIAL_FORMS.find(function(f){ return f.id===r.form; })||{label:String(r.form||'')};
+      const price    = matFamPrices[r.key] ? parseFloat(matFamPrices[r.key]) : 0;
+      const mass     = parseFloat(r.totalMass)||0;
+      const dens     = parseFloat(r.density)||7850;
+      const cost     = price && mass ? mass * price : 0;
+      if (cost) totalCost += cost;
+      const massTxt  = mass > 0 ? mass.toFixed(2) : '—';
+      const costTxt  = cost > 0 ? '₪'+cost.toFixed(0) : '—';
+      const densGcc  = (dens/1000).toFixed(2);
+      const safeKey  = escHtml(r.key||'');
+      const safeGrade= escHtml(r.grade||'');
+      const safeForm = escHtml(formData.label||'');
+      const safeColor= famData.color||'#888';
+      const safeLabel= famData.label||String(r.family||'');
 
-    html += '<tr style="border-bottom:1px solid var(--border)" class="matfam-row" data-key="'+escHtml(r.key)+'">';
-    html += '<td style="padding:5px 8px;color:var(--text3);font-size:11px">'+(idx+1)+'</td>';
-    html += '<td style="padding:5px 8px"><span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:'+famData.color+';margin-left:4px;vertical-align:middle"></span><span style="vertical-align:middle">'+famData.label+'</span></td>';
-    html += '<td style="padding:5px 8px;font-weight:600;font-family:monospace">'+escHtml(r.grade)+'</td>';
-    html += '<td style="padding:5px 8px;color:var(--text2)">'+escHtml(formData.label)+'</td>';
-    html += '<td style="padding:5px 8px;text-align:center;color:var(--text3)">'+densGcc+'</td>';
-    html += '<td style="padding:5px 8px;text-align:center">'+r.bomRows+'</td>';
-    html += '<td style="padding:5px 8px;text-align:right;font-weight:700">'+massTxt+'</td>';
-    html += '<td style="padding:5px 8px"><input type="number" min="0" step="0.5" class="matfam-price-inp"'
-      +' style="width:72px;padding:3px 6px;font-size:12px;border:1px solid var(--border);border-radius:4px;background:var(--surface2);color:var(--text1);text-align:right"'
-      +' value="'+(price||'')+'"'
-      +' data-key="'+escHtml(r.key)+'"'
-      +' data-idx="'+safeIdx+'"'
-      +' oninput="onMatFamPriceInput(this)"></td>';
-    html += '<td class="matfam-cost-cell" data-idx="'+safeIdx+'" style="padding:5px 8px;text-align:right;color:var(--accent2);font-weight:700">'+costTxt+'</td>';
-    html += '<td style="padding:5px 8px"><button class="btn" style="font-size:10px;padding:2px 8px;white-space:nowrap" onclick="applyFamilyPrice(\''+escHtml(r.key)+'\')">החל →</button></td>';
-    html += '</tr>';
+      html += '<tr style="border-bottom:1px solid var(--border)" class="matfam-row" data-key="'+safeKey+'">';
+      html += '<td style="padding:5px 8px;color:var(--text3);font-size:11px">'+(idx+1)+'</td>';
+      html += '<td style="padding:5px 8px"><span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:'+safeColor+';margin-left:4px;vertical-align:middle"></span><span style="vertical-align:middle">'+safeLabel+'</span></td>';
+      html += '<td style="padding:5px 8px;font-weight:600;font-family:monospace">'+safeGrade+'</td>';
+      html += '<td style="padding:5px 8px;color:var(--text2)">'+safeForm+'</td>';
+      html += '<td style="padding:5px 8px;text-align:center;color:var(--text3)">'+densGcc+'</td>';
+      html += '<td style="padding:5px 8px;text-align:center">'+(r.bomRows||0)+'</td>';
+      html += '<td style="padding:5px 8px;text-align:right;font-weight:700">'+massTxt+'</td>';
+      html += '<td style="padding:5px 8px"><input type="number" min="0" step="0.5" class="matfam-price-inp"'
+        +' style="width:72px;padding:3px 6px;font-size:12px;border:1px solid var(--border);border-radius:4px;background:var(--surface2);color:var(--text1);text-align:right"'
+        +' value="'+(price||'')+'"'
+        +' data-key="'+safeKey+'"'
+        +' data-idx="'+idx+'"'
+        +' oninput="onMatFamPriceInput(this)"></td>';
+      html += '<td class="matfam-cost-cell" data-idx="'+idx+'" style="padding:5px 8px;text-align:right;color:var(--accent2);font-weight:700">'+costTxt+'</td>';
+      html += '<td style="padding:5px 8px"><button class="btn" style="font-size:10px;padding:2px 8px;white-space:nowrap" onclick="applyFamilyPrice(\''+safeKey+'\')">החל →</button></td>';
+      html += '</tr>';
+    } catch(e) {
+      if (!rowBuildErr) rowBuildErr = 'row '+idx+': '+e.message;
+      html += '<tr><td colspan="10" style="color:red;padding:4px 8px;font-size:10px">שגיאה בשורה '+idx+': '+e.message+'</td></tr>';
+    }
   });
 
   html += '</tbody><tfoot><tr style="background:var(--header-bg);font-weight:700;border-top:2px solid var(--border)">';
