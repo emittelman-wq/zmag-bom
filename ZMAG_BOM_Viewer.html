@@ -975,6 +975,9 @@ function _populateMatFamTab() {
     });
   } catch(e) { console.warn('MATERIAL_DB merge error:', e); }
 
+  // Diagnostic: always show count before rendering
+  el.innerHTML = '<div id="mf-diag" style="padding:6px 12px;font-size:11px;color:var(--text3)">טוען מחירון... (' + famMap.size + ' משפחות)</div>';
+
   // If famMap is somehow still empty, show a message
   if (!famMap.size) {
     el.innerHTML = '<div style="padding:40px;text-align:center;color:var(--text3);font-size:13px">שגיאה בטעינת נתוני חומרים — רענן את הדף</div>';
@@ -982,10 +985,16 @@ function _populateMatFamTab() {
   }
 
   // Sort: BOM entries (have mass) first by mass desc, then catalog entries alphabetically
-  const rows = [...famMap.values()].sort(function(a,b){
-    if (b.totalMass !== a.totalMass) return b.totalMass - a.totalMass;
-    return (a.family||'').localeCompare(b.family||'');
-  });
+  let rows;
+  try {
+    rows = [...famMap.values()].sort(function(a,b){
+      if ((b.totalMass||0) !== (a.totalMass||0)) return (b.totalMass||0) - (a.totalMass||0);
+      return (a.family||'').localeCompare(b.family||'');
+    });
+  } catch(e) {
+    el.innerHTML = '<div style="padding:20px;color:red">שגיאת מיון: '+e.message+'</div>';
+    return;
+  }
   let totalMass = 0, totalCost = 0;
   rows.forEach(function(r){ totalMass += (r.totalMass||0); });
 
@@ -1033,7 +1042,12 @@ function _populateMatFamTab() {
   html += '<td id="matfam-total-cost" style="padding:7px 8px;text-align:right;color:var(--accent2)">'+(totalCost?'₪'+totalCost.toFixed(0):'—')+'</td>';
   html += '<td></td></tr></tfoot></table>';
 
-  el.innerHTML = html;
+  try {
+    el.innerHTML = html;
+  } catch(e) {
+    el.innerHTML = '<div style="padding:20px;color:red">שגיאת רינדור: '+e.message+'</div>';
+    return;
+  }
   const bomRows = rows.filter(function(r){ return r.bomRows > 0; });
   const statsStr = bomRows.length
     ? bomRows.length+' משפחות בשימוש · '+totalMass.toFixed(1)+' kg'+
