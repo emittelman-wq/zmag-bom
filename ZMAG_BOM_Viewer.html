@@ -945,38 +945,49 @@ function _populateMatFamTab() {
   const st = document.getElementById('matFamStats');
   if (!el) return;
 
-  // Start with BOM-based entries (have mass data)
-  const famMap = _buildMatFamMap();
+  // Step 1: BOM-based entries (may fail if rawMatData has unexpected structure)
+  let famMap = new Map();
+  try { famMap = _buildMatFamMap(); } catch(e) { console.warn('_buildMatFamMap error:', e); }
 
-  // Add any keys that have saved prices but no BOM entry
-  Object.keys(matFamPrices).forEach(function(key) {
-    if (famMap.has(key)) return;
-    const parts = key.split('||');
-    const fam = parts[0], grade = parts[1]||'generic', form = parts[2]||'sheet';
-    const fd = MATERIAL_DB[fam]||{};
-    const gd = (fd.grades||[]).find(function(g){return g.id===grade;})||{};
-    famMap.set(key, {key:key, family:fam, grade:grade, form:form,
-      density: gd.density||fd.density||7850, pbs:[], totalMass:0, bomRows:0});
-  });
+  // Step 2: Add any keys that have saved prices but no BOM entry
+  try {
+    Object.keys(matFamPrices).forEach(function(key) {
+      if (famMap.has(key)) return;
+      const parts = key.split('||');
+      const fam = parts[0], grade = parts[1]||'generic', form = parts[2]||'sheet';
+      const fd = MATERIAL_DB[fam]||{};
+      const gd = (fd.grades||[]).find(function(g){return g.id===grade;})||{};
+      famMap.set(key, {key:key, family:fam, grade:grade, form:form,
+        density: gd.density||fd.density||7850, pbs:[], totalMass:0, bomRows:0});
+    });
+  } catch(e) { console.warn('matFamPrices merge error:', e); }
 
-  // Always add one row per MATERIAL_DB family (primary grade, sheet) so table is never empty
-  Object.keys(MATERIAL_DB).forEach(function(fam) {
-    const fd = MATERIAL_DB[fam];
-    const primaryGrade = fd.grades && fd.grades.length ? fd.grades[0].id : 'generic';
-    const key = fam+'||'+primaryGrade+'||sheet';
-    if (famMap.has(key)) return;
-    const gd = (fd.grades||[]).find(function(g){return g.id===primaryGrade;})||{};
-    famMap.set(key, {key:key, family:fam, grade:primaryGrade, form:'sheet',
-      density: gd.density||fd.density||7850, pbs:[], totalMass:0, bomRows:0});
-  });
+  // Step 3: Always add all MATERIAL_DB families so the table is never empty
+  try {
+    Object.keys(MATERIAL_DB).forEach(function(fam) {
+      const fd = MATERIAL_DB[fam];
+      const primaryGrade = fd.grades && fd.grades.length ? fd.grades[0].id : 'generic';
+      const key = fam+'||'+primaryGrade+'||sheet';
+      if (famMap.has(key)) return;
+      const gd = (fd.grades||[]).find(function(g){return g.id===primaryGrade;})||{};
+      famMap.set(key, {key:key, family:fam, grade:primaryGrade, form:'sheet',
+        density: gd.density||fd.density||7850, pbs:[], totalMass:0, bomRows:0});
+    });
+  } catch(e) { console.warn('MATERIAL_DB merge error:', e); }
+
+  // If famMap is somehow still empty, show a message
+  if (!famMap.size) {
+    el.innerHTML = '<div style="padding:40px;text-align:center;color:var(--text3);font-size:13px">שגיאה בטעינת נתוני חומרים — רענן את הדף</div>';
+    return;
+  }
 
   // Sort: BOM entries (have mass) first by mass desc, then catalog entries alphabetically
   const rows = [...famMap.values()].sort(function(a,b){
     if (b.totalMass !== a.totalMass) return b.totalMass - a.totalMass;
-    return a.family.localeCompare(b.family);
+    return (a.family||'').localeCompare(b.family||'');
   });
   let totalMass = 0, totalCost = 0;
-  rows.forEach(function(r){ totalMass += r.totalMass; });
+  rows.forEach(function(r){ totalMass += (r.totalMass||0); });
 
   var html = '<table style="width:100%;border-collapse:collapse;font-size:12px">';
   html += '<thead><tr style="background:var(--header-bg);position:sticky;top:0;z-index:2">';
