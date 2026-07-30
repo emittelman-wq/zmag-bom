@@ -452,7 +452,7 @@ tr.row-disabled .badge,tr.row-disabled .proc-btn{opacity:.5}
   <button class="mtn-tab on" id="mtn-main"    onclick="switchMainTab('main')">📋 ראשי</button>
   <button class="mtn-tab"    id="mtn-buy"     onclick="switchMainTab('buy')">📦 רכש</button>
   <button class="mtn-tab"    id="mtn-rawmat"  onclick="switchMainTab('rawmat')">🧱 חומרי גלם</button>
-  <button class="mtn-tab"    id="mtn-matfam"  onclick="switchMainTab('matfam')">🏷️ מחירוני</button>
+  <button class="mtn-tab"    id="mtn-matfam"  onclick="switchMainTab('matfam')">🏷️ מחירון ח"ג</button>
   <button class="mtn-tab"    id="mtn-reports" onclick="switchMainTab('reports')">📊 דוחות</button>
 </div>
 
@@ -944,12 +944,37 @@ function _populateMatFamTab() {
   const el = document.getElementById('matFamContent');
   const st = document.getElementById('matFamStats');
   if (!el) return;
-  if (!BOM || !BOM.length || !Object.keys(rawMatData).length) {
-    el.innerHTML='<div style="padding:40px;text-align:center;color:var(--text3);font-size:13px">אין נתוני חומרי גלם מוגדרים</div>';
-    return;
-  }
+
+  // Start with BOM-based entries (have mass data)
   const famMap = _buildMatFamMap();
-  const rows = [...famMap.values()].sort(function(a,b){ return b.totalMass - a.totalMass; });
+
+  // Add any keys that have saved prices but no BOM entry
+  Object.keys(matFamPrices).forEach(function(key) {
+    if (famMap.has(key)) return;
+    const parts = key.split('||');
+    const fam = parts[0], grade = parts[1]||'generic', form = parts[2]||'sheet';
+    const fd = MATERIAL_DB[fam]||{};
+    const gd = (fd.grades||[]).find(function(g){return g.id===grade;})||{};
+    famMap.set(key, {key:key, family:fam, grade:grade, form:form,
+      density: gd.density||fd.density||7850, pbs:[], totalMass:0, bomRows:0});
+  });
+
+  // Always add one row per MATERIAL_DB family (primary grade, sheet) so table is never empty
+  Object.keys(MATERIAL_DB).forEach(function(fam) {
+    const fd = MATERIAL_DB[fam];
+    const primaryGrade = fd.grades && fd.grades.length ? fd.grades[0].id : 'generic';
+    const key = fam+'||'+primaryGrade+'||sheet';
+    if (famMap.has(key)) return;
+    const gd = (fd.grades||[]).find(function(g){return g.id===primaryGrade;})||{};
+    famMap.set(key, {key:key, family:fam, grade:primaryGrade, form:'sheet',
+      density: gd.density||fd.density||7850, pbs:[], totalMass:0, bomRows:0});
+  });
+
+  // Sort: BOM entries (have mass) first by mass desc, then catalog entries alphabetically
+  const rows = [...famMap.values()].sort(function(a,b){
+    if (b.totalMass !== a.totalMass) return b.totalMass - a.totalMass;
+    return a.family.localeCompare(b.family);
+  });
   let totalMass = 0, totalCost = 0;
   rows.forEach(function(r){ totalMass += r.totalMass; });
 
@@ -998,7 +1023,12 @@ function _populateMatFamTab() {
   html += '<td></td></tr></tfoot></table>';
 
   el.innerHTML = html;
-  if (st) st.textContent = rows.length+' משפחות · '+totalMass.toFixed(1)+' kg';
+  const bomRows = rows.filter(function(r){ return r.bomRows > 0; });
+  const statsStr = bomRows.length
+    ? bomRows.length+' משפחות בשימוש · '+totalMass.toFixed(1)+' kg'+
+      (totalCost ? ' · ₪'+totalCost.toFixed(0) : '')
+    : rows.length+' משפחות בקטלוג — הזן מחיר/ק"ג';
+  if (st) st.textContent = statsStr;
 }
 
 // Live price input → save to matFamPrices + refresh cost cell + footer
