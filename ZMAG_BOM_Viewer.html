@@ -3374,6 +3374,7 @@ function arRefreshAggregate(pb){
     const _evolAgg=_rmExactVol(_rmAgg, _ppbAgg);
     let vol;
     if(_evolAgg!==null){
+      // CadQuery exact volume = material for ONE piece of this parent. No ×tq.
       vol=_evolAgg;
     } else {
       const Linp=document.querySelector('#ar-prow-'+i+' .ar-pdim[data-dim="L"]');
@@ -3384,8 +3385,9 @@ function arRefreshAggregate(pb){
       const dims=Object.assign({},edDims,{L:String(L)});
       if(W) dims.W=String(W);
       vol=calcRawMatVolume(form,dims);
+      // For manually-entered dims: volume is per-piece, no ×tq either.
     }
-    totalGross+=vol*density*waste*tq;
+    totalGross+=vol*density*waste; // no ×tq — volume already represents one occurrence
   });
   const cost=totalGross*unitCost;
   aggEl.innerHTML='סה"כ גולמי: <b>'+(totalGross>=0.001?totalGross.toFixed(3):'<0.001')+' kg</b>'+
