@@ -1398,7 +1398,7 @@ function getItemUnitCost(item, bomIdx) {
       // ── CadQuery exact volume + TQ-based: take higher estimate ───────────
       const parentPb = getParentPbForBOMIndex(bomIdx);
       const _evol = _rmExactVol(rm, parentPb);
-      // Always compute TQ-based cost per unit (fallback or comparator)
+      // Always compute TQ-based cost per unit using the same uc (incl. matFamPrices)
       let _tqCostPU = 0;
       if (isARUnit(uom)) {
         const dims = getARDimsForParent(pb, parentPb);
@@ -1408,7 +1408,17 @@ function getItemUnitCost(item, bomIdx) {
             ? (parseFloat(dims.L)/1000)*(parseFloat(dims.W)/1000)*uc*waste
             : vol * density * uc * waste;
         }
+      } else if (/^m2$/i.test(uom)) {
+        const _T = parseFloat((rm.dims||{}).T) || 0;
+        const _nd = Object.assign({}, rm.dims||{}, {L:'1000', W:'1000'}, _T ? {T:String(_T)} : {});
+        const _v  = calcRawMatVolume('sheet', _nd);
+        _tqCostPU = rm.costUnit === 'm2' ? uc : _v * density * uc * waste;
+      } else if (/^m$/i.test(uom)) {
+        const _nd = Object.assign({}, rm.dims||{}, {L:'1000'});
+        const _v  = calcRawMatVolume(rm.form||'bar_round', _nd);
+        _tqCostPU = rm.costUnit === 'm' ? uc : _v * density * uc * waste;
       } else {
+        // EA / PAC / other piece UOM — use dims-based piece cost
         const _rmFb = getRawMatCostPerUnit(pb, uom);
         _tqCostPU = _rmFb ? _rmFb.cost : 0;
       }
@@ -1459,6 +1469,15 @@ function getItemUnitCost(item, bomIdx) {
             ? (parseFloat(dims.L)/1000)*(parseFloat(dims.W)/1000)*uc*waste
             : vol * density * uc * waste;
         }
+      } else if (/^m2$/i.test(uom)) {
+        const _T2 = parseFloat((rm.dims||{}).T) || 0;
+        const _nd2 = Object.assign({}, rm.dims||{}, {L:'1000', W:'1000'}, _T2 ? {T:String(_T2)} : {});
+        const _v2  = calcRawMatVolume('sheet', _nd2);
+        _tqCostPU2 = rm.costUnit === 'm2' ? uc : _v2 * density * uc * waste;
+      } else if (/^m$/i.test(uom)) {
+        const _nd2 = Object.assign({}, rm.dims||{}, {L:'1000'});
+        const _v2  = calcRawMatVolume(rm.form||'bar_round', _nd2);
+        _tqCostPU2 = rm.costUnit === 'm' ? uc : _v2 * density * uc * waste;
       } else {
         const _rmFb2 = getRawMatCostPerUnit(pb, uom);
         _tqCostPU2 = _rmFb2 ? _rmFb2.cost : 0;
@@ -1531,8 +1550,10 @@ function computeTreeCosts() {
   ownExtCosts    = new Array(n).fill(0);
   for (let i = 0; i < n; i++) {
     if (isRowExcluded(i)) { unitCosts[i] = 0; itemSetupCost[i] = 0; continue; }
-    unitCosts[i]    = getItemUnitCost(BOM[i], i);
-    itemSetupCost[i] = getItemSetupCost(BOM[i]);
+    try { unitCosts[i]    = getItemUnitCost(BOM[i], i) || 0; }
+    catch(e) { unitCosts[i] = 0; console.warn('[unitCost idx'+i+']', e); }
+    try { itemSetupCost[i] = getItemSetupCost(BOM[i]) || 0; }
+    catch(e) { itemSetupCost[i] = 0; }
   }
   // Bottom-up: tree cost = own extended cost + children tree costs
   for (let i = n - 1; i >= 0; i--) {
@@ -4015,6 +4036,9 @@ async function switchTab(tab){
   if(tabAll) tabAll.className='pv-tab'+(tab==='all'?' on':'');
   const body=document.getElementById('pvBody');
   if(!body) return;
+  // Dispose any running Three.js renderer before clearing DOM
+  const _prevCanvas = document.getElementById('stepViewerCanvas');
+  if (_prevCanvas && typeof _prevCanvas._stepCleanup === 'function') _prevCanvas._stepCleanup();
   body.innerHTML='';
   if(!curItem) return;
   if(tab==='drawing'){
@@ -4069,16 +4093,20 @@ async function switchTab(tab){
 
       // Auto-viewer area
       let viewerHtml = '';
+      let _stpFileForRender = null;
       if (canFetch && stpFile) {
+        _stpFileForRender = stpFile;
         const stpEsc = stpFile.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
         viewerHtml =
-          '<div id="cadViewerBox" style="background:rgba(66,153,225,.07);border:1px solid rgba(66,153,225,.3);border-radius:7px;padding:12px;margin-bottom:8px">'+
-          '<div style="font-size:12px;font-weight:600;color:var(--accent2);margin-bottom:8px">🔩 תצוגה מקדימה: '+firstName+'</div>'+
-          '<div style="font-size:11px;color:var(--text2);margin-bottom:10px">קבצי STEP מוצגים בתוכנת CAD המותקנת במחשב. לחץ <b>פתח/הורד</b> כדי לצפות במודל.</div>'+
-          '<div style="display:flex;gap:8px;flex-wrap:wrap">'+
-          '<button onclick="autoOpenCad(\''+stpEsc+'\')" style="padding:6px 16px;background:var(--accent);color:#fff;border:none;border-radius:5px;cursor:pointer;font-size:12px;font-weight:600">🔩 פתח STEP בתוכנת CAD</button>'+
+          '<div id="cadViewerBox" style="background:rgba(66,153,225,.07);border:1px solid rgba(66,153,225,.3);border-radius:7px;padding:8px;margin-bottom:8px">'+
+          '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">'+
+          '<div style="font-size:12px;font-weight:600;color:var(--accent2)">📐 '+firstName+'</div>'+
+          '<button onclick="downloadCadFile(\''+stpEsc+'\')" style="padding:3px 10px;background:var(--surface2);color:var(--text2);border:1px solid var(--border);border-radius:4px;cursor:pointer;font-size:11px">⬇ הורד</button>'+
           '</div>'+
-          '<div id="cadViewerMsg" style="font-size:10px;color:var(--text3);margin-top:6px"></div>'+
+          '<div id="stepViewerCanvas" style="width:100%;height:260px;border-radius:5px;overflow:hidden;cursor:grab;background:rgba(0,0,0,.4);user-select:none">'+
+          '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text3);font-size:12px">⏳ טוען תצוגה תלת-מימדית...</div>'+
+          '</div>'+
+          '<div style="font-size:10px;color:var(--text3);margin-top:4px;text-align:center">🖱 גרור לסיבוב · גלגלת לזום</div>'+
           '</div>';
       } else if (!canFetch) {
         viewerHtml = '<div style="padding:8px 12px;background:rgba(255,165,0,.1);border:1px solid rgba(255,165,0,.4);border-radius:5px;font-size:11px;color:var(--warn);margin-bottom:8px">📂 לחץ <b>Select Folder</b> או התחבר ל-OneDrive כדי לפתוח קבצים</div>';
@@ -4088,12 +4116,26 @@ async function switchTab(tab){
         viewerHtml+
         fileRows+
         '</div>';
+
+      // Kick off async 3D render after DOM is ready
+      if (_stpFileForRender) {
+        setTimeout(function(){ _render3DSTEP(_stpFileForRender); }, 20);
+      }
     }
   } else {
     const files=[];
-    const pdfs=Array.isArray(curItem.pdf)?curItem.pdf:(curItem.pdf?[curItem.pdf]:[]);
-    pdfs.forEach(function(f){ files.push({icon:'📄',file:f,color:'#e04040',isPdf:true}); });
-    (curItem.cads||[]).forEach(function(f){ files.push({icon:'🔩',file:f,color:'#4090e0',isPdf:false}); });
+    // Use pdfs array (includes PL, ECR, drawing); fall back to single pdf field
+    const allPdfs = Array.isArray(curItem.pdfs) && curItem.pdfs.length
+      ? curItem.pdfs
+      : (curItem.pdf ? [curItem.pdf] : []);
+    allPdfs.forEach(function(f){
+      const base = f.split(/[\\/]/).pop().toUpperCase();
+      let icon='📄', color='#e04040';
+      if (/^PL/i.test(base))  { icon='📋'; color='#d97706'; }
+      else if (/^ECR/i.test(base)) { icon='🔄'; color='#7c3aed'; }
+      files.push({icon,file:f,color,isPdf:true});
+    });
+    (curItem.cads||[]).forEach(function(f){ files.push({icon:'📐',file:f,color:'#4090e0',isPdf:false}); });
     if(!files.length){
       body.innerHTML='<div class="no-files">No files associated with this item.</div>';
     } else {
@@ -4149,6 +4191,145 @@ async function autoOpenCad(relPath) {
   } catch(e) {
     if (msg) msg.textContent = '⚠ שגיאה: ' + e.message;
     alert('שגיאה בטעינת קובץ: ' + e.message + '\n\nודא כי בחרת תיקיית פרויקט (Select Folder) או מחובר ל-OneDrive.');
+  }
+}
+
+// ─── _loadScript — lazy CDN loader ───────────────────────────────────────────
+function _loadScript(src, globalKey) {
+  return new Promise(function(resolve, reject) {
+    if (globalKey && window[globalKey]) return resolve();
+    // Check if already loading
+    const existing = document.querySelector('script[data-key="'+globalKey+'"]');
+    if (existing) {
+      // Wait for it to finish
+      existing.addEventListener('load', resolve);
+      existing.addEventListener('error', function(){ reject(new Error('Failed: '+src)); });
+      return;
+    }
+    const s = document.createElement('script');
+    s.src = src;
+    if (globalKey) s.dataset.key = globalKey;
+    s.onload = function(){ resolve(); };
+    s.onerror = function(){ reject(new Error('Failed to load: ' + src)); };
+    document.head.appendChild(s);
+  });
+}
+
+// ─── _render3DSTEP — inline Three.js STEP viewer ─────────────────────────────
+async function _render3DSTEP(relPath) {
+  const ctr = document.getElementById('stepViewerCanvas');
+  if (!ctr) return;
+
+  function showMsg(html) {
+    if (ctr) ctr.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text2);font-size:12px;text-align:center;padding:12px">'+html+'</div>';
+  }
+
+  try {
+    showMsg('⏳ טוען Three.js...');
+    await _loadScript('https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js', 'THREE');
+    const THREE = window.THREE;
+
+    showMsg('⏳ טוען מנוע STEP...');
+    await _loadScript('https://cdn.jsdelivr.net/npm/occt-import-js@0.0.22/dist/occt-import-js.js', 'occtimportjs');
+
+    showMsg('⏳ טוען קובץ...');
+    const ab = await getFileBuffer(relPath);
+
+    showMsg('⏳ מפענח קובץ STEP...');
+    const occt = await window.occtimportjs();
+    const fileBuffer = new Uint8Array(ab);
+    const result = occt.ReadStepFile(fileBuffer, null);
+
+    if (!result || !result.meshes || result.meshes.length === 0) {
+      showMsg('⚠ לא ניתן לפרסר את קובץ STEP'); return;
+    }
+
+    // Setup renderer
+    const W = ctr.clientWidth || 380;
+    const H = ctr.clientHeight || 260;
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(W, H);
+    renderer.setClearColor(0x1a1d27);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    ctr.innerHTML = '';
+    renderer.domElement.style.width = '100%';
+    renderer.domElement.style.height = '100%';
+    renderer.domElement.style.cursor = 'grab';
+    ctr.appendChild(renderer.domElement);
+
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(45, W / H, 0.001, 1e7);
+    scene.add(new THREE.AmbientLight(0xffffff, 0.45));
+    const dl1 = new THREE.DirectionalLight(0xffffff, 0.85); dl1.position.set(1, 2, 1.5); scene.add(dl1);
+    const dl2 = new THREE.DirectionalLight(0x9999ff, 0.25); dl2.position.set(-1, -1, -1); scene.add(dl2);
+
+    // Build mesh group
+    const group = new THREE.Group();
+    const defMat = new THREE.MeshPhongMaterial({ color: 0x4f8ef7, specular: 0x444444, shininess: 70, side: THREE.DoubleSide });
+    result.meshes.forEach(function(m) {
+      if (!m.index_buffer || !m.coordinate_buffer) return;
+      const geom = new THREE.BufferGeometry();
+      geom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(m.coordinate_buffer), 3));
+      geom.setIndex(new THREE.BufferAttribute(new Uint32Array(m.index_buffer), 1));
+      if (m.normal_buffer && m.normal_buffer.length) {
+        geom.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(m.normal_buffer), 3));
+      } else { geom.computeVertexNormals(); }
+      const mat = (m.color)
+        ? new THREE.MeshPhongMaterial({ color: new THREE.Color(m.color[0], m.color[1], m.color[2]), specular: 0x333333, shininess: 60, side: THREE.DoubleSide })
+        : defMat;
+      group.add(new THREE.Mesh(geom, mat));
+    });
+    scene.add(group);
+
+    // Fit camera
+    const box = new THREE.Box3().setFromObject(group);
+    const center = box.getCenter(new THREE.Vector3());
+    const size3 = box.getSize(new THREE.Vector3());
+    const maxDim = Math.max(size3.x, size3.y, size3.z) || 1;
+    let sph = { theta: 0.6, phi: 1.1, r: maxDim * 2.2 };
+
+    function applySph() {
+      camera.position.set(
+        center.x + sph.r * Math.sin(sph.phi) * Math.sin(sph.theta),
+        center.y + sph.r * Math.cos(sph.phi),
+        center.z + sph.r * Math.sin(sph.phi) * Math.cos(sph.theta)
+      );
+      camera.lookAt(center);
+    }
+    applySph();
+
+    // Orbit mouse controls
+    let drag = false, lx = 0, ly = 0;
+    renderer.domElement.addEventListener('mousedown', function(e){ drag=true; lx=e.clientX; ly=e.clientY; renderer.domElement.style.cursor='grabbing'; });
+    window.addEventListener('mouseup', function(){ drag=false; renderer.domElement.style.cursor='grab'; });
+    renderer.domElement.addEventListener('mousemove', function(e){
+      if(!drag) return;
+      sph.theta -= (e.clientX-lx)*0.007; sph.phi = Math.max(0.05, Math.min(Math.PI-0.05, sph.phi+(e.clientY-ly)*0.007));
+      lx=e.clientX; ly=e.clientY; applySph();
+    });
+    renderer.domElement.addEventListener('wheel', function(e){
+      sph.r = Math.max(maxDim*0.3, sph.r*(1+e.deltaY*0.001));
+      applySph(); e.preventDefault();
+    }, {passive:false});
+    // Touch support
+    let tLast = null;
+    renderer.domElement.addEventListener('touchstart', function(e){ if(e.touches.length===1){ drag=true; lx=e.touches[0].clientX; ly=e.touches[0].clientY; } e.preventDefault(); }, {passive:false});
+    renderer.domElement.addEventListener('touchend', function(){ drag=false; }, {passive:false});
+    renderer.domElement.addEventListener('touchmove', function(e){
+      if(!drag||e.touches.length!==1) return;
+      sph.theta -= (e.touches[0].clientX-lx)*0.007; sph.phi = Math.max(0.05, Math.min(Math.PI-0.05, sph.phi+(e.touches[0].clientY-ly)*0.007));
+      lx=e.touches[0].clientX; ly=e.touches[0].clientY; applySph(); e.preventDefault();
+    }, {passive:false});
+
+    let animId;
+    function animate(){ animId=requestAnimationFrame(animate); renderer.render(scene, camera); }
+    animate();
+
+    ctr._stepCleanup = function(){ cancelAnimationFrame(animId); renderer.dispose(); };
+
+  } catch(e) {
+    showMsg('⚠ שגיאה:<br><span style="color:var(--danger)">'+e.message+'</span>');
+    console.error('[_render3DSTEP]', e);
   }
 }
 
@@ -4471,7 +4652,7 @@ function _populateBuyTab(force){
       '<td style="padding:4px 8px;color:var(--text2)">'+r.desc+'</td>'+
       '<td style="padding:4px 8px;text-align:right;font-weight:600">'+r.totalQty.toLocaleString()+'</td>'+
       '<td style="padding:4px 8px;color:var(--text3)">'+r.uom+'</td>'+
-      '<td style="padding:4px 8px;text-align:right"><input type="number" id="btprice-'+bid+'" value="'+(price||'')+'" min="0" step="0.01" placeholder="מחיר" '+
+      '<td style="padding:4px 8px;text-align:right"><input type="number" id="btprice-'+bid+'" data-bid="'+bid+'" value="'+(price||'')+'" min="0" step="0.01" placeholder="מחיר" '+
         'style="width:80px;padding:2px 4px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px;font-size:11px;text-align:right" '+
         'onchange="_saveTabBuyPrice(this.dataset.bid)"></td>'+
       '<td style="padding:4px 8px"><select id="btcur-'+bid+'" data-bid="'+bid+'" style="padding:2px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px;font-size:11px" '+
@@ -7379,6 +7560,74 @@ async function exportBomExcel() {
     };
   }
 
+  // ── Sheet 0: סיכום מנהלים (Executive Summary) ─────────────────────────────
+  const _sumMfg   = Math.round((treeMfgCost[0]   || 0) * pQty * 100) / 100;
+  const _sumCots  = Math.round((treeCotsCost[0]  || 0) * pQty * 100) / 100;
+  const _sumRawm  = Math.round((treeRawMatCost[0]|| 0) * pQty * 100) / 100;
+  const _sumSetup = Math.round((cumSetupCosts[0] || 0) * 100) / 100;
+  const _sumHours = Math.round((cumHours[0] || 0) * pQty * 100) / 100;
+  const _sumTotal = Math.round((_sumMfg + _sumCots + _sumRawm + _sumSetup) * 100) / 100;
+  const _topItems5 = [];
+  _xlsVisible.forEach(function(idx) {
+    const item = BOM[idx];
+    const ownCost = Math.round((ownExtCosts[idx]||0) * pQty * 100) / 100;
+    _topItems5.push({pn:item.pn||item.pb||'', desc:item.desc||'', cost:ownCost});
+  });
+  _topItems5.sort(function(a,b){ return b.cost - a.cost; });
+  const _top5 = _topItems5.slice(0, 5);
+
+  const ws0 = wb.addWorksheet('סיכום מנהלים', {views:[{rightToLeft:true}]});
+  ws0.columns = [{key:'a',width:32},{key:'b',width:22},{key:'c',width:28}];
+  const _w0Title = function(txt, argb) {
+    const rr = ws0.addRow([txt]);
+    ws0.mergeCells(rr.number, 1, rr.number, 3);
+    const c = rr.getCell(1);
+    c.value = txt;
+    c.font = {bold:true, size:13, color:{argb:'FFFFFFFF'}};
+    c.fill = {type:'pattern', pattern:'solid', fgColor:{argb:argb||'FF2D4A8A'}};
+    c.alignment = {horizontal:'right', vertical:'middle'};
+    rr.height = 24;
+  };
+  const _w0Row = function(label, value, bold, bgArgb) {
+    const rr = ws0.addRow([label, value, '']);
+    rr.getCell(1).alignment = {horizontal:'right'};
+    rr.getCell(2).alignment = {horizontal:'right'};
+    if (typeof value === 'number') rr.getCell(2).numFmt = '#,##0.00';
+    if (bold) { rr.getCell(1).font={bold:true}; rr.getCell(2).font={bold:true}; }
+    if (bgArgb) rr.eachCell(function(c){ c.fill={type:'pattern',pattern:'solid',fgColor:{argb:bgArgb}}; });
+  };
+
+  _w0Title('סיכום מנהלים — ZMAG BOM', 'FF1E3A5F');
+  ws0.addRow([]);
+  _w0Row('פרויקט', 'ZMAG 6910W021-001 Rev B');
+  _w0Row('תאריך ייצוא', new Date().toLocaleDateString('he-IL'));
+  _w0Row('כמות ערכות', pQty);
+  _w0Row('פריטים מוצגים', _xlsVisible.size);
+  ws0.addRow([]);
+  _w0Title('פירוט עלויות', 'FF2D4A8A');
+  _w0Row('🔧 ייצור (שעות עבודה) ₪', _sumMfg, false, 'FFDBEAFE');
+  _w0Row('🛒 רכש (Buy items) ₪',     _sumCots, false, 'FFDCFCE7');
+  _w0Row('🧱 חומרי גלם (ח"ג) ₪',    _sumRawm, false, 'FFEDE9FE');
+  _w0Row('⚙ סטאפ תהליכים ₪',        _sumSetup, false, 'FFFEF3C7');
+  _w0Row('💰 סה"כ עלות פרויקט ₪',   _sumTotal, true, 'FF1E3A5F');
+  { const _gtRow = ws0.getRow(ws0.rowCount);
+    _gtRow.eachCell(function(c){ c.font={bold:true,color:{argb:'FFFFFFFF'}}; c.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FF1E3A5F'}}; }); }
+  if (pQty > 1) _w0Row('מחיר לערכה בודדת ₪', Math.round(_sumTotal / pQty * 100) / 100, false, 'FFEFF6FF');
+  ws0.addRow([]);
+  _w0Title('שעות עבודה', 'FF374151');
+  _w0Row('שעות כוללות (שע"א)', _sumHours);
+  ws0.addRow([]);
+  if (_top5.length > 0) {
+    _w0Title('5 הפריטים יקרי הערך', 'FF374151');
+    const _t5h = ws0.addRow(['PN', 'תיאור', 'עלות ₪']);
+    _t5h.eachCell(function(c){ c.font={bold:true,color:{argb:'FFFFFFFF'}}; c.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FF6B7280'}}; });
+    _top5.forEach(function(it) {
+      const rr = ws0.addRow([it.pn, it.desc, it.cost]);
+      rr.getCell(3).alignment = {horizontal:'right'};
+      rr.getCell(3).numFmt = '#,##0.00';
+    });
+  }
+
   // ── Sheet 1: Full BOM with all costs ──────────────────────────────────────
   const ws1 = wb.addWorksheet('BOM', {views:[{rightToLeft:true}]});
   ws1.columns = COL_DEFS;
@@ -7396,10 +7645,14 @@ async function exportBomExcel() {
     }
   });
 
+  let _ws1DataRow = 2;
   BOM.forEach(function(item, idx) {
     if (!_xlsVisible.has(idx)) return;
     const d = getRowData(item, idx);
     const r = ws1.addRow(d);
+    // pcost (col 17 = Q) formula: lcost(M)+bcost(N)+ucost(O)+tcost(P)
+    r.getCell(17).value = {formula:'=M'+_ws1DataRow+'+N'+_ws1DataRow+'+O'+_ws1DataRow+'+P'+_ws1DataRow, result:d.pcost};
+    _ws1DataRow++;
     // Zebra + type colour
     const bgArgb = idx % 2 === 0
       ? (TYPE_COLOR[item.type] || TYPE_COLOR['default'])
@@ -7448,6 +7701,7 @@ async function exportBomExcel() {
   ws2.getRow(1).height = 20;
 
   let _h2RowNum = 0;
+  let _ws2DataRow = 2;
   BOM.forEach(function(item, idx) {
     if (!_xlsVisible.has(idx)) return;
     _h2RowNum++;
@@ -7472,6 +7726,9 @@ async function exportBomExcel() {
       tcost:  d.tcost,
       pcost:  d.pcost,
     });
+    // pcost (col 16 = P) formula: lcost(L)+bcost(M)+ucost(N)+tcost(O)
+    r.getCell(16).value = {formula:'=L'+_ws2DataRow+'+M'+_ws2DataRow+'+N'+_ws2DataRow+'+O'+_ws2DataRow, result:d.pcost};
+    _ws2DataRow++;
     // Row grouping by level (Excel outline)
     if (item.lv > 0) {
       r.outlineLevel = Math.min(item.lv, 7);
@@ -7538,6 +7795,7 @@ async function exportBomExcel() {
       .sort(function(a,b){ return (a.family+a.grade).localeCompare(b.family+b.grade); });
 
     let rm3TotalCost = 0;
+    let rm3DataRow = 2;
     rmEntries.forEach(function(entry, ri) {
       const fd  = MATERIAL_DB[entry.family] || {};
       const gd  = (fd.grades||[]).find(function(g){return g.id===entry.grade;})||{};
@@ -7559,6 +7817,9 @@ async function exportBomExcel() {
         priceKg:  priceKg,
         totalCost:totalCost,
       });
+      // totalCost (col 8, H) = massKg (col 6, F) × priceKg (col 7, G) — user enters G
+      r3.getCell(8).value = {formula:'=F'+rm3DataRow+'*G'+rm3DataRow, result:totalCost};
+      rm3DataRow++;
       const bg3 = ri % 2 === 0 ? 'FFEDE9FE' : 'FFF5F3FF';
       r3.eachCell(function(cell){ cell.fill = {type:'pattern',pattern:'solid',fgColor:{argb:bg3}}; });
       for (let c = 4; c <= RM_COLS.length; c++) {
@@ -7566,9 +7827,10 @@ async function exportBomExcel() {
         r3.getCell(c).numFmt = '#,##0.00';
       }
     });
-    // Total row
-    const rmTotal = ws3.addRow({family:'סה"כ', totalCost: Math.round(rm3TotalCost*100)/100});
+    // Total row with SUM formula
+    const rmTotal = ws3.addRow({family:'סה"כ'});
     rmTotal.getCell(1).font = {bold:true};
+    rmTotal.getCell(RM_COLS.length).value = {formula:'=SUM(H2:H'+(rm3DataRow-1)+')', result:Math.round(rm3TotalCost*100)/100};
     rmTotal.getCell(RM_COLS.length).numFmt = '#,##0.00';
     rmTotal.getCell(RM_COLS.length).alignment = {horizontal:'right'};
     rmTotal.getCell(RM_COLS.length).font = {bold:true};
@@ -7615,6 +7877,7 @@ async function exportBomExcel() {
       .sort(function(a,b){ return (a.pb||a.pn).localeCompare(b.pb||b.pn); });
 
     let buy4TotalCost = 0;
+    let buy4DataRow = 2;
     buyList4.forEach(function(br, bi) {
       const ent = getPriceEntry(br.pb);
       const unitPriceILS = ent ? toILS(ent.p, ent.currency||'USD') : 0;
@@ -7633,6 +7896,9 @@ async function exportBomExcel() {
         currency:  ent ? (ent.currency||'USD') : '',
         totalCost: totalCost4,
       });
+      // totalCost (col 10, J) = qty (col 7, G) × unitPrice (col 8, H) — user enters H
+      r4.getCell(10).value = {formula:'=G'+buy4DataRow+'*H'+buy4DataRow, result:totalCost4};
+      buy4DataRow++;
       const bg4 = bi % 2 === 0 ? 'FFD1FAE5' : 'FFF0FDF4';
       r4.eachCell(function(cell){ cell.fill = {type:'pattern',pattern:'solid',fgColor:{argb:bg4}}; });
       for (let c = 7; c <= BUY_COLS.length; c++) {
@@ -7640,9 +7906,10 @@ async function exportBomExcel() {
         r4.getCell(c).numFmt = '#,##0.00';
       }
     });
-    // Total row
-    const buyTotal4 = ws4.addRow({pb:'סה"כ', totalCost: Math.round(buy4TotalCost*100)/100});
+    // Total row with SUM formula
+    const buyTotal4 = ws4.addRow({pb:'סה"כ'});
     buyTotal4.getCell(1).font = {bold:true};
+    buyTotal4.getCell(BUY_COLS.length).value = {formula:'=SUM(J2:J'+(buy4DataRow-1)+')', result:Math.round(buy4TotalCost*100)/100};
     buyTotal4.getCell(BUY_COLS.length).numFmt = '#,##0.00';
     buyTotal4.getCell(BUY_COLS.length).alignment = {horizontal:'right'};
     buyTotal4.getCell(BUY_COLS.length).font = {bold:true};
@@ -7719,6 +7986,7 @@ async function exportBomExcel() {
       .sort(function(a,b){ return (a.label).localeCompare(b.label); });
 
     let lab5TotalCost = 0;
+    let lab5DataRow = 2;
     procRows5.forEach(function(pr, pi) {
       lab5TotalCost += pr.totalCost;
       const r5 = ws5.addRow({
@@ -7731,6 +7999,9 @@ async function exportBomExcel() {
         cycleH:      Math.round(pr.cycleH*100)/100,
         totalCost:   Math.round(pr.totalCost*100)/100,
       });
+      // totalCost (col 8, H) = (setupH(F) + cycleH(G)) × costPerUnit(C) — user enters C
+      r5.getCell(8).value = {formula:'=(F'+lab5DataRow+'+G'+lab5DataRow+')*C'+lab5DataRow, result:Math.round(pr.totalCost*100)/100};
+      lab5DataRow++;
       const bg5 = pi % 2 === 0 ? 'FFFEF3C7' : 'FFFFFBEB';
       r5.eachCell(function(cell){ cell.fill = {type:'pattern',pattern:'solid',fgColor:{argb:bg5}}; });
       for (let c = 3; c <= LAB_COLS.length; c++) {
@@ -7738,9 +8009,10 @@ async function exportBomExcel() {
         r5.getCell(c).numFmt = '#,##0.00';
       }
     });
-    // Total row
-    const labTotal5 = ws5.addRow({procLabel:'סה"כ', totalCost: Math.round(lab5TotalCost*100)/100});
+    // Total row with SUM formula
+    const labTotal5 = ws5.addRow({procLabel:'סה"כ'});
     labTotal5.getCell(1).font = {bold:true};
+    labTotal5.getCell(LAB_COLS.length).value = {formula:'=SUM(H2:H'+(lab5DataRow-1)+')', result:Math.round(lab5TotalCost*100)/100};
     labTotal5.getCell(LAB_COLS.length).numFmt = '#,##0.00';
     labTotal5.getCell(LAB_COLS.length).alignment = {horizontal:'right'};
     labTotal5.getCell(LAB_COLS.length).font = {bold:true};
