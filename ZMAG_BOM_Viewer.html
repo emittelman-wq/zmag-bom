@@ -677,6 +677,7 @@ let cumSetupCosts = []; // cumulative setup costs for subtree
 let treeMfgCost  = []; // cumulative manufacturing (ELTDesign) cost × tq in subtree
 let treeCotsCost = []; // cumulative COTS buy cost × tq in subtree
 let treeRawMatCost = []; // cumulative raw-material buy cost × tq in subtree
+let ownExtCosts    = []; // own-row extended cost: unitCosts[i] × tq (no children)
 let curTab = 'drawing';
 let curItem = null;
 let searchTerm = '';
@@ -755,6 +756,7 @@ const COLS = [
   {id:'cycleH',label:'⏱ ייצור (עץ)',  w:80,  sort:false},
   {id:'cumCH', label:'⏱ כולל h×ערכות',w:90,  sort:false},
   {id:'totalH',label:'⏱ h×ערכות',    w:80,  sort:false},
+  {id:'rowcost',label:'🔧 ייצור שורה',w:90,  sort:false},
   {id:'lcost', label:'🔧 ייצור (עץ)', w:90,  sort:false},
   {id:'bcost', label:'🛒 COTS (עץ)',   w:85,  sort:false},
   {id:'ucost', label:'🧱 ח"ג (עץ)',   w:85,  sort:false},
@@ -985,6 +987,15 @@ function _populateMatFamTab() {
     el.innerHTML = '<div style="padding:40px;text-align:center;color:var(--text3);font-size:13px">שגיאה בטעינת נתוני חומרים — רענן את הדף</div>';
     return;
   }
+
+  // Filter out pure-catalog generic entries (no BOM rows, no saved price)
+  famMap.forEach(function(entry, key) {
+    if ((entry.grade||'').toLowerCase() === 'generic' &&
+        entry.bomRows === 0 &&
+        !matFamPrices[key]) {
+      famMap.delete(key);
+    }
+  });
 
   // Sort: BOM entries (have mass) first by mass desc, then catalog entries alphabetically
   let rows;
@@ -1501,6 +1512,7 @@ function computeTreeCosts() {
   treeMfgCost    = new Array(n).fill(0);
   treeCotsCost   = new Array(n).fill(0);
   treeRawMatCost = new Array(n).fill(0);
+  ownExtCosts    = new Array(n).fill(0);
   for (let i = 0; i < n; i++) {
     if (isRowExcluded(i)) { unitCosts[i] = 0; itemSetupCost[i] = 0; continue; }
     unitCosts[i]    = getItemUnitCost(BOM[i], i);
@@ -1533,6 +1545,7 @@ function computeTreeCosts() {
     treeMfgCost[i]   = mfg;
     treeCotsCost[i]  = cots;
     treeRawMatCost[i]= rawm;
+    ownExtCosts[i]   = ownExt;
   }
 }
 function fmtC(n) {
@@ -1763,6 +1776,12 @@ function buildTable(){
     tdTotH.dataset.totalHIdx = idx;
     tdTotH.style.cssText = 'text-align:right;font-size:11px;color:var(--text2)';
     tr.appendChild(tdTotH);
+    // 🔧 Own-row cost cell (unitCost × tq, no children)
+    const tdRC = document.createElement('td');
+    tdRC.className = 'cost-val cost-mfg';
+    tdRC.dataset.ownCostIdx = idx;
+    tdRC.title = 'עלות ייצור השורה עצמה (ללא ילדים)';
+    tr.appendChild(tdRC);
     // 🔧 Labor cost cell — ELTDesign process cost × tq
     const tdLC = document.createElement('td');
     tdLC.className = 'cost-val cost-mfg';
@@ -2321,6 +2340,8 @@ const MATERIAL_DB = {
   plastic_pom:  {label:'POM/דלרין',    density:1410, color:'#9f7aea', grades:[{id:'generic',label:'כללי',density:1410}]},
   plastic_uhmw: {label:'UHMW-PE',      density:930,  color:'#9f7aea', grades:[{id:'generic',label:'כללי',density:930}]},
   rubber:       {label:'גומי',          density:1200, color:'#48bb78', grades:[{id:'generic',label:'כללי',density:1200}]},
+  ropet510:     {label:'ROPET510',      density: 970, color:'#f6ad55',
+    grades:[{id:'ROPET510',label:'ROPET510',density:970}]},
 };
 const MATERIAL_FORMS = [
   {id:'sheet',      label:'פח / לוח',              dims:[{k:'L',u:'mm',ph:'אורך'},{k:'W',u:'mm',ph:'רוחב'},{k:'T',u:'mm',ph:'עובי'}]},
@@ -4179,6 +4200,12 @@ function refreshCostCells(){
   // Selectors must use the hyphenated form.
   const pQty = projectQty || 1;
 
+  // rowcost → own-row extended cost × projectQty (no children)
+  document.querySelectorAll('[data-own-cost-idx]').forEach(function(td){
+    const i=parseInt(td.dataset.ownCostIdx);
+    const v=(ownExtCosts[i]||0)*pQty;
+    td.textContent=v>0?fmtC(v):'—';
+  });
   // lcost → tree manufacturing cost × projectQty
   document.querySelectorAll('[data-labor-idx]').forEach(function(td){
     const i=parseInt(td.dataset.laborIdx);
@@ -7344,10 +7371,17 @@ async function exportBomExcel() {
   // Type colour palette
   const TYPE_COLOR = {ELTDesign:'FFDBEAFE', Buy:'FFDCFCE7', 'default':'FFFFFFFF'};
 
+  // Build set of BOM-visible rows (respects ALL active filters: search, level, type, disabled)
+  const _xlsVisible = new Set();
   BOM.forEach(function(item, idx) {
-    // Apply same filters as the BOM view: exclude disabled rows and rows above maxLevel
-    if (isRowExcluded(idx)) return;
-    if (item.lv > maxLevel) return;
+    const tr = rows[idx];
+    if (tr && !tr.classList.contains('hid') && !tr.classList.contains('row-disabled') && !isRowExcluded(idx)) {
+      _xlsVisible.add(idx);
+    }
+  });
+
+  BOM.forEach(function(item, idx) {
+    if (!_xlsVisible.has(idx)) return;
     const d = getRowData(item, idx);
     const r = ws1.addRow(d);
     // Zebra + type colour
@@ -7371,8 +7405,8 @@ async function exportBomExcel() {
 
   // ── Sheet 2: Hierarchy view with outline grouping ─────────────────────────
   const ws2 = wb.addWorksheet('היררכיה', {views:[{rightToLeft:true}]});
-  // Hierarchy sheet: Description with indent + subset of columns
   const H_COLS = [
+    {header:'#',            key:'row',   width:6},
     {header:'Level',        key:'lv',    width:7},
     {header:'PN',           key:'pn',    width:24},
     {header:'Description',  key:'desc',  width:45},
@@ -7382,10 +7416,11 @@ async function exportBomExcel() {
     {header:'⚙ Setup (h)', key:'setupH',width:13},
     {header:'⏱ Cycle (h)', key:'cycleH',width:13},
     {header:'⏱ Tree (h)',  key:'cumCH', width:13},
+    {header:'🔧 שורה ₪',  key:'rowcost',width:13},
     {header:'🔧 Labor ₪',  key:'lcost', width:14},
     {header:'🛒 Buy ₪',    key:'bcost', width:14},
-    {header:'💰 Unit ₪',   key:'ucost', width:14},
-    {header:'🌳 Tree ₪',   key:'tcost', width:14},
+    {header:'💰 ח"ג ₪',   key:'ucost', width:14},
+    {header:'⚙ Setup ₪',  key:'tcost', width:14},
     {header:'🌳 Project ₪',key:'pcost', width:15},
   ];
   ws2.columns = H_COLS;
@@ -7396,12 +7431,15 @@ async function exportBomExcel() {
   });
   ws2.getRow(1).height = 20;
 
+  let _h2RowNum = 0;
   BOM.forEach(function(item, idx) {
-    if (isRowExcluded(idx)) return;
-    if (item.lv > maxLevel) return;
+    if (!_xlsVisible.has(idx)) return;
+    _h2RowNum++;
     const d = getRowData(item, idx);
+    const ownRow = Math.round((ownExtCosts[idx]||0) * pQty * 100) / 100;
     const indent = '  '.repeat(item.lv);
     const r = ws2.addRow({
+      row:   _h2RowNum,
       lv:    d.lv,
       pn:    d.pn,
       desc:  indent + d.desc,
@@ -7411,6 +7449,7 @@ async function exportBomExcel() {
       setupH: d.setupH,
       cycleH: d.cycleH,
       cumCH:  d.cumCH,
+      rowcost: ownRow,
       lcost:  d.lcost,
       bcost:  d.bcost,
       ucost:  d.ucost,
@@ -7424,8 +7463,8 @@ async function exportBomExcel() {
     // Bold assemblies (items with children)
     const hasKids = idx + 1 < BOM.length && BOM[idx+1].lv > item.lv;
     if (hasKids || item.lv === 0) r.font = {bold:true};
-    // Right-align numeric cols (columns 7-14, 1-based)
-    for (let c = 7; c <= 14; c++) {
+    // Right-align numeric cols (col 8 = setupH … col 16 = pcost)
+    for (let c = 8; c <= H_COLS.length; c++) {
       r.getCell(c).alignment = {horizontal:'right'};
       r.getCell(c).numFmt = '#,##0.00';
     }
@@ -7445,6 +7484,253 @@ async function exportBomExcel() {
   ws2.views = [{state:'frozen', ySplit:1, rightToLeft:true}];
   // Collapse all outline groups by default so top-level is visible
   ws2.properties = ws2.properties || {};
+
+  // ── Sheet 3: ח"ג — Raw Materials pricing summary ─────────────────────────
+  try {
+    const ws3 = wb.addWorksheet('ח"ג', {views:[{rightToLeft:true}]});
+    const RM_COLS = [
+      {header:'משפחה',         key:'family',   width:18},
+      {header:'מאפיין',        key:'grade',    width:16},
+      {header:'צורה',          key:'form',     width:12},
+      {header:'צפיפות (g/cc)', key:'density',  width:16},
+      {header:'שורות BOM',     key:'bomRows',  width:12},
+      {header:'מסה כוללת (kg)',key:'massKg',   width:16},
+      {header:'מחיר ₪/ק"ג',   key:'priceKg',  width:14},
+      {header:'עלות כוללת ₪',  key:'totalCost',width:16},
+    ];
+    ws3.columns = RM_COLS;
+    ws3.getRow(1).eachCell(function(cell) {
+      cell.font  = {bold:true, color:{argb:'FFFFFFFF'}};
+      cell.fill  = {type:'pattern', pattern:'solid', fgColor:{argb:'FF7C3AED'}};
+      cell.alignment = {horizontal:'center', vertical:'middle'};
+    });
+    ws3.getRow(1).height = 20;
+
+    const rm3Map = _buildMatFamMap();
+    // Add matFamPrices-only entries not in BOM
+    Object.keys(matFamPrices).forEach(function(key) {
+      if (rm3Map.has(key)) return;
+      const parts = key.split('||');
+      const fam = parts[0], grade = parts[1]||'generic', form = parts[2]||'sheet';
+      const fd = MATERIAL_DB[fam]||{};
+      const gd = (fd.grades||[]).find(function(g){return g.id===grade;})||{};
+      rm3Map.set(key, {key:key, family:fam, grade:grade, form:form,
+        density:gd.density||fd.density||7850, totalMass:0, bomRows:0});
+    });
+    const rmEntries = Array.from(rm3Map.values())
+      .filter(function(e){ return e.bomRows > 0 || matFamPrices[e.key]; })
+      .sort(function(a,b){ return (a.family+a.grade).localeCompare(b.family+b.grade); });
+
+    let rm3TotalCost = 0;
+    rmEntries.forEach(function(entry, ri) {
+      const fd  = MATERIAL_DB[entry.family] || {};
+      const gd  = (fd.grades||[]).find(function(g){return g.id===entry.grade;})||{};
+      const famLabel   = fd.label || entry.family;
+      const gradeLabel = gd.label || entry.grade;
+      const formLabel  = entry.form;
+      const densityVal = parseFloat(entry.density) || 0;
+      const massKg     = Math.round(entry.totalMass * 100) / 100;
+      const priceKg    = parseFloat(matFamPrices[entry.key]) || 0;
+      const totalCost  = Math.round(massKg * priceKg * 100) / 100;
+      rm3TotalCost += totalCost;
+      const r3 = ws3.addRow({
+        family:   famLabel,
+        grade:    gradeLabel,
+        form:     formLabel,
+        density:  densityVal,
+        bomRows:  entry.bomRows,
+        massKg:   massKg,
+        priceKg:  priceKg,
+        totalCost:totalCost,
+      });
+      const bg3 = ri % 2 === 0 ? 'FFEDE9FE' : 'FFF5F3FF';
+      r3.eachCell(function(cell){ cell.fill = {type:'pattern',pattern:'solid',fgColor:{argb:bg3}}; });
+      for (let c = 4; c <= RM_COLS.length; c++) {
+        r3.getCell(c).alignment = {horizontal:'right'};
+        r3.getCell(c).numFmt = '#,##0.00';
+      }
+    });
+    // Total row
+    const rmTotal = ws3.addRow({family:'סה"כ', totalCost: Math.round(rm3TotalCost*100)/100});
+    rmTotal.getCell(1).font = {bold:true};
+    rmTotal.getCell(RM_COLS.length).numFmt = '#,##0.00';
+    rmTotal.getCell(RM_COLS.length).alignment = {horizontal:'right'};
+    rmTotal.getCell(RM_COLS.length).font = {bold:true};
+    ws3.autoFilter = {from:{row:1,column:1}, to:{row:1,column:RM_COLS.length}};
+    ws3.views = [{state:'frozen', ySplit:1, rightToLeft:true}];
+  } catch(e3) { console.warn('ח"ג sheet error:', e3); }
+
+  // ── Sheet 4: רכש — Purchasing summary ────────────────────────────────────
+  try {
+    const ws4 = wb.addWorksheet('רכש', {views:[{rightToLeft:true}]});
+    const BUY_COLS = [
+      {header:'PB',            key:'pb',       width:20},
+      {header:'PN',            key:'pn',       width:20},
+      {header:'תיאור',         key:'desc',     width:38},
+      {header:'מאגר',          key:'cat',      width:14},
+      {header:'יצרן',          key:'mf',       width:16},
+      {header:'יח"מ',          key:'uom',      width:8},
+      {header:'כמות (TQ)',     key:'qty',      width:12},
+      {header:'מחיר יחידה ₪', key:'unitPrice',width:15},
+      {header:'מטבע מקורי',   key:'currency', width:12},
+      {header:'עלות כוללת ₪', key:'totalCost',width:15},
+    ];
+    ws4.columns = BUY_COLS;
+    ws4.getRow(1).eachCell(function(cell) {
+      cell.font  = {bold:true, color:{argb:'FFFFFFFF'}};
+      cell.fill  = {type:'pattern', pattern:'solid', fgColor:{argb:'FF059669'}};
+      cell.alignment = {horizontal:'center', vertical:'middle'};
+    });
+    ws4.getRow(1).height = 20;
+
+    // Build fresh buy data
+    const buyMap4 = new Map();
+    BOM.forEach(function(item, idx) {
+      if (item.type !== 'Buy') return;
+      if (!_xlsVisible.has(idx)) return;
+      const key = item.pb || item.pn;
+      if (!buyMap4.has(key)) {
+        buyMap4.set(key, {pb:item.pb||item.pn, pn:item.pn, desc:item.desc,
+          cat:item.cat||'', mf:item.mf||'', uom:item.uom||'', totalQty:0});
+      }
+      buyMap4.get(key).totalQty += (item.tq||0);
+    });
+    const buyList4 = Array.from(buyMap4.values())
+      .sort(function(a,b){ return (a.pb||a.pn).localeCompare(b.pb||b.pn); });
+
+    let buy4TotalCost = 0;
+    buyList4.forEach(function(br, bi) {
+      const ent = getPriceEntry(br.pb);
+      const unitPriceILS = ent ? toILS(ent.p, ent.currency||'USD') : 0;
+      const qty4 = Math.round(br.totalQty * pQty * 100) / 100;
+      const totalCost4 = Math.round(unitPriceILS * qty4 * 100) / 100;
+      buy4TotalCost += totalCost4;
+      const r4 = ws4.addRow({
+        pb:        br.pb,
+        pn:        br.pn,
+        desc:      br.desc,
+        cat:       br.cat,
+        mf:        br.mf,
+        uom:       br.uom,
+        qty:       qty4,
+        unitPrice: Math.round(unitPriceILS*100)/100,
+        currency:  ent ? (ent.currency||'USD') : '',
+        totalCost: totalCost4,
+      });
+      const bg4 = bi % 2 === 0 ? 'FFD1FAE5' : 'FFF0FDF4';
+      r4.eachCell(function(cell){ cell.fill = {type:'pattern',pattern:'solid',fgColor:{argb:bg4}}; });
+      for (let c = 7; c <= BUY_COLS.length; c++) {
+        r4.getCell(c).alignment = {horizontal:'right'};
+        r4.getCell(c).numFmt = '#,##0.00';
+      }
+    });
+    // Total row
+    const buyTotal4 = ws4.addRow({pb:'סה"כ', totalCost: Math.round(buy4TotalCost*100)/100});
+    buyTotal4.getCell(1).font = {bold:true};
+    buyTotal4.getCell(BUY_COLS.length).numFmt = '#,##0.00';
+    buyTotal4.getCell(BUY_COLS.length).alignment = {horizontal:'right'};
+    buyTotal4.getCell(BUY_COLS.length).font = {bold:true};
+    ws4.autoFilter = {from:{row:1,column:1}, to:{row:1,column:BUY_COLS.length}};
+    ws4.views = [{state:'frozen', ySplit:1, rightToLeft:true}];
+  } catch(e4) { console.warn('רכש sheet error:', e4); }
+
+  // ── Sheet 5: עלות ש"ע — Labor cost by process type ────────────────────────
+  try {
+    const ws5 = wb.addWorksheet('עלות ש"ע', {views:[{rightToLeft:true}]});
+    const LAB_COLS = [
+      {header:'סוג תהליך',    key:'procLabel',  width:20},
+      {header:'יח"מ עלות',    key:'costUnit',   width:12},
+      {header:'מחיר/יח"מ ₪', key:'costPerUnit', width:15},
+      {header:'חלקים',        key:'parts',      width:10},
+      {header:'כמות כוללת',   key:'totalQty',   width:14},
+      {header:'שעות סטאפ',    key:'setupH',     width:13},
+      {header:'שעות מחזור',   key:'cycleH',     width:13},
+      {header:'עלות ₪',       key:'totalCost',  width:15},
+    ];
+    ws5.columns = LAB_COLS;
+    ws5.getRow(1).eachCell(function(cell) {
+      cell.font  = {bold:true, color:{argb:'FFFFFFFF'}};
+      cell.fill  = {type:'pattern', pattern:'solid', fgColor:{argb:'FFD97706'}};
+      cell.alignment = {horizontal:'center', vertical:'middle'};
+    });
+    ws5.getRow(1).height = 20;
+
+    // Aggregate per process type across all visible ELTDesign items
+    const procAgg = {}; // key=procType.id → {label,costUnit,costPerUnit,parts:Set,totalQty,setupH,cycleH,totalCost}
+    BOM.forEach(function(item, idx) {
+      if (item.type !== 'ELTDesign') return;
+      if (!_xlsVisible.has(idx)) return;
+      const pb  = item.pb || item.pn;
+      const tq  = item.tq || 0;
+      const procs = (procData[pb] || []).filter(function(p){ return p.type; });
+      procs.forEach(function(p) {
+        const pt = PROC_TYPES.find(function(x){ return x.id === p.type; });
+        if (!pt) return;
+        if (!procAgg[p.type]) {
+          procAgg[p.type] = {
+            label:       pt.label || p.type,
+            costUnit:    pt.costUnit || 'h',
+            costPerUnit: pt.cost || 0,
+            parts:       new Set(),
+            totalQty:    0,
+            setupH:      0,
+            cycleH:      0,
+            totalCost:   0,
+          };
+        }
+        const agg = procAgg[p.type];
+        agg.parts.add(pb);
+        // Qty per project (normalized to costUnit × tq × pQty)
+        const cycleQty  = normProcQty(parseFloat(p.qty)||0, p.unit, agg.costUnit);
+        const setupQty  = normProcQty(parseFloat(p.setup)||0, p.setupUnit||p.unit, agg.costUnit);
+        agg.totalQty  += cycleQty * tq * pQty;
+        // Hours (h): only if unit is time-based
+        const isTime = (p.unit==='h'||p.unit==='hr'||p.unit==='min');
+        if (isTime) {
+          const cycleH = (p.unit==='h'||p.unit==='hr') ? (parseFloat(p.qty)||0) : (parseFloat(p.qty)||0)/60;
+          const setupH = p.setup ? ((p.setupUnit==='h'||p.setupUnit==='hr'||!p.setupUnit)
+            ? (parseFloat(p.setup)||0)
+            : (parseFloat(p.setup)||0)/60) : 0;
+          agg.cycleH += cycleH * tq * pQty;
+          agg.setupH += setupH * pQty;  // setup is once per batch, not ×tq
+        }
+        agg.totalCost += cycleQty * tq * pQty * (pt.cost||0)
+                       + setupQty * pQty * (pt.cost||0);
+      });
+    });
+
+    const procRows5 = Object.values(procAgg)
+      .sort(function(a,b){ return (a.label).localeCompare(b.label); });
+
+    let lab5TotalCost = 0;
+    procRows5.forEach(function(pr, pi) {
+      lab5TotalCost += pr.totalCost;
+      const r5 = ws5.addRow({
+        procLabel:   pr.label,
+        costUnit:    pr.costUnit,
+        costPerUnit: Math.round(pr.costPerUnit*100)/100,
+        parts:       pr.parts.size,
+        totalQty:    Math.round(pr.totalQty*100)/100,
+        setupH:      Math.round(pr.setupH*100)/100,
+        cycleH:      Math.round(pr.cycleH*100)/100,
+        totalCost:   Math.round(pr.totalCost*100)/100,
+      });
+      const bg5 = pi % 2 === 0 ? 'FFFEF3C7' : 'FFFFFBEB';
+      r5.eachCell(function(cell){ cell.fill = {type:'pattern',pattern:'solid',fgColor:{argb:bg5}}; });
+      for (let c = 3; c <= LAB_COLS.length; c++) {
+        r5.getCell(c).alignment = {horizontal:'right'};
+        r5.getCell(c).numFmt = '#,##0.00';
+      }
+    });
+    // Total row
+    const labTotal5 = ws5.addRow({procLabel:'סה"כ', totalCost: Math.round(lab5TotalCost*100)/100});
+    labTotal5.getCell(1).font = {bold:true};
+    labTotal5.getCell(LAB_COLS.length).numFmt = '#,##0.00';
+    labTotal5.getCell(LAB_COLS.length).alignment = {horizontal:'right'};
+    labTotal5.getCell(LAB_COLS.length).font = {bold:true};
+    ws5.autoFilter = {from:{row:1,column:1}, to:{row:1,column:LAB_COLS.length}};
+    ws5.views = [{state:'frozen', ySplit:1, rightToLeft:true}];
+  } catch(e5) { console.warn('עלות ש"ע sheet error:', e5); }
 
   // ── Write & download ───────────────────────────────────────────────────────
   const buf = await wb.xlsx.writeBuffer();
