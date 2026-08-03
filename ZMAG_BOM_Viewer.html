@@ -716,11 +716,27 @@ async function getFileBuffer(relPath){
   // Graph API: authenticated SharePoint access (no folder picker needed)
   if (_graphMode && _msalAcct) {
     let url = await _graphDownloadUrl(relPath);
+    // Handle blob-store: URLs (avoids tracking prevention on blob: URLs)
+    if (url.startsWith('blob-store:')) {
+      const ab = _graphBlobStore.get(relPath);
+      if (ab) return ab;
+      // Cache expired, re-fetch
+      _graphUrlCache.delete(relPath);
+      url = await _graphDownloadUrl(relPath);
+      if (url.startsWith('blob-store:')) {
+        const ab2 = _graphBlobStore.get(relPath);
+        if (ab2) return ab2;
+      }
+    }
     let r = await fetch(url);
     if (!r.ok && r.status === 404) {
       // URL may have expired — purge cache and re-fetch a fresh URL
       _graphUrlCache.delete(relPath);
       url = await _graphDownloadUrl(relPath);
+      if (url.startsWith('blob-store:')) {
+        const ab = _graphBlobStore.get(relPath);
+        if (ab) return ab;
+      }
       r = await fetch(url);
     }
     if (!r.ok) throw new Error('Graph ' + r.status + ': ' + relPath);
@@ -2359,7 +2375,7 @@ const MATERIAL_DB = {
     grades:[{id:'6061-T6',label:'6061-T6',density:2700},{id:'7075-T6',label:'7075-T6',density:2810},
             {id:'5052-H32',label:'5052-H32',density:2680},{id:'2024-T3',label:'2024-T3',density:2780},{id:'generic',label:'כללי',density:2700}]},
   steel:        {label:'פלדה',        density:7850, color:'#718096',
-    grades:[{id:'A36',label:'A36/S235',density:7850},{id:'4140',label:'4140/42CrMo4',density:7850},{id:'generic',label:'כללי',density:7850}]},
+    grades:[{id:'A36',label:'A36/S235',density:7850},{id:'4140',label:'4140/42CrMo4',density:7850},{id:'ROPET510',label:'ROPET510',density:7850},{id:'generic',label:'כללי',density:7850}]},
   stainless:    {label:'אל-חלד',     density:7900, color:'#a0aec0',
     grades:[{id:'304',label:'304',density:7900},{id:'316',label:'316L',density:7990},{id:'generic',label:'כללי',density:7900}]},
   copper:       {label:'נחושת',       density:8900, color:'#ed8936',
@@ -4570,7 +4586,13 @@ function clearSearch(){
 }
 function setProjectQty(val){
   projectQty=Math.max(1,parseInt(val)||1);
+  computeTreeCosts();
+  buildCumulativeHours();
   updateWHCells();
+  // Force rebuild price-dependent tabs
+  if (_curMainTab === 'buy')    { const el = document.getElementById('buyTabContent');    if(el) el.dataset.built=''; _populateBuyTab(true); }
+  if (_curMainTab === 'rawmat') { const el = document.getElementById('rawmatTabContent'); if(el) el.dataset.built=''; _populateRawmatTab(true); }
+  if (_curMainTab === 'matfam') _populateMatFamTab();
 }
 
 // ─── Row check (enable/disable) ───────────────────────────────────────────────
@@ -4630,6 +4652,7 @@ function _populateBuyTab(force){
   let h='<table id="buyTabTable" style="width:100%;border-collapse:collapse;font-size:12px"><colgroup>'+
     '<col style="width:150px"><col style="width:200px"><col style="width:65px"><col style="width:55px">'+
     '<col style="width:90px"><col style="width:65px"><col style="width:85px"><col style="width:56px">'+
+    '<col style="width:120px"><col style="width:60px">'+
     '</colgroup><thead><tr style="background:var(--header-bg);position:sticky;top:0;z-index:1">'+
     '<th style="text-align:left;padding:5px 8px;color:var(--text3)">PN</th>'+
     '<th style="text-align:left;padding:5px 8px;color:var(--text3)">תיאור</th>'+
@@ -4639,6 +4662,8 @@ function _populateBuyTab(force){
     '<th style="text-align:left;padding:5px 8px;color:var(--text3)">מטבע</th>'+
     '<th style="text-align:right;padding:5px 8px;color:var(--text3)">סה"כ</th>'+
     '<th style="text-align:center;padding:5px 4px;color:var(--text3)">חיפוש</th>'+
+    '<th style="text-align:left;padding:5px 8px;color:var(--text3)">מקור</th>'+
+    '<th style="text-align:center;padding:5px 4px;color:var(--text3)">קישור</th>'+
     '</tr></thead><tbody>';
   filtered.forEach(function(r){
     const bid=_btId(r.pb);
@@ -4663,6 +4688,12 @@ function _populateBuyTab(force){
         '<button onclick="openAIPriceSearch(\''+r.pb.replace(/\\/g,'\\\\').replace(/'/g,"\\'")+'\',\''+((r.desc||'').replace(/\\/g,'\\\\').replace(/'/g,"\\'")).substring(0,60)+'\',\'\')" '+
           'title="חיפוש מחיר (AI + Google + Mouser...)" style="background:none;border:none;cursor:pointer;font-size:13px;padding:1px 3px;opacity:.8" class="proc-btn">🔍</button>'+
       '</td>'+
+      (function(){
+        const srcText = (pentry&&pentry.src) ? escHtml(pentry.src) : '';
+        const linkUrl = (buyNotes[r.pb]&&buyNotes[r.pb].link) ? buyNotes[r.pb].link : '';
+        return '<td style="padding:4px 8px;font-size:10px;color:var(--text3);max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+srcText+'">'+srcText+'</td>'+
+          '<td style="padding:4px 4px;text-align:center">'+(linkUrl?'<a href="'+escHtml(linkUrl)+'" target="_blank" style="font-size:14px;text-decoration:none" title="'+escHtml(linkUrl)+'">🔗</a>':'')+'</td>';
+      })()+
       '</tr>';
   });
   h+='</tbody></table>';
@@ -4773,6 +4804,7 @@ async function runAIPriceEstimate(pb, desc, cat) {
       '<input id="aiExtractPrice" type="number" min="0" step="0.01" placeholder="מחיר ₪" style="width:90px;padding:3px 6px;background:var(--surface);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px">' +
       '<select id="aiExtractCur" style="padding:3px;background:var(--surface);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px">' +
       '<option>USD</option><option>EUR</option><option>ILS</option></select>' +
+      '<input id="aiExtractLink" type="text" placeholder="קישור (URL)" style="width:160px;padding:3px 6px;background:var(--surface);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:11px">' +
       '<button onclick="_applyAIPrice(\'' + pb.replace(/'/g,"\\'") + '\'); document.getElementById(\'aiPriceModal\').remove();" ' +
       'style="padding:4px 12px;background:var(--accent2);color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:12px">✓ שמור מחיר</button>' +
       '</div>';
@@ -4792,6 +4824,10 @@ function _applyAIPrice(pb) {
     localStorage.setItem('px_' + pb, JSON.stringify({p: price, src: 'AI estimate', currency}));
     if (!buyNotes[pb]) buyNotes[pb] = {};
     Object.assign(buyNotes[pb], {price, currency});
+    const linkEl = document.getElementById('aiExtractLink');
+    if (linkEl && linkEl.value.trim()) {
+      buyNotes[pb].link = linkEl.value.trim();
+    }
     saveProcToFile();
     _priceRefreshAll();
   }
@@ -7438,6 +7474,7 @@ async function _graphFileUrl() {
 //   3. Microsoft Search API (POST) as last resort
 // Cache stores {url, ts}; entries expire after 45 minutes (Graph URLs are valid ~1 hr)
 const _graphUrlCache = new Map();
+const _graphBlobStore = new Map(); // path → ArrayBuffer (avoids blob URL tracking prevention issues)
 const _GRAPH_URL_TTL = 45 * 60 * 1000; // 45 min in ms
 
 async function _graphDownloadUrl(path) {
@@ -7460,7 +7497,11 @@ async function _graphDownloadUrl(path) {
       if (m['@microsoft.graph.downloadUrl']) return m['@microsoft.graph.downloadUrl'];
       if (m.id) {
         const cr = await fetch(driveEp + '/items/' + m.id + '/content', { headers: H });
-        if (cr.ok) return URL.createObjectURL(await cr.blob());
+        if (cr.ok) {
+          const ab = await cr.arrayBuffer();
+          _graphBlobStore.set(path, ab);
+          return 'blob-store:' + path;
+        }
       }
     } catch(e) {}
     return null;
@@ -7532,7 +7573,9 @@ async function _graphDownloadUrl(path) {
           if (res.id) {
             const cr = await fetch(hitEp + '/items/' + res.id + '/content', { headers: H });
             if (cr.ok) {
-              url = URL.createObjectURL(await cr.blob());
+              const ab = await cr.arrayBuffer();
+              _graphBlobStore.set(path, ab);
+              url = 'blob-store:' + path;
               _graphUrlCache.set(path, {url, ts: Date.now()});
               console.log('[Graph Search] Found via search in drive:', driveId);
               return url;
@@ -7713,15 +7756,32 @@ async function exportBomExcel() {
   // Use sheet-derived totals for summary (override JS-array derived values)
   const _sumRawmFinal = Math.round(_preRmTotal * 100) / 100;
   const _sumCotsFinal = Math.round(_preBuyTotal * 100) / 100;
-  const _sumMfgFinal  = Math.round(_preLabTotal * 100) / 100;
+
+  // Split preLabTotal into NRE (setup) and RE (cycle) parts
+  let _preNRETotal = 0;
+  let _preRETotal  = 0;
+  try {
+    _xlsVisible.forEach(function(idx) {
+      const item = BOM[idx];
+      if (item.type !== 'ELTDesign') return;
+      const pb = item.pb || item.pn;
+      const tq = item.tq || 0;
+      (procData[pb]||[]).forEach(function(p) {
+        const pt = PROC_TYPES.find(function(x){ return x.id === p.type; });
+        if (!pt) return;
+        const cqu = normProcQty(parseFloat(p.qty)||0, p.unit, pt.costUnit);
+        const squ = normProcQty(parseFloat(p.setup)||0, p.setupUnit||p.unit, pt.costUnit);
+        _preNRETotal += squ * pQty * (pt.cost||0);
+        _preRETotal  += cqu * tq * pQty * (pt.cost||0);
+      });
+    });
+  } catch(e) {}
+  const _sumNREFinal = Math.round(_preNRETotal * 100) / 100;
+  const _sumREFinal  = Math.round(_preRETotal  * 100) / 100;
 
   // ── Sheet 0: סיכום מנהלים (Executive Summary) ─────────────────────────────
-  const _sumMfg   = Math.round((treeMfgCost[0]   || 0) * pQty * 100) / 100;
-  const _sumCots  = Math.round((treeCotsCost[0]  || 0) * pQty * 100) / 100;
-  const _sumRawm  = Math.round((treeRawMatCost[0]|| 0) * pQty * 100) / 100;
-  const _sumSetup = Math.round((cumSetupCosts[0] || 0) * 100) / 100;
   const _sumHours = Math.round((cumHours[0] || 0) * pQty * 100) / 100;
-  const _sumTotalFinal = Math.round((_sumMfgFinal + _sumCotsFinal + _sumRawmFinal + _sumSetup) * 100) / 100;
+  const _sumTotalFinal = Math.round((_sumNREFinal + _sumREFinal + _sumCotsFinal + _sumRawmFinal) * 100) / 100;
   const _topItems5 = [];
   _xlsVisible.forEach(function(idx) {
     const item = BOM[idx];
@@ -7760,10 +7820,10 @@ async function exportBomExcel() {
   _w0Row('פריטים מוצגים', _xlsVisible.size);
   ws0.addRow([]);
   _w0Title('פירוט עלויות', 'FF2D4A8A');
-  _w0Row('🔧 ייצור (שעות עבודה) ₪', _sumMfgFinal, false, 'FFDBEAFE');
-  _w0Row('🛒 רכש (Buy items) ₪',     _sumCotsFinal, false, 'FFDCFCE7');
-  _w0Row('🧱 חומרי גלם (ח"ג) ₪',    _sumRawmFinal, false, 'FFEDE9FE');
-  _w0Row('⚙ סטאפ תהליכים ₪',        _sumSetup, false, 'FFFEF3C7');
+  _w0Row('🔧 RE - ייצור (עבודה חוזרת) ₪', _sumREFinal,  false, 'FFDBEAFE');
+  _w0Row('⚙ NRE - סטאפ / הגדרות ₪',     _sumNREFinal, false, 'FFFEF3C7');
+  _w0Row('🛒 רכש (Buy items) ₪',           _sumCotsFinal, false, 'FFDCFCE7');
+  _w0Row('🧱 חומרי גלם (ח"ג) ₪',          _sumRawmFinal, false, 'FFEDE9FE');
   _w0Row('💰 סה"כ עלות פרויקט ₪',   _sumTotalFinal, true, 'FF1E3A5F');
   { const _gtRow = ws0.getRow(ws0.rowCount);
     _gtRow.eachCell(function(c){ c.font={bold:true,color:{argb:'FFFFFFFF'}}; c.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FF1E3A5F'}}; }); }
@@ -7848,6 +7908,8 @@ async function exportBomExcel() {
 
   let _h2RowNum = 0;
   let _ws2DataRow = 2;
+  const _ws2RowMap   = {}; // BOM idx → ws2 Excel row number
+  const _ws2RowStore = {}; // BOM idx → ExcelJS row object
   BOM.forEach(function(item, idx) {
     if (!_xlsVisible.has(idx)) return;
     _h2RowNum++;
@@ -7874,6 +7936,8 @@ async function exportBomExcel() {
     });
     // pcost (col 16 = P) formula: lcost(L)+bcost(M)+ucost(N)+tcost(O)
     r.getCell(16).value = {formula:'=L'+_ws2DataRow+'+M'+_ws2DataRow+'+N'+_ws2DataRow+'+O'+_ws2DataRow, result:d.pcost};
+    _ws2RowMap[idx]   = _ws2DataRow;
+    _ws2RowStore[idx] = r;
     _ws2DataRow++;
     // Row grouping by level (Excel outline)
     if (item.lv > 0) {
@@ -7898,6 +7962,34 @@ async function exportBomExcel() {
       if (item.lv === 0) cell.font = {bold:true, color:{argb: fontColor2}};
     });
   });
+
+  // After all ws2 rows added, set SUM formulas for parent rows (Buy col 13=M, ח"ג col 14=N)
+  try {
+    const _visArr2 = Array.from(_xlsVisible).sort(function(a,b){return a-b;});
+    _visArr2.forEach(function(idx) {
+      const myRow = _ws2RowMap[idx];
+      if (!myRow) return;
+      const myLv = BOM[idx].lv;
+      const childRows = [];
+      for (var ji = 0; ji < _visArr2.length; ji++) {
+        var jdx = _visArr2[ji];
+        if (jdx <= idx) continue;
+        if (BOM[jdx].lv <= myLv) break;
+        if (BOM[jdx].lv === myLv + 1 && _ws2RowMap[jdx]) {
+          childRows.push(_ws2RowMap[jdx]);
+        }
+      }
+      if (childRows.length === 0) return;
+      var firstCR = Math.min.apply(null, childRows);
+      var lastCR  = Math.max.apply(null, childRows);
+      var rH = _ws2RowStore[idx];
+      if (!rH) return;
+      var buyVal = rH.getCell(13).value;
+      var rawVal = rH.getCell(14).value;
+      rH.getCell(13).value = {formula:'=SUM(M'+firstCR+':M'+lastCR+')', result: typeof buyVal === 'object' ? (buyVal.result||0) : (buyVal||0)};
+      rH.getCell(14).value = {formula:'=SUM(N'+firstCR+':N'+lastCR+')', result: typeof rawVal === 'object' ? (rawVal.result||0) : (rawVal||0)};
+    });
+  } catch(e_ws2sum) { console.warn('ws2 SUM formula error:', e_ws2sum); }
 
   ws2.autoFilter = {from:{row:1,column:1}, to:{row:1,column:H_COLS.length}};
   ws2.views = [{state:'frozen', ySplit:1, rightToLeft:true}];
@@ -8135,12 +8227,16 @@ async function exportBomExcel() {
       .sort(function(a,b){ return (a.label).localeCompare(b.label); });
 
     let lab5TotalCost = 0;
+    let lab5NRETotal = 0;
+    let lab5RETotal = 0;
     let lab5DataRow = 2;
     procRows5.forEach(function(pr, pi) {
       const prSetupCost = Math.round((pr.setupCost||0)*100)/100;
       const prReCost    = Math.round((pr.totalCost||0)*100)/100;
       const prTotal     = Math.round(((pr.setupCost||0)+(pr.totalCost||0))*100)/100;
       lab5TotalCost += prTotal;
+      lab5NRETotal += prSetupCost;
+      lab5RETotal  += prReCost;
       const r5 = ws5.addRow({
         procLabel:   pr.label,
         costUnit:    pr.costUnit,
@@ -8167,13 +8263,24 @@ async function exportBomExcel() {
         r5.getCell(c).numFmt = '#,##0.00';
       }
     });
-    // Total row with SUM formula (col 10 = J)
+    // Total row with SUM formulas (cols 8=H NRE, 9=I RE, 10=J grand total)
     const labTotal5 = ws5.addRow({procLabel:'סה"כ'});
     labTotal5.getCell(1).font = {bold:true};
-    labTotal5.getCell(LAB_COLS.length).value = {formula:'=SUM(J2:J'+(lab5DataRow-1)+')', result:Math.round(lab5TotalCost*100)/100};
-    labTotal5.getCell(LAB_COLS.length).numFmt = '#,##0.00';
-    labTotal5.getCell(LAB_COLS.length).alignment = {horizontal:'right'};
-    labTotal5.getCell(LAB_COLS.length).font = {bold:true};
+    // NRE sum (col 8 = H)
+    labTotal5.getCell(8).value = {formula:'=SUM(H2:H'+(lab5DataRow-1)+')', result:Math.round(lab5NRETotal*100)/100};
+    labTotal5.getCell(8).numFmt = '#,##0.00';
+    labTotal5.getCell(8).alignment = {horizontal:'right'};
+    labTotal5.getCell(8).font = {bold:true};
+    // RE sum (col 9 = I)
+    labTotal5.getCell(9).value = {formula:'=SUM(I2:I'+(lab5DataRow-1)+')', result:Math.round(lab5RETotal*100)/100};
+    labTotal5.getCell(9).numFmt = '#,##0.00';
+    labTotal5.getCell(9).alignment = {horizontal:'right'};
+    labTotal5.getCell(9).font = {bold:true};
+    // Grand total (col 10 = J)
+    labTotal5.getCell(10).value = {formula:'=SUM(J2:J'+(lab5DataRow-1)+')', result:Math.round(lab5TotalCost*100)/100};
+    labTotal5.getCell(10).numFmt = '#,##0.00';
+    labTotal5.getCell(10).alignment = {horizontal:'right'};
+    labTotal5.getCell(10).font = {bold:true};
     ws5.autoFilter = {from:{row:1,column:1}, to:{row:1,column:LAB_COLS.length}};
     ws5.views = [{state:'frozen', ySplit:1, rightToLeft:true}];
   } catch(e5) { console.warn('עלות ש"ע sheet error:', e5); }
