@@ -760,7 +760,7 @@ const COLS = [
   {id:'lcost', label:'🔧 ייצור (עץ)', w:90,  sort:false},
   {id:'bcost', label:'🛒 COTS (עץ)',   w:85,  sort:false},
   {id:'ucost', label:'🧱 ח"ג (עץ)',   w:85,  sort:false},
-  {id:'tcost', label:'⚙ Setup ₪',     w:85,  sort:false},
+  {id:'tcost', label:'⚙ Setup NRE ₪',  w:95,  sort:false},
   {id:'pcost', label:'💰 סה"כ פרויקט',w:100, sort:false},
 ];
 let colWidths = COLS.map(c=>c.w);
@@ -973,19 +973,6 @@ function _populateMatFamTab() {
     });
   } catch(e) { console.warn('matFamPrices merge error:', e); }
 
-  // Step 3: Always add all MATERIAL_DB families so the table is never empty
-  try {
-    Object.keys(MATERIAL_DB).forEach(function(fam) {
-      const fd = MATERIAL_DB[fam];
-      const primaryGrade = fd.grades && fd.grades.length ? fd.grades[0].id : 'generic';
-      const key = fam+'||'+primaryGrade+'||sheet';
-      if (famMap.has(key)) return;
-      const gd = (fd.grades||[]).find(function(g){return g.id===primaryGrade;})||{};
-      famMap.set(key, {key:key, family:fam, grade:primaryGrade, form:'sheet',
-        density: gd.density||fd.density||7850, pbs:[], totalMass:0, bomRows:0});
-    });
-  } catch(e) { console.warn('MATERIAL_DB merge error:', e); }
-
   // Diagnostic: always show count before rendering
   el.innerHTML = '<div id="mf-diag" style="padding:6px 12px;font-size:11px;color:var(--text3)">טוען מחירון... (' + famMap.size + ' משפחות)</div>';
 
@@ -995,11 +982,12 @@ function _populateMatFamTab() {
     return;
   }
 
-  // Filter out pure-catalog generic entries (no BOM rows, no saved price)
+  // Filter: only show entries that have actual BOM rows or a saved price
   famMap.forEach(function(entry, key) {
-    if ((entry.grade||'').toLowerCase() === 'generic' &&
-        entry.bomRows === 0 &&
-        !matFamPrices[key]) {
+    const isGenericOrUnknown = (entry.family||'') === 'unknown' ||
+      (entry.grade||'').toLowerCase() === 'generic' ||
+      (MATERIAL_DB[entry.family]||{}).label === 'כללי';
+    if (isGenericOrUnknown && entry.bomRows === 0 && !matFamPrices[key]) {
       famMap.delete(key);
     }
   });
@@ -1098,6 +1086,9 @@ function onMatFamPriceInput(inp) {
   localStorage.setItem(MAT_FAM_PRICE_KEY, JSON.stringify(matFamPrices));
   // Sync to cloud/file so prices survive page refresh
   clearTimeout(_matFamSaveTimer);
+  // Mark rawmat tab dirty so it rebuilds with new prices
+  const _rmEl = document.getElementById('rawmatTabContent');
+  if (_rmEl) _rmEl.dataset.built = '';
   _matFamSaveTimer = setTimeout(function(){ saveProcToFile(); }, 1200);
 
   const idx = parseInt(inp.dataset.idx);
@@ -1145,6 +1136,8 @@ function applyFamilyPrice(key) {
     saveProcToFile();
     try { computeTreeCosts(); buildCumulativeHours(); updateStats(); } catch(e){}
     alert('עודכן מחיר ' + p + ' ₪/ק"ג עבור ' + updated + ' פריטים (משפחה: ' + key.split('||').join(' / ') + ')');
+    const _rmEl2 = document.getElementById('rawmatTabContent');
+    if (_rmEl2) { _rmEl2.dataset.built = ''; _populateRawmatTab(true); }
   }
 }
 
@@ -1540,7 +1533,7 @@ function _isBuyRawMat(item) {
 
 function computeTreeCosts() {
   const n = BOM.length;
-  unitCosts      = new Array(n);
+  unitCosts      = new Array(n).fill(0);
   treeCosts      = new Array(n).fill(0);
   itemSetupCost  = new Array(n).fill(0);
   cumSetupCosts  = new Array(n).fill(0);
@@ -1558,19 +1551,19 @@ function computeTreeCosts() {
   // Bottom-up: tree cost = own extended cost + children tree costs
   for (let i = n - 1; i >= 0; i--) {
     const lv = BOM[i].lv;
-    let tsum = unitCosts[i] * (BOM[i].tq || 0);
+    let tsum = (unitCosts[i] || 0) * (BOM[i].tq || 0);
     let ssum = itemSetupCost[i];
     let mfg  = 0, cots = 0, rawm = 0;
 
     // Own item contribution
-    const ownExt = unitCosts[i] * (BOM[i].tq || 0);
+    const ownExt = (unitCosts[i] || 0) * (BOM[i].tq || 0);
     if (BOM[i].type === 'ELTDesign')      mfg  += ownExt;
     else if (_isBuyRawMat(BOM[i]))        rawm += ownExt;
     else                                   cots += ownExt;
 
     for (let j = i + 1; j < n; j++) {
       if (BOM[j].lv <= lv) break;
-      const ext = unitCosts[j] * (BOM[j].tq || 0);
+      const ext = (unitCosts[j] || 0) * (BOM[j].tq || 0);
       tsum += ext;
       ssum += itemSetupCost[j];
       if (BOM[j].type === 'ELTDesign')     mfg  += ext;
@@ -4774,10 +4767,34 @@ async function runAIPriceEstimate(pb, desc, cat) {
       '3) 2-3 specific websites where this part can likely be found. Be concise (3-4 sentences).';
     const text = await _callAnthropicAPI(key, prompt);
     res.innerHTML = '<span style="color:var(--accent2)">✓ </span>' + text.replace(/\n/g,'<br>');
+    // Add price entry section below AI result
+    res.innerHTML += '<div style="margin-top:10px;border-top:1px solid var(--border);padding-top:8px;display:flex;gap:6px;align-items:center">' +
+      '<label style="font-size:11px;color:var(--text2)">הזן מחיר:</label>' +
+      '<input id="aiExtractPrice" type="number" min="0" step="0.01" placeholder="מחיר ₪" style="width:90px;padding:3px 6px;background:var(--surface);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px">' +
+      '<select id="aiExtractCur" style="padding:3px;background:var(--surface);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px">' +
+      '<option>USD</option><option>EUR</option><option>ILS</option></select>' +
+      '<button onclick="_applyAIPrice(\'' + pb.replace(/'/g,"\\'") + '\'); document.getElementById(\'aiPriceModal\').remove();" ' +
+      'style="padding:4px 12px;background:var(--accent2);color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:12px">✓ שמור מחיר</button>' +
+      '</div>';
   } catch(e) {
     res.innerHTML = '<span style="color:var(--danger)">⚠ שגיאה: '+e.message+'</span>';
   }
   btn.disabled = false; btn.textContent = '🤖 הפעל שוב';
+}
+
+function _applyAIPrice(pb) {
+  const priceEl = document.getElementById('aiExtractPrice');
+  const curEl = document.getElementById('aiExtractCur');
+  if (!priceEl) return;
+  const price = parseFloat(priceEl.value);
+  const currency = curEl ? curEl.value : 'USD';
+  if (!isNaN(price) && price > 0) {
+    localStorage.setItem('px_' + pb, JSON.stringify({p: price, src: 'AI estimate', currency}));
+    if (!buyNotes[pb]) buyNotes[pb] = {};
+    Object.assign(buyNotes[pb], {price, currency});
+    saveProcToFile();
+    _priceRefreshAll();
+  }
 }
 
 // ─── Raw Mat Tab ──────────────────────────────────────────────────────────────
@@ -5252,6 +5269,10 @@ function _priceRefreshAll() {
   // updateWHCells calls refreshCostCells + updateStats internally
   buyBuilt = false;
   try { buildBuyData(); renderBuyTable(getSortedBuyData()); filterBuyTable(); } catch(e) {}
+  // Force-rebuild any tabs currently shown that depend on prices
+  if (_curMainTab === 'buy') { const el = document.getElementById('buyTabContent'); if (el) el.dataset.built=''; _populateBuyTab(true); }
+  if (_curMainTab === 'rawmat') { const el = document.getElementById('rawmatTabContent'); if (el) el.dataset.built=''; _populateRawmatTab(true); }
+  if (_curMainTab === 'matfam') _populateMatFamTab();
 }
 function closePriceEdit() {
   document.getElementById('priceEditBox').classList.add('hidden');
@@ -7650,13 +7671,57 @@ async function exportBomExcel() {
     }
   });
 
+  // Pre-compute sheet totals for summary (same logic as sheets 3-5)
+  let _preRmTotal = 0;
+  try {
+    const _preRmMap = _buildMatFamMap();
+    _preRmMap.forEach(function(entry, key) {
+      const massKg = Math.round(entry.totalMass * 100) / 100;
+      const priceKg = parseFloat(matFamPrices[key]) || 0;
+      _preRmTotal += Math.round(massKg * priceKg * 100) / 100;
+    });
+  } catch(e) {}
+
+  let _preBuyTotal = 0;
+  try {
+    _xlsVisible.forEach(function(idx) {
+      const item = BOM[idx];
+      if (item.type !== 'Buy') return;
+      const ent = getPriceEntry(item.pb);
+      const unitPriceILS = ent ? toILS(ent.p, ent.currency||'USD') : 0;
+      _preBuyTotal += unitPriceILS * (item.tq||0) * pQty;
+    });
+  } catch(e) {}
+
+  let _preLabTotal = 0;
+  try {
+    _xlsVisible.forEach(function(idx) {
+      const item = BOM[idx];
+      if (item.type !== 'ELTDesign') return;
+      const pb = item.pb || item.pn;
+      const tq = item.tq || 0;
+      (procData[pb]||[]).forEach(function(p) {
+        const pt = PROC_TYPES.find(function(x){ return x.id === p.type; });
+        if (!pt) return;
+        const cqu = normProcQty(parseFloat(p.qty)||0, p.unit, pt.costUnit);
+        const squ = normProcQty(parseFloat(p.setup)||0, p.setupUnit||p.unit, pt.costUnit);
+        _preLabTotal += (cqu * tq * pQty + squ * pQty) * (pt.cost||0);
+      });
+    });
+  } catch(e) {}
+
+  // Use sheet-derived totals for summary (override JS-array derived values)
+  const _sumRawmFinal = Math.round(_preRmTotal * 100) / 100;
+  const _sumCotsFinal = Math.round(_preBuyTotal * 100) / 100;
+  const _sumMfgFinal  = Math.round(_preLabTotal * 100) / 100;
+
   // ── Sheet 0: סיכום מנהלים (Executive Summary) ─────────────────────────────
   const _sumMfg   = Math.round((treeMfgCost[0]   || 0) * pQty * 100) / 100;
   const _sumCots  = Math.round((treeCotsCost[0]  || 0) * pQty * 100) / 100;
   const _sumRawm  = Math.round((treeRawMatCost[0]|| 0) * pQty * 100) / 100;
   const _sumSetup = Math.round((cumSetupCosts[0] || 0) * 100) / 100;
   const _sumHours = Math.round((cumHours[0] || 0) * pQty * 100) / 100;
-  const _sumTotal = Math.round((_sumMfg + _sumCots + _sumRawm + _sumSetup) * 100) / 100;
+  const _sumTotalFinal = Math.round((_sumMfgFinal + _sumCotsFinal + _sumRawmFinal + _sumSetup) * 100) / 100;
   const _topItems5 = [];
   _xlsVisible.forEach(function(idx) {
     const item = BOM[idx];
@@ -7695,14 +7760,14 @@ async function exportBomExcel() {
   _w0Row('פריטים מוצגים', _xlsVisible.size);
   ws0.addRow([]);
   _w0Title('פירוט עלויות', 'FF2D4A8A');
-  _w0Row('🔧 ייצור (שעות עבודה) ₪', _sumMfg, false, 'FFDBEAFE');
-  _w0Row('🛒 רכש (Buy items) ₪',     _sumCots, false, 'FFDCFCE7');
-  _w0Row('🧱 חומרי גלם (ח"ג) ₪',    _sumRawm, false, 'FFEDE9FE');
+  _w0Row('🔧 ייצור (שעות עבודה) ₪', _sumMfgFinal, false, 'FFDBEAFE');
+  _w0Row('🛒 רכש (Buy items) ₪',     _sumCotsFinal, false, 'FFDCFCE7');
+  _w0Row('🧱 חומרי גלם (ח"ג) ₪',    _sumRawmFinal, false, 'FFEDE9FE');
   _w0Row('⚙ סטאפ תהליכים ₪',        _sumSetup, false, 'FFFEF3C7');
-  _w0Row('💰 סה"כ עלות פרויקט ₪',   _sumTotal, true, 'FF1E3A5F');
+  _w0Row('💰 סה"כ עלות פרויקט ₪',   _sumTotalFinal, true, 'FF1E3A5F');
   { const _gtRow = ws0.getRow(ws0.rowCount);
     _gtRow.eachCell(function(c){ c.font={bold:true,color:{argb:'FFFFFFFF'}}; c.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FF1E3A5F'}}; }); }
-  if (pQty > 1) _w0Row('מחיר לערכה בודדת ₪', Math.round(_sumTotal / pQty * 100) / 100, false, 'FFEFF6FF');
+  if (pQty > 1) _w0Row('מחיר לערכה בודדת ₪', Math.round(_sumTotalFinal / pQty * 100) / 100, false, 'FFEFF6FF');
   ws0.addRow([]);
   _w0Title('שעות עבודה', 'FF374151');
   _w0Row('שעות כוללות (שע"א)', _sumHours);
@@ -7770,8 +7835,8 @@ async function exportBomExcel() {
     {header:'🔧 Labor ₪',  key:'lcost', width:14},
     {header:'🛒 Buy ₪',    key:'bcost', width:14},
     {header:'💰 ח"ג ₪',   key:'ucost', width:14},
-    {header:'⚙ Setup ₪',  key:'tcost', width:14},
-    {header:'🌳 Project ₪',key:'pcost', width:15},
+    {header:'⚙ Setup NRE ₪', key:'tcost', width:15},
+    {header:'🌳 Project ₪',  key:'pcost', width:15},
   ];
   ws2.columns = H_COLS;
   ws2.getRow(1).eachCell(function(cell) {
@@ -7932,7 +7997,7 @@ async function exportBomExcel() {
       {header:'כמות (TQ)',     key:'qty',      width:12},
       {header:'מחיר יחידה ₪', key:'unitPrice',width:15},
       {header:'מטבע מקורי',   key:'currency', width:12},
-      {header:'עלות כוללת ₪', key:'totalCost',width:15},
+      {header:'עלות כוללת (₪ ILS)', key:'totalCost',width:16},
     ];
     ws4.columns = BUY_COLS;
     ws4.getRow(1).eachCell(function(cell) {
@@ -8009,7 +8074,9 @@ async function exportBomExcel() {
       {header:'כמות כוללת',   key:'totalQty',   width:14},
       {header:'שעות סטאפ',    key:'setupH',     width:13},
       {header:'שעות מחזור',   key:'cycleH',     width:13},
-      {header:'עלות ₪',       key:'totalCost',  width:15},
+      {header:'NRE - סטאפ ₪', key:'setupCost',  width:16},
+      {header:'RE - ייצור ₪', key:'reCost',     width:16},
+      {header:'סה"כ ₪',       key:'totalCost',  width:15},
     ];
     ws5.columns = LAB_COLS;
     ws5.getRow(1).eachCell(function(cell) {
@@ -8039,6 +8106,7 @@ async function exportBomExcel() {
             totalQty:    0,
             setupH:      0,
             cycleH:      0,
+            setupCost:   0,
             totalCost:   0,
           };
         }
@@ -8058,8 +8126,8 @@ async function exportBomExcel() {
           agg.cycleH += cycleH * tq * pQty;
           agg.setupH += setupH * pQty;  // setup is once per batch, not ×tq
         }
-        agg.totalCost += cycleQty * tq * pQty * (pt.cost||0)
-                       + setupQty * pQty * (pt.cost||0);
+        agg.totalCost += cycleQty * tq * pQty * (pt.cost||0);  // RE (recurring)
+        agg.setupCost += setupQty * pQty * (pt.cost||0);        // NRE (setup)
       });
     });
 
@@ -8069,7 +8137,10 @@ async function exportBomExcel() {
     let lab5TotalCost = 0;
     let lab5DataRow = 2;
     procRows5.forEach(function(pr, pi) {
-      lab5TotalCost += pr.totalCost;
+      const prSetupCost = Math.round((pr.setupCost||0)*100)/100;
+      const prReCost    = Math.round((pr.totalCost||0)*100)/100;
+      const prTotal     = Math.round(((pr.setupCost||0)+(pr.totalCost||0))*100)/100;
+      lab5TotalCost += prTotal;
       const r5 = ws5.addRow({
         procLabel:   pr.label,
         costUnit:    pr.costUnit,
@@ -8078,10 +8149,16 @@ async function exportBomExcel() {
         totalQty:    Math.round(pr.totalQty*100)/100,
         setupH:      Math.round(pr.setupH*100)/100,
         cycleH:      Math.round(pr.cycleH*100)/100,
-        totalCost:   Math.round(pr.totalCost*100)/100,
+        setupCost:   prSetupCost,
+        reCost:      prReCost,
+        totalCost:   prTotal,
       });
-      // totalCost (col 8, H) = (setupH(F) + cycleH(G)) × costPerUnit(C) — user enters C
-      r5.getCell(8).value = {formula:'=(F'+lab5DataRow+'+G'+lab5DataRow+')*C'+lab5DataRow, result:Math.round(pr.totalCost*100)/100};
+      // NRE setup cost (col 8, H) = setupH(F) × costPerUnit(C)
+      r5.getCell(8).value = {formula:'=F'+lab5DataRow+'*C'+lab5DataRow, result:prSetupCost};
+      // RE cycle cost (col 9, I) = cycleH(G) × costPerUnit(C)
+      r5.getCell(9).value = {formula:'=G'+lab5DataRow+'*C'+lab5DataRow, result:prReCost};
+      // Total (col 10, J) = NRE(H) + RE(I)
+      r5.getCell(10).value = {formula:'=H'+lab5DataRow+'+I'+lab5DataRow, result:prTotal};
       lab5DataRow++;
       const bg5 = pi % 2 === 0 ? 'FFFEF3C7' : 'FFFFFBEB';
       r5.eachCell(function(cell){ cell.fill = {type:'pattern',pattern:'solid',fgColor:{argb:bg5}}; });
@@ -8090,16 +8167,31 @@ async function exportBomExcel() {
         r5.getCell(c).numFmt = '#,##0.00';
       }
     });
-    // Total row with SUM formula
+    // Total row with SUM formula (col 10 = J)
     const labTotal5 = ws5.addRow({procLabel:'סה"כ'});
     labTotal5.getCell(1).font = {bold:true};
-    labTotal5.getCell(LAB_COLS.length).value = {formula:'=SUM(H2:H'+(lab5DataRow-1)+')', result:Math.round(lab5TotalCost*100)/100};
+    labTotal5.getCell(LAB_COLS.length).value = {formula:'=SUM(J2:J'+(lab5DataRow-1)+')', result:Math.round(lab5TotalCost*100)/100};
     labTotal5.getCell(LAB_COLS.length).numFmt = '#,##0.00';
     labTotal5.getCell(LAB_COLS.length).alignment = {horizontal:'right'};
     labTotal5.getCell(LAB_COLS.length).font = {bold:true};
     ws5.autoFilter = {from:{row:1,column:1}, to:{row:1,column:LAB_COLS.length}};
     ws5.views = [{state:'frozen', ySplit:1, rightToLeft:true}];
   } catch(e5) { console.warn('עלות ש"ע sheet error:', e5); }
+
+  // ── Sheet 6: שערי מטבע (Exchange Rates) ─────────────────────────────────
+  try {
+    const ws6 = wb.addWorksheet('שערי מטבע', {views:[{rightToLeft:true}]});
+    ws6.columns = [{key:'a', width:20}, {key:'b', width:16}, {key:'c', width:30}];
+    const _fx6header = ws6.addRow(['מטבע', 'שער (₪)', 'הערות']);
+    _fx6header.eachCell(function(c){ c.font={bold:true,color:{argb:'FFFFFFFF'}}; c.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FF1E3A5F'}}; });
+    ws6.addRow(['USD', FX_RATES.USD || 3.70, 'דולר ארה"ב']);
+    ws6.addRow(['EUR', FX_RATES.EUR || 4.05, 'יורו']);
+    ws6.addRow(['ILS', 1, 'שקל ישראלי']);
+    ws6.getCell('B2').numFmt = '#,##0.00';
+    ws6.getCell('B3').numFmt = '#,##0.00';
+    ws6.getCell('B4').numFmt = '#,##0.00';
+    ws6.views = [{rightToLeft:true}];
+  } catch(e6) { console.warn('שערי מטבע sheet error:', e6); }
 
   // ── Write & download ───────────────────────────────────────────────────────
   const buf = await wb.xlsx.writeBuffer();
