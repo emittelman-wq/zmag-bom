@@ -7494,7 +7494,7 @@ async function _graphDownloadUrl(path) {
         '?$select=id,@microsoft.graph.downloadUrl', { headers: H });
       if (!r.ok) return null;
       const m = await r.json();
-      if (m['@microsoft.graph.downloadUrl']) return m['@microsoft.graph.downloadUrl'];
+      // Prefer direct content endpoint (avoids tracking prevention on downloadUrl CDN redirects)
       if (m.id) {
         const cr = await fetch(driveEp + '/items/' + m.id + '/content', { headers: H });
         if (cr.ok) {
@@ -7503,6 +7503,8 @@ async function _graphDownloadUrl(path) {
           return 'blob-store:' + path;
         }
       }
+      // Fallback: return downloadUrl if /content fetch failed but url exists
+      if (m['@microsoft.graph.downloadUrl']) return m['@microsoft.graph.downloadUrl'];
     } catch(e) {}
     return null;
   }
@@ -7771,7 +7773,7 @@ async function exportBomExcel() {
         if (!pt) return;
         const cqu = normProcQty(parseFloat(p.qty)||0, p.unit, pt.costUnit);
         const squ = normProcQty(parseFloat(p.setup)||0, p.setupUnit||p.unit, pt.costUnit);
-        _preNRETotal += squ * pQty * (pt.cost||0);
+        _preNRETotal += squ * (pt.cost||0);        // NRE: once per project (×1, not ×pQty)
         _preRETotal  += cqu * tq * pQty * (pt.cost||0);
       });
     });
@@ -7782,14 +7784,8 @@ async function exportBomExcel() {
   // ── Sheet 0: סיכום מנהלים (Executive Summary) ─────────────────────────────
   const _sumHours = Math.round((cumHours[0] || 0) * pQty * 100) / 100;
   const _sumTotalFinal = Math.round((_sumNREFinal + _sumREFinal + _sumCotsFinal + _sumRawmFinal) * 100) / 100;
-  const _topItems5 = [];
-  _xlsVisible.forEach(function(idx) {
-    const item = BOM[idx];
-    const ownCost = Math.round((ownExtCosts[idx]||0) * pQty * 100) / 100;
-    _topItems5.push({pn:item.pn||item.pb||'', desc:item.desc||'', cost:ownCost});
-  });
-  _topItems5.sort(function(a,b){ return b.cost - a.cost; });
-  const _top5 = _topItems5.slice(0, 5);
+  // Cross-sheet formula link row trackers (set inside ws3/ws4/ws5 try blocks)
+  let _ws3TotalRowNum, _ws4TotalRowNum, _ws5TotalRowNum;
 
   const ws0 = wb.addWorksheet('סיכום מנהלים', {views:[{rightToLeft:true}]});
   ws0.columns = [{key:'a',width:32},{key:'b',width:22},{key:'c',width:28}];
@@ -7831,17 +7827,6 @@ async function exportBomExcel() {
   ws0.addRow([]);
   _w0Title('שעות עבודה', 'FF374151');
   _w0Row('שעות כוללות (שע"א)', _sumHours);
-  ws0.addRow([]);
-  if (_top5.length > 0) {
-    _w0Title('5 הפריטים יקרי הערך', 'FF374151');
-    const _t5h = ws0.addRow(['PN', 'תיאור', 'עלות ₪']);
-    _t5h.eachCell(function(c){ c.font={bold:true,color:{argb:'FFFFFFFF'}}; c.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FF6B7280'}}; });
-    _top5.forEach(function(it) {
-      const rr = ws0.addRow([it.pn, it.desc, it.cost]);
-      rr.getCell(3).alignment = {horizontal:'right'};
-      rr.getCell(3).numFmt = '#,##0.00';
-    });
-  }
 
   // ── Sheet 1: Full BOM with all costs ──────────────────────────────────────
   const ws1 = wb.addWorksheet('BOM', {views:[{rightToLeft:true}]});
@@ -7986,8 +7971,16 @@ async function exportBomExcel() {
       if (!rH) return;
       var buyVal = rH.getCell(13).value;
       var rawVal = rH.getCell(14).value;
-      rH.getCell(13).value = {formula:'=SUM(M'+firstCR+':M'+lastCR+')', result: typeof buyVal === 'object' ? (buyVal.result||0) : (buyVal||0)};
-      rH.getCell(14).value = {formula:'=SUM(N'+firstCR+':N'+lastCR+')', result: typeof rawVal === 'object' ? (rawVal.result||0) : (rawVal||0)};
+      const _fmlaM = childRows.length === 1
+        ? '=M' + childRows[0]
+        : '=' + childRows.map(function(r){ return 'M'+r; }).join('+');
+      const _fmlaN = childRows.length === 1
+        ? '=N' + childRows[0]
+        : '=' + childRows.map(function(r){ return 'N'+r; }).join('+');
+      const _buyResult = typeof buyVal === 'object' ? (buyVal.result||0) : (buyVal||0);
+      const _rawResult = typeof rawVal === 'object' ? (rawVal.result||0) : (rawVal||0);
+      rH.getCell(13).value = {formula: _fmlaM, result: _buyResult};
+      rH.getCell(14).value = {formula: _fmlaN, result: _rawResult};
     });
   } catch(e_ws2sum) { console.warn('ws2 SUM formula error:', e_ws2sum); }
 
@@ -8072,6 +8065,7 @@ async function exportBomExcel() {
     rmTotal.getCell(RM_COLS.length).numFmt = '#,##0.00';
     rmTotal.getCell(RM_COLS.length).alignment = {horizontal:'right'};
     rmTotal.getCell(RM_COLS.length).font = {bold:true};
+    _ws3TotalRowNum = rm3DataRow;  // total row = header(1) + data rows + 1
     ws3.autoFilter = {from:{row:1,column:1}, to:{row:1,column:RM_COLS.length}};
     ws3.views = [{state:'frozen', ySplit:1, rightToLeft:true}];
   } catch(e3) { console.warn('ח"ג sheet error:', e3); }
@@ -8151,6 +8145,7 @@ async function exportBomExcel() {
     buyTotal4.getCell(BUY_COLS.length).numFmt = '#,##0.00';
     buyTotal4.getCell(BUY_COLS.length).alignment = {horizontal:'right'};
     buyTotal4.getCell(BUY_COLS.length).font = {bold:true};
+    _ws4TotalRowNum = buy4DataRow;  // total row = header(1) + data rows + 1
     ws4.autoFilter = {from:{row:1,column:1}, to:{row:1,column:BUY_COLS.length}};
     ws4.views = [{state:'frozen', ySplit:1, rightToLeft:true}];
   } catch(e4) { console.warn('רכש sheet error:', e4); }
@@ -8219,7 +8214,7 @@ async function exportBomExcel() {
           agg.setupH += setupH * pQty;  // setup is once per batch, not ×tq
         }
         agg.totalCost += cycleQty * tq * pQty * (pt.cost||0);  // RE (recurring)
-        agg.setupCost += setupQty * pQty * (pt.cost||0);        // NRE (setup)
+        agg.setupCost += setupQty * (pt.cost||0);              // NRE: once per project (×1, not ×pQty)
       });
     });
 
@@ -8281,9 +8276,26 @@ async function exportBomExcel() {
     labTotal5.getCell(10).numFmt = '#,##0.00';
     labTotal5.getCell(10).alignment = {horizontal:'right'};
     labTotal5.getCell(10).font = {bold:true};
+    _ws5TotalRowNum = lab5DataRow;  // total row = header(1) + data rows + 1
     ws5.autoFilter = {from:{row:1,column:1}, to:{row:1,column:LAB_COLS.length}};
     ws5.views = [{state:'frozen', ySplit:1, rightToLeft:true}];
   } catch(e5) { console.warn('עלות ש"ע sheet error:', e5); }
+
+  // ── Update ws0 cost cells with cross-sheet formula links ─────────────────
+  try {
+    ws0.eachRow(function(row) {
+      const lbl = (row.getCell(1).value || '').toString();
+      if (lbl.includes('RE - ייצור') && _ws5TotalRowNum) {
+        row.getCell(2).value = {formula: "='\u05E2\u05DC\u05D5\u05EA \u05E9\"\u05E2'!I" + _ws5TotalRowNum, result: _sumREFinal};
+      } else if (lbl.includes('NRE - \u05E1\u05D8\u05D0\u05E4') && _ws5TotalRowNum) {
+        row.getCell(2).value = {formula: "='\u05E2\u05DC\u05D5\u05EA \u05E9\"\u05E2'!H" + _ws5TotalRowNum, result: _sumNREFinal};
+      } else if (lbl.includes('\u05E8\u05DB\u05E9') && !lbl.includes('\u05E8\u05DB\u05D9\u05D1') && _ws4TotalRowNum) {
+        row.getCell(2).value = {formula: "=\u05E8\u05DB\u05E9!J" + _ws4TotalRowNum, result: _sumCotsFinal};
+      } else if (lbl.includes('\u05D7\"\u05D2') && _ws3TotalRowNum) {
+        row.getCell(2).value = {formula: "='\u05D7\"\u05D2'!H" + _ws3TotalRowNum, result: _sumRawmFinal};
+      }
+    });
+  } catch(e_ws0fl) { console.warn('ws0 formula links error:', e_ws0fl); }
 
   // ── Sheet 6: שערי מטבע (Exchange Rates) ─────────────────────────────────
   try {
