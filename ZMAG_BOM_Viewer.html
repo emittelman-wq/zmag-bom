@@ -911,7 +911,14 @@ function computeTotalMassForPb(pb) {
         if (dims.L) totalMass += calcRawMatVolume(rm.form||'sheet', dims) * dens * tq;
       }
     } else {
-      totalMass += _computeLinearMass(rm, uom, tq);
+      // TQ-based linear mass
+      const tqMass = _computeLinearMass(rm, uom, tq);
+      // CadQuery mass for this parent if available — take the higher estimate
+      const parentPb2 = getParentPbForBOMIndex(idx);
+      const _evM = _rmExactVol(rm, parentPb2);
+      const wasteF = 1 + (parseFloat(rm.wastePct)||0) / 100;
+      const cqMass = (_evM !== null) ? _evM * dens * wasteF : 0;
+      totalMass += Math.max(tqMass, cqMass);
     }
   });
   return totalMass;
@@ -1388,27 +1395,32 @@ function getItemUnitCost(item, bomIdx) {
       // Price: manual unitCost → matFamPrices by family/grade/form → 0
       const uc = parseFloat(rm.unitCost) || parseFloat(matFamPrices[_famKey(rm)]) || 0;
       const waste = 1 + (parseFloat(rm.wastePct)||0)/100;
-      // ── CadQuery exact volume: highest priority, any UOM ─────────────────
+      // ── CadQuery exact volume + TQ-based: take higher estimate ───────────
       const parentPb = getParentPbForBOMIndex(bomIdx);
       const _evol = _rmExactVol(rm, parentPb);
-      if (_evol !== null) {
-        // Volume = material for ONE piece (no TQ). computeTreeCosts multiplies by item.tq,
-        // so we divide here — net tree cost = volume × density × price × waste (TQ-neutral).
-        const _tq = item.tq || 1;
-        return (_tq > 0) ? _evol * density * uc * waste / _tq : 0;
-      }
-      // ── Fallback: UOM-based calculation ───────────────────────────────────
+      // Always compute TQ-based cost per unit (fallback or comparator)
+      let _tqCostPU = 0;
       if (isARUnit(uom)) {
         const dims = getARDimsForParent(pb, parentPb);
-        if (!dims.L) return 0;
-        const vol = calcRawMatVolume(rm.form, dims);
-        const mass = vol * density;
-        if (rm.costUnit === 'm2' && dims.W)
-          return (parseFloat(dims.L)/1000)*(parseFloat(dims.W)/1000)*uc*waste;
-        return mass * uc * waste;
+        if (dims.L) {
+          const vol = calcRawMatVolume(rm.form, dims);
+          _tqCostPU = (rm.costUnit === 'm2' && dims.W)
+            ? (parseFloat(dims.L)/1000)*(parseFloat(dims.W)/1000)*uc*waste
+            : vol * density * uc * waste;
+        }
+      } else {
+        const _rmFb = getRawMatCostPerUnit(pb, uom);
+        _tqCostPU = _rmFb ? _rmFb.cost : 0;
       }
-      const rmCost = getRawMatCostPerUnit(pb, uom);
-      return rmCost ? rmCost.cost : 0;
+      if (_evol !== null) {
+        // CadQuery cost per unit: total volume ÷ tq so computeTreeCosts can ×tq back
+        const _tq = item.tq || 1;
+        const _cqCostPU = (_tq > 0) ? _evol * density * uc * waste / _tq : 0;
+        return Math.max(_cqCostPU, _tqCostPU);  // higher estimate wins
+      }
+      // No CadQuery — return TQ-based directly
+      if (!isARUnit(uom) || _tqCostPU > 0) return _tqCostPU;
+      return 0;
     }
     const e = getPriceEntry(pb);
     return e ? toILS(e.p, e.currency || 'USD') : 0;  // always returns ILS
@@ -1435,25 +1447,29 @@ function getItemUnitCost(item, bomIdx) {
       // Price: manual unitCost → matFamPrices by family/grade/form → 0
       const uc = parseFloat(rm.unitCost) || parseFloat(matFamPrices[_famKey(rm)]) || 0;
       const waste = 1 + (parseFloat(rm.wastePct)||0)/100;
-      // ── CadQuery exact volume: highest priority, any UOM ─────────────────
+      // ── CadQuery exact volume + TQ-based: take higher estimate ───────────
       const parentPb = getParentPbForBOMIndex(bomIdx);
       const _evol = _rmExactVol(rm, parentPb);
-      if (_evol !== null) {
-        const _tq = item.tq || 1;
-        return (_tq > 0) ? _evol * density * uc * waste / _tq : 0;
-      }
-      // ── Fallback: UOM-based calculation ───────────────────────────────────
+      let _tqCostPU2 = 0;
       if (isARUnit(uom)) {
         const dims = getARDimsForParent(pb, parentPb);
-        if (!dims.L) return 0;
-        const vol = calcRawMatVolume(rm.form, dims);
-        const mass = vol * density;
-        if (rm.costUnit === 'm2' && dims.W)
-          return (parseFloat(dims.L)/1000)*(parseFloat(dims.W)/1000)*uc;
-        return mass * uc;
+        if (dims.L) {
+          const vol = calcRawMatVolume(rm.form, dims);
+          _tqCostPU2 = (rm.costUnit === 'm2' && dims.W)
+            ? (parseFloat(dims.L)/1000)*(parseFloat(dims.W)/1000)*uc*waste
+            : vol * density * uc * waste;
+        }
+      } else {
+        const _rmFb2 = getRawMatCostPerUnit(pb, uom);
+        _tqCostPU2 = _rmFb2 ? _rmFb2.cost : 0;
       }
-      const rmCost = getRawMatCostPerUnit(pb, uom);
-      return rmCost ? rmCost.cost : 0;
+      if (_evol !== null) {
+        const _tq = item.tq || 1;
+        const _cqCostPU2 = (_tq > 0) ? _evol * density * uc * waste / _tq : 0;
+        return Math.max(_cqCostPU2, _tqCostPU2);
+      }
+      if (!isARUnit(uom) || _tqCostPU2 > 0) return _tqCostPU2;
+      return 0;
     }
   }
   return 0;
