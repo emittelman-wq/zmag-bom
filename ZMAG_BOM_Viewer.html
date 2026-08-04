@@ -1245,6 +1245,12 @@ function importMatFamCSV(input) {
 
 const RM_STORAGE_KEY = 'zmag_rawmat';
 try { rawMatData = JSON.parse(localStorage.getItem(RM_STORAGE_KEY)||'{}'); } catch(e) {}
+const RM_TYPE_OVERRIDE_KEY = 'zmag_rm_type_overrides';
+let rawTypeOverrides = {}; // pb → 'rawmat' | 'buy' | undefined
+try { rawTypeOverrides = JSON.parse(localStorage.getItem(RM_TYPE_OVERRIDE_KEY)||'{}'); } catch(e) {}
+function saveRawTypeOverrides() {
+  localStorage.setItem(RM_TYPE_OVERRIDE_KEY, JSON.stringify(rawTypeOverrides));
+}
 let anomalies = [];
 let dismissedAnomalies = {};
 const ANOMALY_DISMISS_KEY = 'zmag_anom_dismissed';
@@ -1393,6 +1399,17 @@ function applyColWidths(){
 // ─── Build table ─────────────────────────────────────────
 // ─── Cost computation ────────────────────────────────────
 function getItemUnitCost(item, bomIdx) {
+  // Check type override: Buy item treated as ח"ג raw material
+  const _pb = item.pb || item.pn;
+  if (item.type === 'Buy' && rawTypeOverrides[_pb] === 'rawmat' && rawMatData[_pb]) {
+    // Re-enter as if it were a raw-material Buy (already handled by the rawMatData branch inside Buy block)
+    // Just let it fall into the Buy block — rawMatData[pb] check inside handles it
+  }
+  // Check type override: rawmat-UOM item treated as Buy
+  if (rawTypeOverrides[_pb] === 'buy') {
+    const _ent = getPriceEntry(_pb);
+    return _ent ? toILS(_ent.p, _ent.currency || 'ILS') : 0;
+  }
   if (item.type === 'Buy') {
     const pb = item.pb || item.pn;
     // Raw material cost takes priority over price DB
@@ -4652,7 +4669,7 @@ function _populateBuyTab(force){
   let h='<table id="buyTabTable" style="width:100%;border-collapse:collapse;font-size:12px"><colgroup>'+
     '<col style="width:150px"><col style="width:200px"><col style="width:65px"><col style="width:55px">'+
     '<col style="width:90px"><col style="width:65px"><col style="width:85px"><col style="width:56px">'+
-    '<col style="width:120px"><col style="width:60px">'+
+    '<col style="width:65px"><col style="width:120px"><col style="width:60px">'+
     '</colgroup><thead><tr style="background:var(--header-bg);position:sticky;top:0;z-index:1">'+
     '<th style="text-align:left;padding:5px 8px;color:var(--text3)">PN</th>'+
     '<th style="text-align:left;padding:5px 8px;color:var(--text3)">תיאור</th>'+
@@ -4662,6 +4679,7 @@ function _populateBuyTab(force){
     '<th style="text-align:left;padding:5px 8px;color:var(--text3)">מטבע</th>'+
     '<th style="text-align:right;padding:5px 8px;color:var(--text3)">סה"כ</th>'+
     '<th style="text-align:center;padding:5px 4px;color:var(--text3)">חיפוש</th>'+
+    '<th style="text-align:center;padding:5px 4px;color:var(--text3)">סיווג</th>'+
     '<th style="text-align:left;padding:5px 8px;color:var(--text3)">מקור</th>'+
     '<th style="text-align:center;padding:5px 4px;color:var(--text3)">קישור</th>'+
     '</tr></thead><tbody>';
@@ -4687,6 +4705,10 @@ function _populateBuyTab(force){
       '<td style="padding:4px 4px;text-align:center;white-space:nowrap">'+
         '<button onclick="openAIPriceSearch(\''+r.pb.replace(/\\/g,'\\\\').replace(/'/g,"\\'")+'\',\''+((r.desc||'').replace(/\\/g,'\\\\').replace(/'/g,"\\'")).substring(0,60)+'\',\'\')" '+
           'title="חיפוש מחיר (AI + Google + Mouser...)" style="background:none;border:none;cursor:pointer;font-size:13px;padding:1px 3px;opacity:.8" class="proc-btn">🔍</button>'+
+      '</td>'+
+      '<td style="padding:2px 2px;text-align:center">'+
+        '<button onclick="reclassifyToRawmat(\''+r.pb.replace(/\\/g,'\\\\').replace(/'/g,"\\'")+'\',\''+((r.desc||'').replace(/\\/g,'\\\\').replace(/'/g,"\\'")).substring(0,80)+\')" '+
+        'title="העבר לחומרי גלם (ח\'\'ג)" style="background:none;border:1px solid var(--border);border-radius:3px;cursor:pointer;font-size:11px;padding:1px 5px;color:var(--text2)">→ ח&quot;ג</button>'+
       '</td>'+
       (function(){
         const srcText = (pentry&&pentry.src) ? escHtml(pentry.src) : '';
@@ -4731,6 +4753,99 @@ function _saveTabBuyPrice(bid){
     const r=buyData.find(function(x){return x.pb===pb;});
     if(r) totalEl.textContent=price>0?fmtC(toILS(price,currency)*r.totalQty):'—';
   }
+}
+
+// ── Buy ↔ ח"ג Reclassification ────────────────────────────────────────────────
+function reclassifyToRawmat(pb, desc) {
+  const descUp = (desc||'').toUpperCase();
+  let autoFam = 'steel', autoGrade = '', autoForm = 'bar_round';
+  if (/ALUMINUM|ALUMINIUM|\b6061\b|\b5052\b|\b7075\b/i.test(descUp)) autoFam = 'aluminum';
+  else if (/STAINLESS|SS\b|\b316\b|\b304\b|\b316L\b/i.test(descUp)) autoFam = 'stainless';
+  else if (/RUBBER|NBR|NEOPRENE/i.test(descUp)) autoFam = 'rubber';
+  if (/TUBE.*ROUND|ROUND.*TUBE/i.test(descUp)) autoForm = 'tube_round';
+  else if (/TUBE.*SQUARE|SQUARE.*TUBE/i.test(descUp)) autoForm = 'tube_square';
+  else if (/TUBE.*RECT|RECT.*TUBE/i.test(descUp)) autoForm = 'tube_rect';
+  else if (/SHEET|PLATE/i.test(descUp)) autoForm = 'sheet';
+  else if (/BAR.*FLAT|FLAT.*BAR/i.test(descUp)) autoForm = 'bar_flat';
+  else if (/BAR|ROD/i.test(descUp)) autoForm = 'bar_round';
+  const gradeM = descUp.match(/(?:SAE\s*|AISI\s*|GRADE\s*)?(1045|1020|4140|6061|5052|7075|304|316L?|S235|A36|ROPET510)/);
+  if (gradeM) autoGrade = gradeM[1];
+
+  const famOpts = Object.entries(MATERIAL_DB).map(function([k,v]){
+    return '<option value="'+k+'"'+(k===autoFam?' selected':'')+'>'+v.label+'</option>';
+  }).join('');
+  const formOpts = (MATERIAL_FORMS||[]).map(function(f){
+    return '<option value="'+f.id+'"'+(f.id===autoForm?' selected':'')+'>'+f.label+'</option>';
+  }).join('');
+
+  const modal = document.createElement('div');
+  modal.id = 'reclassModal';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9999;display:flex;align-items:center;justify-content:center';
+  modal.innerHTML =
+    '<div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:20px;width:440px;max-width:95vw;color:var(--text)">'+
+    '<h3 style="margin:0 0 8px;font-size:14px;color:var(--accent)">העבר לחומרי גלם — '+escHtml(pb)+'</h3>'+
+    '<div style="font-size:11px;color:var(--text2);margin-bottom:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+escHtml(desc)+'">'+escHtml((desc||'').substring(0,80))+'</div>'+
+    '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px">'+
+      '<label style="font-size:12px">משפחה<br>'+
+        '<select id="rclFam" style="width:100%;padding:4px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px">'+famOpts+'</select></label>'+
+      '<label style="font-size:12px">צורה<br>'+
+        '<select id="rclForm" style="width:100%;padding:4px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px">'+formOpts+'</select></label>'+
+      '<label style="font-size:12px">Grade / סיווג<br>'+
+        '<input id="rclGrade" type="text" value="'+escHtml(autoGrade)+'" placeholder="e.g. SAE1045" style="width:100%;padding:4px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px;box-sizing:border-box"></label>'+
+      '<label style="font-size:12px">צפיפות g/cc<br>'+
+        '<input id="rclDens" type="number" step="0.01" min="0.1" value="7.85" style="width:100%;padding:4px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px;box-sizing:border-box"></label>'+
+    '</div>'+
+    '<div style="display:flex;gap:8px;justify-content:flex-end">'+
+      '<button onclick="document.getElementById(\'reclassModal\').remove()" style="padding:6px 16px;background:var(--surface2);border:1px solid var(--border);border-radius:4px;cursor:pointer;color:var(--text);font-size:12px">ביטול</button>'+
+      '<button id="rclSaveBtn" style="padding:6px 16px;background:var(--accent2);color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:12px">✓ העבר לח"ג</button>'+
+    '</div></div>';
+
+  document.body.appendChild(modal);
+
+  // Auto-update density when family changes
+  modal.querySelector('#rclFam').addEventListener('change', function(){
+    const fd = MATERIAL_DB[this.value]||{};
+    modal.querySelector('#rclDens').value = ((fd.density||7850)/1000).toFixed(2);
+  });
+  // Set initial density
+  const ifd = MATERIAL_DB[autoFam]||{};
+  modal.querySelector('#rclDens').value = ((ifd.density||7850)/1000).toFixed(2);
+  // Save button
+  modal.querySelector('#rclSaveBtn').addEventListener('click', function(){
+    _doReclassToRawmat(pb);
+    modal.remove();
+  });
+}
+
+function _doReclassToRawmat(pb) {
+  const fam   = (document.getElementById('rclFam')  ||{}).value || 'steel';
+  const form  = (document.getElementById('rclForm') ||{}).value || 'bar_round';
+  const grade = (document.getElementById('rclGrade')||{}).value || '';
+  const densGcc = parseFloat((document.getElementById('rclDens')||{}).value) || 7.85;
+  rawTypeOverrides[pb] = 'rawmat';
+  saveRawTypeOverrides();
+  if (!rawMatData[pb]) rawMatData[pb] = {};
+  Object.assign(rawMatData[pb], { family:fam, grade:grade, form:form, density:String(Math.round(densGcc*1000)) });
+  localStorage.setItem(RM_STORAGE_KEY, JSON.stringify(rawMatData));
+  buyBuilt = false;
+  const btc=document.getElementById('buyTabContent'); if(btc) btc.dataset.built='';
+  const rtc=document.getElementById('rawmatTabContent'); if(rtc) rtc.dataset.built='';
+  computeTreeCosts(); buildCumulativeHours(); updateWHCells();
+  if(_curMainTab==='buy')    _populateBuyTab(true);
+  if(_curMainTab==='rawmat') _populateRawmatTab(true);
+  if(_curMainTab==='matfam') _populateMatFamTab();
+}
+
+function reclassifyBackToBuy(pb) {
+  delete rawTypeOverrides[pb];
+  saveRawTypeOverrides();
+  buyBuilt = false;
+  const btc=document.getElementById('buyTabContent'); if(btc) btc.dataset.built='';
+  const rtc=document.getElementById('rawmatTabContent'); if(rtc) rtc.dataset.built='';
+  computeTreeCosts(); buildCumulativeHours(); updateWHCells();
+  if(_curMainTab==='buy')    _populateBuyTab(true);
+  if(_curMainTab==='rawmat') _populateRawmatTab(true);
+  if(_curMainTab==='matfam') _populateMatFamTab();
 }
 
 // ─── openAIPriceSearch — search modal with links + AI estimate ───────────────
@@ -4842,7 +4957,12 @@ function _populateRawmatTab(force){
   const RAW_UOM=/^(m2|m|ar|a\/r)$/i;
   const map={};
   BOM.forEach(function(item,idx){
-    if(!RAW_UOM.test((item.uom||'').trim())) return;
+    const _pbr = item.pb||item.pn;
+    // If item is Buy but overridden to rawmat, include it; if raw UOM but overridden to buy, skip it
+    const isOverriddenToRawmat = item.type === 'Buy' && rawTypeOverrides[_pbr] === 'rawmat';
+    const isOverriddenToBuy    = RAW_UOM.test((item.uom||'').trim()) && rawTypeOverrides[_pbr] === 'buy';
+    if (!RAW_UOM.test((item.uom||'').trim()) && !isOverriddenToRawmat) return;
+    if (isOverriddenToBuy) return;
     if(isRowHiddenForTabs(idx)) return;
     const pb=item.pb||item.pn;
     if(!map[pb]) map[pb]={pb,desc:item.desc,uom:item.uom,tq:0,occ:0};
@@ -4922,6 +5042,7 @@ function _populateRawmatTab(force){
       '<td style="padding:4px 8px;text-align:right;color:var(--text3);font-size:11px">'+
         (configured?'<span style="cursor:pointer;text-decoration:underline" onclick="openRawMatEditor(this.parentElement.parentElement.dataset.pb, this.parentElement.parentElement.dataset.desc)" title="ערוך">✏️</span> ':'<button class="proc-btn" onclick="openRawMatEditor(this.parentElement.parentElement.dataset.pb, this.parentElement.parentElement.dataset.desc, this.parentElement.parentElement.dataset.tq)" style="font-size:11px">⚙ הגדר</button>')+
         (configured?kgStr:'')+
+        (isOverriddenToRawmat?' <button class="proc-btn" onclick="reclassifyBackToBuy(\''+r.pb+'\')" style="font-size:11px;background:var(--warn,#c0392b);color:#fff;margin-right:4px" title="החזר לטבלת רכש">← רכש</button>':'')+
       '</td>'+
       '</tr>';
   });
@@ -5349,6 +5470,8 @@ function buildBuyData() {
   BOM.forEach((item, idx) => {
     if (item.type !== 'Buy') return;
     if (isRowHiddenForTabs(idx)) return;
+    const _pbKey = item.pb || item.pn;
+    if (rawTypeOverrides[_pbKey] === 'rawmat') return; // reclassified to ח"ג
     const key = item.pb || item.pn;
     if (!map.has(key)) {
       map.set(key, {
