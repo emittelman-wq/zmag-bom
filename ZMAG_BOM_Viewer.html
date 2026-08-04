@@ -4993,6 +4993,7 @@ function _populateRawmatTab(force){
     '<th style="text-align:right;padding:4px 8px;color:var(--text3)">מחיר/ק"ג</th>'+
     '</tr></thead><tbody>';
   items.forEach(function(r){
+    const isOverriddenToRawmat = rawTypeOverrides[r.pb] === 'rawmat';
     const rm=rawMatData[r.pb];
     const configured=!!rm;
     const rmId='rm_'+r.pb.replace(/[^a-zA-Z0-9]/g,'_');
