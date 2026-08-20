@@ -788,6 +788,7 @@ let directCycleH = [];  // cycle hours × item.tq per item (for tree accumulatio
 let cumCycleH = [];     // tree-cumulative cycle hours (no setup)
 let projectQty = 1;
 let buyNotes = {};
+let buyPrices = {};   // pb → {p, src, currency} — cloud-persisted, replaces px_* localStorage keys
 let subData = {};
 let rawMatData = {};   // {pb: {family,grade,form,dims,density,unitCost,costUnit}}
 
@@ -872,7 +873,6 @@ function autoPopulateFromStepDB() {
     }
   });
   if (count > 0) {
-    localStorage.setItem(RM_STORAGE_KEY, JSON.stringify(rawMatData));
     saveProcToFile();
     try { computeTreeCosts(); refreshCostCells(); } catch(e) {}
   }
@@ -899,7 +899,7 @@ function _stepVolsLookup(stpPath) {
 // ══ Material Family Prices ══════════════════════════════════════════════════
 const MAT_FAM_PRICE_KEY = 'zmag_mat_fam_prices_v1';
 let matFamPrices = {};
-(function(){ try { matFamPrices = JSON.parse(localStorage.getItem(MAT_FAM_PRICE_KEY)||'{}'); } catch(e){} })();
+// matFamPrices loaded from cloud proc file via _mergeLoadedProc
 
 function _famKey(rm) {
   return (rm.family||'unknown')+'||'+(rm.grade||'generic')+'||'+(rm.form||'sheet');
@@ -1099,7 +1099,6 @@ function onMatFamPriceInput(inp) {
   const price = parseFloat(inp.value) || 0;
   if (price > 0) matFamPrices[key] = price;
   else            delete matFamPrices[key];
-  localStorage.setItem(MAT_FAM_PRICE_KEY, JSON.stringify(matFamPrices));
   // Sync to cloud/file so prices survive page refresh
   clearTimeout(_matFamSaveTimer);
   // Mark rawmat tab dirty so it rebuilds with new prices
@@ -1148,7 +1147,6 @@ function applyFamilyPrice(key) {
     }
   });
   if (updated > 0) {
-    localStorage.setItem(RM_STORAGE_KEY, JSON.stringify(rawMatData));
     saveProcToFile();
     try { computeTreeCosts(); buildCumulativeHours(); updateStats(); } catch(e){}
     alert('עודכן מחיר ' + p + ' ₪/ק"ג עבור ' + updated + ' פריטים (משפחה: ' + key.split('||').join(' / ') + ')');
@@ -1175,7 +1173,6 @@ function applyAllFamilyPrices() {
     });
   });
   if (total > 0) {
-    localStorage.setItem(RM_STORAGE_KEY, JSON.stringify(rawMatData));
     saveProcToFile();
     try { computeTreeCosts(); buildCumulativeHours(); updateStats(); } catch(e){}
     _populateMatFamTab();
@@ -1235,7 +1232,6 @@ function importMatFamCSV(input) {
         imported++;
       }
     });
-    localStorage.setItem(MAT_FAM_PRICE_KEY, JSON.stringify(matFamPrices));
     _populateMatFamTab();
     input.value = '';
     alert('יובאו ' + imported + ' מחירי משפחה');
@@ -1244,13 +1240,15 @@ function importMatFamCSV(input) {
 }
 
 const RM_STORAGE_KEY = 'zmag_rawmat';
-try { rawMatData = JSON.parse(localStorage.getItem(RM_STORAGE_KEY)||'{}'); } catch(e) {}
+// rawMatData loaded from cloud proc file via _mergeLoadedProc
 const RM_TYPE_OVERRIDE_KEY = 'zmag_rm_type_overrides';
 let rawTypeOverrides = {}; // pb → 'rawmat' | 'buy' | undefined
-try { rawTypeOverrides = JSON.parse(localStorage.getItem(RM_TYPE_OVERRIDE_KEY)||'{}'); } catch(e) {}
+// rawTypeOverrides loaded from cloud proc file via _mergeLoadedProc
 function saveRawTypeOverrides() {
-  localStorage.setItem(RM_TYPE_OVERRIDE_KEY, JSON.stringify(rawTypeOverrides));
+  saveProcToFile();
 }
+let eltBuyOverrides = {}; // pb → true (ELTDesign item treated as Buy/COTS) — persisted in procData JSON
+function saveEltBuyOverrides() { saveProcToFile(); }
 let anomalies = [];
 let dismissedAnomalies = {};
 const ANOMALY_DISMISS_KEY = 'zmag_anom_dismissed';
@@ -1461,6 +1459,11 @@ function getItemUnitCost(item, bomIdx) {
     const e = getPriceEntry(pb);
     return e ? toILS(e.p, e.currency || 'USD') : 0;  // always returns ILS
   }
+  // ELTDesign item overridden to Buy (COTS replacement) — use buy price
+  if (item.type === 'ELTDesign' && eltBuyOverrides[_pb]) {
+    const _ent = getPriceEntry(_pb);
+    return _ent ? toILS(_ent.p, _ent.currency || 'ILS') : 0;
+  }
   if (item.type === 'ELTDesign') {
     const pb = item.pb || item.pn;
     const procs = procData[pb] || [];
@@ -1590,7 +1593,7 @@ function computeTreeCosts() {
 
     // Own item contribution
     const ownExt = (unitCosts[i] || 0) * (BOM[i].tq || 0);
-    if (BOM[i].type === 'ELTDesign')      mfg  += ownExt;
+    if (BOM[i].type === 'ELTDesign' && !eltBuyOverrides[BOM[i].pb||BOM[i].pn])      mfg  += ownExt;
     else if (_isBuyRawMat(BOM[i]))        rawm += ownExt;
     else                                   cots += ownExt;
 
@@ -1599,7 +1602,7 @@ function computeTreeCosts() {
       const ext = (unitCosts[j] || 0) * (BOM[j].tq || 0);
       tsum += ext;
       ssum += itemSetupCost[j];
-      if (BOM[j].type === 'ELTDesign')     mfg  += ext;
+      if (BOM[j].type === 'ELTDesign' && !eltBuyOverrides[BOM[j].pb||BOM[j].pn])     mfg  += ext;
       else if (_isBuyRawMat(BOM[j]))       rawm += ext;
       else                                  cots += ext;
     }
@@ -1679,6 +1682,7 @@ function buildTable(){
         scBadge.style.cssText = 'font-size:10px;margin-left:2px;cursor:default';
         tdP.appendChild(scBadge);
       }
+      // ELT→Buy override button is placed in the type badge cell (tdT) below for visibility
     } else if (item.type === 'Buy') {
       const pb = item.pb || item.pn;
       const _rmUom = (item.uom || '').trim();
@@ -1791,9 +1795,29 @@ function buildTable(){
 
     // Type badge
     const tdT=document.createElement('td');
+    tdT.style.cssText='white-space:nowrap';
     const tb=document.createElement('span');
     tb.className='badge '+(item.type==='ELTDesign'?'b-des':item.type==='Buy'?'b-buy':'b-pkg');
     tb.textContent=item.type; tdT.appendChild(tb);
+    // ELT→Buy override button — inline next to ELTDesign badge
+    if (item.type === 'ELTDesign') {
+      const _eltPb2 = item.pb || item.pn;
+      const _eltOverridden2 = !!eltBuyOverrides[_eltPb2];
+      const _eltBtn2 = document.createElement('button');
+      _eltBtn2.style.cssText = 'font-size:10px;padding:1px 4px;border-radius:3px;cursor:pointer;margin-left:4px;white-space:nowrap;' +
+        (_eltOverridden2
+          ? 'background:var(--accent,#2563eb);border:none;color:#fff;'
+          : 'background:none;border:1px solid var(--accent,#2563eb);color:var(--accent,#2563eb);');
+      _eltBtn2.title = _eltOverridden2 ? 'מסווג כרכש (COTS) — לחץ לביטול' : 'סמן כרכש';
+      _eltBtn2.textContent = _eltOverridden2 ? '← ELT' : '→ רכש';
+      _eltBtn2.dataset.pb = _eltPb2;
+      _eltBtn2.addEventListener('click', function(ev){
+        ev.stopPropagation();
+        if (eltBuyOverrides[this.dataset.pb]) reclassifyEltBackToElt(this.dataset.pb);
+        else reclassifyEltToBuy(this.dataset.pb);
+      });
+      tdT.appendChild(_eltBtn2);
+    }
     tr.appendChild(tdT);
 
     // Status badge
@@ -1909,6 +1933,7 @@ function buildCumulativeHours() {
     if (isRowExcluded(idx)) return;
     if (item.type !== 'ELTDesign') return;
     const pb = item.pb || item.pn;
+    if (eltBuyOverrides[pb]) return; // treated as COTS — skip manufacturing hours
     const procs = procData[pb];
     if (!procs || !procs.length) return;
     let itemSetupH  = 0;
@@ -2957,7 +2982,6 @@ async function rmAnalyzeStep(pb, stpPath, rowIdx) {
       } else {
         rawMatData[pb].exact_volume_mm3 = volMM3; // fallback for non-AR
       }
-      localStorage.setItem(RM_STORAGE_KEY, JSON.stringify(rawMatData));
       if (_hadPricingData) saveProcToFile(); // only cloud-save when pricing data exists
 
       const rm2      = rawMatData[pb];
@@ -3577,7 +3601,6 @@ function saveRawMat(pb){
   const _prevExactVol = (rawMatData[pb]||{}).exact_volume_mm3;
   rawMatData[pb]={family,grade,form,dims,density,unitCost,costUnit,wastePct,perParent,_uom:uom};
   if (_prevExactVol) rawMatData[pb].exact_volume_mm3 = _prevExactVol;
-  localStorage.setItem(RM_STORAGE_KEY,JSON.stringify(rawMatData));
   saveProcToFile();
   closeRawMat();
   computeTreeCosts(); buildCumulativeHours(); updateWHCells();
@@ -3660,7 +3683,6 @@ function _toggleRawmatAR(pb){ _toggleRawmatExpand(pb); }
 function _saveRawmatCost(pb, val) {
   if(!rawMatData[pb]) return;
   rawMatData[pb].unitCost = parseFloat(val)||0;
-  localStorage.setItem(RM_STORAGE_KEY, JSON.stringify(rawMatData));
   saveProcToFile();
   computeTreeCosts(); refreshCostCells();
   const rmId='rm_'+pb.replace(/[^a-zA-Z0-9]/g,'_');
@@ -3979,12 +4001,9 @@ function fmtCost(n, currency) {
 }
 
 function getPriceEntry(pb) {
-  const raw = localStorage.getItem('px_' + pb);
-  if (raw !== null) {
-    try {
-      const obj = JSON.parse(raw);
-      return {p: obj.p, src: obj.src || '', currency: obj.currency || 'USD', note: 'Custom (click to edit)', custom: true};
-    } catch(e) {}
+  const entry = buyPrices[pb];
+  if (entry != null) {
+    return {p: entry.p, src: entry.src || '', currency: entry.currency || 'USD', note: 'Custom (click to edit)', custom: true};
   }
   // Fallback: check buyNotes for price
   const bn = buyNotes[pb];
@@ -4046,7 +4065,11 @@ function showPreview(item){
   if(pvMeta) pvMeta.innerHTML=
     '<div class="mi"><div class="ml">Catalog</div><div class="mv" style="font-family:monospace">'+(item.cat||'—')+'</div></div>'+
     '<div class="mi"><div class="ml">QTY</div><div class="mv">'+item.qty+' '+item.uom+'</div></div>'+
-    '<div class="mi"><div class="ml">Type</div><div class="mv"><span class="badge '+(item.type==='ELTDesign'?'b-des':item.type==='Buy'?'b-buy':'b-pkg')+'">'+item.type+'</span></div></div>'+
+    '<div class="mi"><div class="ml">Type</div><div class="mv"><span class="badge '+(item.type==='ELTDesign'?'b-des':item.type==='Buy'?'b-buy':'b-pkg')+'">'+item.type+'</span>'+
+    (item.type==='ELTDesign'
+      ? ' <button id="eltBuyToggleBtn" data-pb="'+(item.pb||item.pn)+'" onclick="(eltBuyOverrides[this.dataset.pb]?reclassifyEltBackToElt:reclassifyEltToBuy)(this.dataset.pb)" style="font-size:11px;padding:2px 8px;border-radius:4px;cursor:pointer;margin-right:6px;'+(eltBuyOverrides[item.pb||item.pn]?'background:var(--accent,#2563eb);border:none;color:#fff':'background:none;border:1px solid var(--accent,#2563eb);color:var(--accent,#2563eb)')+'">'+(eltBuyOverrides[item.pb||item.pn]?'← ביטול רכש':'→ סמן כרכש')+'</button>'
+      : '')+
+    '</div></div>'+
     '<div class="mi"><div class="ml">Status</div><div class="mv">'+(item.st||'—')+'</div></div>';
   switchTab(curTab);
 }
@@ -4707,8 +4730,9 @@ function _populateBuyTab(force){
           'title="חיפוש מחיר (AI + Google + Mouser...)" style="background:none;border:none;cursor:pointer;font-size:13px;padding:1px 3px;opacity:.8" class="proc-btn">🔍</button>'+
       '</td>'+
       '<td style="padding:2px 2px;text-align:center">'+
-        '<button onclick="reclassifyToRawmat(\''+r.pb.replace(/\\/g,'\\\\').replace(/'/g,"\\'")+'\',\''+((r.desc||'').replace(/\\/g,'\\\\').replace(/'/g,"\\'")).substring(0,80)+'\')" '+
-        'title="העבר לחומרי גלם (ח\'\'ג)" style="background:none;border:1px solid var(--border);border-radius:3px;cursor:pointer;font-size:11px;padding:1px 5px;color:var(--text2)">→ ח&quot;ג</button>'+
+        (eltBuyOverrides[r.pb]
+          ? '<button onclick="reclassifyEltBackToElt(\'' + r.pb.replace(/\\/g, '\\\\').replace(/'/g, "\\'") + '\')" title="החזר לסיווג ELT Design (ייצור)" style="background:var(--accent,#2563eb);color:#fff;border:none;border-radius:3px;cursor:pointer;font-size:11px;padding:1px 5px">← ELT</button>'
+          : '<button onclick="reclassifyToRawmat(\'' + r.pb.replace(/\\/g, '\\\\').replace(/'/g, "\\'") + '\',\'' + ((r.desc || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'")).substring(0, 80) + '\')" title="העבר לחומרי גלם (ח\'\' ג)" style="background:none;border:1px solid var(--border);border-radius:3px;cursor:pointer;font-size:11px;padding:1px 5px;color:var(--text2)">→ ח&quot;ג</button>')+
       '</td>'+
       (function(){
         const srcText = (pentry&&pentry.src) ? escHtml(pentry.src) : '';
@@ -4742,7 +4766,7 @@ function _saveTabBuyPrice(bid){
   const price=parseFloat(priceEl.value);
   const currency=curEl?curEl.value:'ILS';
   if(!isNaN(price)&&price>=0){
-    localStorage.setItem('px_'+pb,JSON.stringify({p:price,src:'',currency}));
+    buyPrices[pb]={p:price,src:'',currency};
     if(!buyNotes[pb]) buyNotes[pb]={};
     Object.assign(buyNotes[pb],{price,currency});
     saveProcToFile();
@@ -4826,7 +4850,6 @@ function _doReclassToRawmat(pb) {
   saveRawTypeOverrides();
   if (!rawMatData[pb]) rawMatData[pb] = {};
   Object.assign(rawMatData[pb], { family:fam, grade:grade, form:form, density:String(Math.round(densGcc*1000)) });
-  localStorage.setItem(RM_STORAGE_KEY, JSON.stringify(rawMatData));
   buyBuilt = false;
   const btc=document.getElementById('buyTabContent'); if(btc) btc.dataset.built='';
   const rtc=document.getElementById('rawmatTabContent'); if(rtc) rtc.dataset.built='';
@@ -4846,6 +4869,26 @@ function reclassifyBackToBuy(pb) {
   if(_curMainTab==='buy')    _populateBuyTab(true);
   if(_curMainTab==='rawmat') _populateRawmatTab(true);
   if(_curMainTab==='matfam') _populateMatFamTab();
+}
+
+function reclassifyEltToBuy(pb) {
+  eltBuyOverrides[pb] = true;
+  saveEltBuyOverrides();
+  buyBuilt = false;
+  const btc=document.getElementById('buyTabContent'); if(btc) btc.dataset.built='';
+  computeTreeCosts(); buildCumulativeHours(); updateWHCells();
+  if(_curMainTab==='buy') _populateBuyTab(true);
+  // Refresh BOM table proc column for this row
+  try { const _rows=document.querySelectorAll('#bomTbody tr[data-idx]'); _rows.forEach(function(r){ if(r.dataset.idx && BOM[+r.dataset.idx] && (BOM[+r.dataset.idx].pb||BOM[+r.dataset.idx].pn)===pb) { buildBOMTable(); } }); } catch(e){}
+}
+
+function reclassifyEltBackToElt(pb) {
+  delete eltBuyOverrides[pb];
+  saveEltBuyOverrides();
+  buyBuilt = false;
+  const btc=document.getElementById('buyTabContent'); if(btc) btc.dataset.built='';
+  computeTreeCosts(); buildCumulativeHours(); updateWHCells();
+  if(_curMainTab==='buy') _populateBuyTab(true);
 }
 
 // ─── openAIPriceSearch — search modal with links + AI estimate ───────────────
@@ -4936,7 +4979,7 @@ function _applyAIPrice(pb) {
   const price = parseFloat(priceEl.value);
   const currency = curEl ? curEl.value : 'USD';
   if (!isNaN(price) && price > 0) {
-    localStorage.setItem('px_' + pb, JSON.stringify({p: price, src: 'AI estimate', currency}));
+    buyPrices[pb] = {p: price, src: 'AI estimate', currency};
     if (!buyNotes[pb]) buyNotes[pb] = {};
     Object.assign(buyNotes[pb], {price, currency});
     const linkEl = document.getElementById('aiExtractLink');
@@ -5442,7 +5485,8 @@ function savePriceEdit() {
   const val = parseFloat(document.getElementById('pePrice').value);
   const src = document.getElementById('peSrc').value.trim();
   if (!isNaN(val) && val >= 0) {
-    localStorage.setItem('px_' + _peKey, JSON.stringify({p: val, src}));
+    buyPrices[_peKey] = {p: val, src};
+    saveProcToFile();
   }
   document.getElementById('priceEditBox').classList.add('hidden');
   _peKey = null;
@@ -5450,7 +5494,8 @@ function savePriceEdit() {
 }
 function clearPriceEdit() {
   if (!_peKey) return;
-  localStorage.removeItem('px_' + _peKey);
+  delete buyPrices[_peKey];
+  saveProcToFile();
   document.getElementById('priceEditBox').classList.add('hidden');
   _peKey = null;
   _priceRefreshAll();
@@ -5469,7 +5514,8 @@ function buildBuyData() {
   if (buyBuilt) return;
   const map = new Map();
   BOM.forEach((item, idx) => {
-    if (item.type !== 'Buy') return;
+    const _isEltBuy = item.type === 'ELTDesign' && eltBuyOverrides[item.pb || item.pn];
+    if (item.type !== 'Buy' && !_isEltBuy) return;
     if (isRowHiddenForTabs(idx)) return;
     const _pbKey = item.pb || item.pn;
     if (rawTypeOverrides[_pbKey] === 'rawmat') return; // reclassified to ח"ג
@@ -5905,7 +5951,7 @@ function saveBuyNotes(pb) {
 
   // Keep the existing price-lookup system (getPriceEntry / computeTreeCosts) in sync
   if (price != null && price > 0) {
-    localStorage.setItem('px_' + pb, JSON.stringify({ p: price, src: url || '', currency }));
+    buyPrices[pb] = { p: price, src: url || '', currency };
   }
 
   document.getElementById('buyNotesModal').style.display = 'none';
@@ -6380,7 +6426,14 @@ async function _spWriteFile() {
     customProcTypes: PROC_TYPES,
     processes: procData,
     procMeta: procMeta,
-    rawMaterials: rawMatData
+    flaggedRows: Array.from(flaggedRows),
+    subcontractors: subData,
+    buyNotes: buyNotes,
+    rawMaterials: rawMatData,
+    matFamPrices: matFamPrices,
+    buyPrices: buyPrices,
+    rawTypeOverrides: rawTypeOverrides,
+    eltBuyOverrides: eltBuyOverrides
   }, null, 2);
   const r = await fetch(_spUploadUrl(), {
     method: 'POST',
@@ -6429,13 +6482,6 @@ async function loadProcFromFile() {
 // ─── Backup Export / Import ───────────────────────────────────────────────────
 
 function exportBackup() {
-  const buyPrices = {};
-  for (let i = 0; i < localStorage.length; i++) {
-    const k = localStorage.key(i);
-    if (k && k.startsWith('px_')) {
-      try { buyPrices[k.slice(3)] = JSON.parse(localStorage.getItem(k)); } catch(e) {}
-    }
-  }
   const backup = {
     version: 2,
     exportedAt: new Date().toISOString(),
@@ -6448,7 +6494,8 @@ function exportBackup() {
     buyNotes: buyNotes,
     rawMaterials: rawMatData,
     matFamPrices: matFamPrices,
-    buyPrices: buyPrices
+    buyPrices: buyPrices,
+    rawTypeOverrides: rawTypeOverrides
   };
   const blob = new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
@@ -6504,24 +6551,27 @@ function _restoreFromBackup(obj) {
   }
   if (obj.rawMaterials && typeof obj.rawMaterials === 'object') {
     rawMatData = obj.rawMaterials;
-    localStorage.setItem(RM_STORAGE_KEY, JSON.stringify(rawMatData));
   }
   if (obj.matFamPrices && typeof obj.matFamPrices === 'object') {
     matFamPrices = obj.matFamPrices;
-    localStorage.setItem(MAT_FAM_PRICE_KEY, JSON.stringify(matFamPrices));
   }
   if (obj.buyPrices && typeof obj.buyPrices === 'object') {
-    Object.entries(obj.buyPrices).forEach(function([pb, val]) {
-      localStorage.setItem('px_' + pb, JSON.stringify(val));
-    });
+    buyPrices = Object.assign({}, obj.buyPrices);
   }
   if (obj.buyNotes && typeof obj.buyNotes === 'object') {
     buyNotes = obj.buyNotes;
+    // Sync buyNotes prices into buyPrices
     Object.entries(buyNotes).forEach(function([k, v]) {
-      if (v && v.price != null && v.price > 0) {
-        localStorage.setItem('px_' + k, JSON.stringify({ p: v.price, src: v.url || '', currency: v.currency || 'USD' }));
+      if (v && v.price != null && v.price > 0 && !buyPrices[k]) {
+        buyPrices[k] = { p: v.price, src: v.url || '', currency: v.currency || 'USD' };
       }
     });
+  }
+  if (obj.rawTypeOverrides && typeof obj.rawTypeOverrides === 'object') {
+    rawTypeOverrides = obj.rawTypeOverrides;
+  }
+  if (obj.eltBuyOverrides && typeof obj.eltBuyOverrides === 'object') {
+    eltBuyOverrides = obj.eltBuyOverrides;
   }
   if (obj.subcontractors) subData = obj.subcontractors;
   if (Array.isArray(obj.flaggedRows)) {
@@ -6553,24 +6603,24 @@ function _mergeLoadedProc(obj) {
   // Restore all additional data stores
   if (obj.rawMaterials && typeof obj.rawMaterials === 'object') {
     rawMatData = obj.rawMaterials;
-    localStorage.setItem(RM_STORAGE_KEY, JSON.stringify(rawMatData));
   }
   if (obj.matFamPrices && typeof obj.matFamPrices === 'object') {
     matFamPrices = obj.matFamPrices;
-    localStorage.setItem(MAT_FAM_PRICE_KEY, JSON.stringify(matFamPrices));
   }
   if (obj.buyPrices && typeof obj.buyPrices === 'object') {
-    Object.entries(obj.buyPrices).forEach(function([pb, val]) {
-      localStorage.setItem('px_' + pb, JSON.stringify(val));
-    });
+    Object.assign(buyPrices, obj.buyPrices);
   }
   if (obj.buyNotes && typeof obj.buyNotes === 'object') {
     buyNotes = obj.buyNotes;
+    // Sync buyNotes prices into buyPrices for getPriceEntry() to pick up
     Object.entries(buyNotes).forEach(function([k, v]) {
-      if (v && v.price != null && v.price > 0) {
-        localStorage.setItem('px_' + k, JSON.stringify({ p: v.price, src: v.url || '', currency: v.currency || 'USD' }));
+      if (v && v.price != null && v.price > 0 && !buyPrices[k]) {
+        buyPrices[k] = { p: v.price, src: v.url || '', currency: v.currency || 'USD' };
       }
     });
+  }
+  if (obj.rawTypeOverrides && typeof obj.rawTypeOverrides === 'object') {
+    rawTypeOverrides = obj.rawTypeOverrides;
   }
   if (obj.subcontractors) subData = obj.subcontractors;
   if (Array.isArray(obj.flaggedRows)) {
@@ -6612,13 +6662,6 @@ async function saveProcToFile() {
 async function _graphWriteProcFile() {
   const token = await _graphToken();
   const url = await _graphFileUrl();
-  const buyPrices = {};
-  for (let i = 0; i < localStorage.length; i++) {
-    const k = localStorage.key(i);
-    if (k && k.startsWith('px_')) {
-      try { buyPrices[k.slice(3)] = JSON.parse(localStorage.getItem(k)); } catch(e) {}
-    }
-  }
   const payload = JSON.stringify({
     version: 1, project: 'ZMAG-6910W021',
     lastSaved: new Date().toISOString(),
@@ -6631,7 +6674,9 @@ async function _graphWriteProcFile() {
     buyNotes: buyNotes,
     rawMaterials: rawMatData,
     matFamPrices: matFamPrices,
-    buyPrices: buyPrices
+    buyPrices: buyPrices,
+    rawTypeOverrides: rawTypeOverrides,
+    eltBuyOverrides: eltBuyOverrides
   }, null, 2);
   const r = await fetch(url, {
     method: 'PUT',
@@ -6705,16 +6750,15 @@ async function loadProcFromGraph() {
     if (obj.subcontractors) subData = obj.subcontractors;
     if (obj.buyNotes) {
       buyNotes = obj.buyNotes;
-      // Sync prices stored in buyNotes to localStorage so getPriceEntry() works for all users
+      // Sync prices stored in buyNotes into buyPrices for getPriceEntry() to pick up
       Object.entries(buyNotes).forEach(([k, v]) => {
-        if (v && v.price != null && v.price > 0) {
-          localStorage.setItem('px_' + k, JSON.stringify({ p: v.price, src: v.url || '', currency: v.currency || 'USD' }));
+        if (v && v.price != null && v.price > 0 && !buyPrices[k]) {
+          buyPrices[k] = { p: v.price, src: v.url || '', currency: v.currency || 'USD' };
         }
       });
     }
     if (obj.rawMaterials && typeof obj.rawMaterials === 'object') {
       rawMatData = obj.rawMaterials;
-      localStorage.setItem(RM_STORAGE_KEY, JSON.stringify(rawMatData));
     }
     if (obj.matFamPrices && typeof obj.matFamPrices === 'object') {
       // Merge: cloud wins for keys it has; preserve local-only keys (entered since last cloud save)
@@ -6728,12 +6772,12 @@ async function loadProcFromGraph() {
         else delete merged[k];                         // both zero → remove
       });
       matFamPrices = merged;
-      localStorage.setItem(MAT_FAM_PRICE_KEY, JSON.stringify(matFamPrices));
     }
     if (obj.buyPrices && typeof obj.buyPrices === 'object') {
-      Object.entries(obj.buyPrices).forEach(function([pb, val]) {
-        localStorage.setItem('px_' + pb, JSON.stringify(val));
-      });
+      Object.assign(buyPrices, obj.buyPrices);
+    }
+    if (obj.rawTypeOverrides && typeof obj.rawTypeOverrides === 'object') {
+      rawTypeOverrides = obj.rawTypeOverrides;
     }
     {
       // MERGE flags: server + local → union (preserves all users' flags)
@@ -6769,13 +6813,6 @@ async function loadProcFromGraph() {
 
 async function _writeProcFile() {
   if (!_procFileHandle) return;
-  const buyPrices = {};
-  for (let i = 0; i < localStorage.length; i++) {
-    const k = localStorage.key(i);
-    if (k && k.startsWith('px_')) {
-      try { buyPrices[k.slice(3)] = JSON.parse(localStorage.getItem(k)); } catch(e) {}
-    }
-  }
   const payload = JSON.stringify({
     version: 1, project: 'ZMAG-6910W021',
     lastSaved: new Date().toISOString(),
@@ -6787,7 +6824,9 @@ async function _writeProcFile() {
     buyNotes: buyNotes,
     rawMaterials: rawMatData,
     matFamPrices: matFamPrices,
-    buyPrices: buyPrices
+    buyPrices: buyPrices,
+    rawTypeOverrides: rawTypeOverrides,
+    eltBuyOverrides: eltBuyOverrides
   }, null, 2);
   const w = await _procFileHandle.createWritable();
   await w.write(payload); await w.close();
