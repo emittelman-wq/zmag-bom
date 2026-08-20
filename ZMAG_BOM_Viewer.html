@@ -4876,8 +4876,9 @@ function reclassifyEltToBuy(pb) {
   saveEltBuyOverrides();
   buyBuilt = false;
   const btc=document.getElementById('buyTabContent'); if(btc) btc.dataset.built='';
-  computeTreeCosts(); buildCumulativeHours(); updateWHCells();
+  computeTreeCosts(); buildCumulativeHours();
   buildTable(); applyFilters();
+  updateWHCells(); // must run AFTER buildTable — buildTable creates the data-* DOM elements
   if(_curMainTab==='buy') _populateBuyTab(true);
   selectRow(curIdx);
 }
@@ -4887,8 +4888,9 @@ function reclassifyEltBackToElt(pb) {
   saveEltBuyOverrides();
   buyBuilt = false;
   const btc=document.getElementById('buyTabContent'); if(btc) btc.dataset.built='';
-  computeTreeCosts(); buildCumulativeHours(); updateWHCells();
+  computeTreeCosts(); buildCumulativeHours();
   buildTable(); applyFilters();
+  updateWHCells(); // must run AFTER buildTable — buildTable creates the data-* DOM elements
   if(_curMainTab==='buy') _populateBuyTab(true);
   selectRow(curIdx);
 }
