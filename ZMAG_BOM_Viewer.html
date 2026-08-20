@@ -1663,7 +1663,7 @@ function buildTable(){
     // Proc column — ELTDesign items only (moved here: between flag and level)
     const tdP = document.createElement('td');
     tdP.style.cssText = 'text-align:center;white-space:nowrap;padding:1px 2px';
-    if (item.type === 'ELTDesign') {
+    if (item.type === 'ELTDesign' && !eltBuyOverrides[item.pb || item.pn]) {
       const pb = item.pb || item.pn;
       const procs = (procData[pb] || []).filter(p => p.type);
       if(procs.length > 0) tr.classList.add('row-analyzed');
@@ -1683,7 +1683,7 @@ function buildTable(){
         tdP.appendChild(scBadge);
       }
       // ELT→Buy override button is placed in the type badge cell (tdT) below for visibility
-    } else if (item.type === 'Buy') {
+    } else if (item.type === 'Buy' || (item.type === 'ELTDesign' && eltBuyOverrides[item.pb || item.pn])) {
       const pb = item.pb || item.pn;
       const _rmUom = (item.uom || '').trim();
       // Raw material Buy items (M, M2, AR) → 🧱 button
