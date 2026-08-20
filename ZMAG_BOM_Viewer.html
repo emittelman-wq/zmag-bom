@@ -4877,9 +4877,9 @@ function reclassifyEltToBuy(pb) {
   buyBuilt = false;
   const btc=document.getElementById('buyTabContent'); if(btc) btc.dataset.built='';
   computeTreeCosts(); buildCumulativeHours(); updateWHCells();
+  buildTable(); applyFilters();
   if(_curMainTab==='buy') _populateBuyTab(true);
-  // Refresh BOM table proc column for this row
-  try { const _rows=document.querySelectorAll('#bomTbody tr[data-idx]'); _rows.forEach(function(r){ if(r.dataset.idx && BOM[+r.dataset.idx] && (BOM[+r.dataset.idx].pb||BOM[+r.dataset.idx].pn)===pb) { buildBOMTable(); } }); } catch(e){}
+  selectRow(curIdx);
 }
 
 function reclassifyEltBackToElt(pb) {
@@ -4888,7 +4888,9 @@ function reclassifyEltBackToElt(pb) {
   buyBuilt = false;
   const btc=document.getElementById('buyTabContent'); if(btc) btc.dataset.built='';
   computeTreeCosts(); buildCumulativeHours(); updateWHCells();
+  buildTable(); applyFilters();
   if(_curMainTab==='buy') _populateBuyTab(true);
+  selectRow(curIdx);
 }
 
 // ─── openAIPriceSearch — search modal with links + AI estimate ───────────────
