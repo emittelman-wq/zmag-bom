@@ -1564,6 +1564,7 @@ function getEffectiveTq(item, bomIdx) {
 // Classify a BOM item's cost type for tree breakdown
 function _isBuyRawMat(item) {
   if (item.type === 'ELTDesign') return false;
+  if (rawTypeOverrides[item.pb || item.pn] === 'buy') return false; // reclassified to Buy
   return !!(rawMatData[item.pb || item.pn]);
 }
 
@@ -4706,8 +4707,10 @@ function _populateBuyTab(force){
   _btPbMap={};
   buildBuyData();
   const RAW_UOM=/^(m2|m|ar|a\/r|kg)$/i;
-  const filtered=buyData.filter(function(r){ return !RAW_UOM.test((r.uom||'').trim()); })
-                        .sort(function(a,b){ return b.totalQty-a.totalQty; });
+  const filtered=buyData.filter(function(r){
+    // Show raw-UOM items only if explicitly reclassified to Buy
+    return !RAW_UOM.test((r.uom||'').trim()) || rawTypeOverrides[r.pb]==='buy';
+  }).sort(function(a,b){ return b.totalQty-a.totalQty; });
   filtered.forEach(function(r){ _btPbMap[_btId(r.pb)]=r.pb; });
   if(!filtered.length){
     el.innerHTML='<div style="padding:30px;text-align:center;color:var(--text3)">אין פריטי רכש</div>';
@@ -4755,9 +4758,11 @@ function _populateBuyTab(force){
           'title="חיפוש מחיר (AI + Google + Mouser...)" style="background:none;border:none;cursor:pointer;font-size:13px;padding:1px 3px;opacity:.8" class="proc-btn">🔍</button>'+
       '</td>'+
       '<td style="padding:2px 2px;text-align:center">'+
-        (eltBuyOverrides[r.pb]
-          ? '<button onclick="reclassifyEltBackToElt(\'' + r.pb.replace(/\\/g, '\\\\').replace(/'/g, "\\'") + '\')" title="החזר לסיווג ELT Design (ייצור)" style="background:var(--accent,#2563eb);color:#fff;border:none;border-radius:3px;cursor:pointer;font-size:11px;padding:1px 5px">← ELT</button>'
-          : '<button onclick="reclassifyToRawmat(\'' + r.pb.replace(/\\/g, '\\\\').replace(/'/g, "\\'") + '\',\'' + ((r.desc || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'")).substring(0, 80) + '\')" title="העבר לחומרי גלם (ח\'\' ג)" style="background:none;border:1px solid var(--border);border-radius:3px;cursor:pointer;font-size:11px;padding:1px 5px;color:var(--text2)">→ ח&quot;ג</button>')+
+        (rawTypeOverrides[r.pb]==='buy'
+          ? '<button onclick="reclassifyBuyBackToRawmat(\'' + r.pb.replace(/\\/g, '\\\\').replace(/'/g, "\\'") + '\')" title="החזר לחומרי גלם (ח&quot;ג)" style="background:var(--accent2,#d97706);color:#fff;border:none;border-radius:3px;cursor:pointer;font-size:11px;padding:1px 5px">← ח&quot;ג</button>'
+          : eltBuyOverrides[r.pb]
+            ? '<button onclick="reclassifyEltBackToElt(\'' + r.pb.replace(/\\/g, '\\\\').replace(/'/g, "\\'") + '\')" title="החזר לסיווג ELT Design (ייצור)" style="background:var(--accent,#2563eb);color:#fff;border:none;border-radius:3px;cursor:pointer;font-size:11px;padding:1px 5px">← ELT</button>'
+            : '<button onclick="reclassifyToRawmat(\'' + r.pb.replace(/\\/g, '\\\\').replace(/'/g, "\\'") + '\',\'' + ((r.desc || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'")).substring(0, 80) + '\')" title="העבר לחומרי גלם (ח\'\' ג)" style="background:none;border:1px solid var(--border);border-radius:3px;cursor:pointer;font-size:11px;padding:1px 5px;color:var(--text2)">→ ח&quot;ג</button>')+
       '</td>'+
       (function(){
         const srcText = (pentry&&pentry.src) ? escHtml(pentry.src) : '';
@@ -4885,6 +4890,30 @@ function _doReclassToRawmat(pb) {
 }
 
 function reclassifyBackToBuy(pb) {
+  delete rawTypeOverrides[pb];
+  saveRawTypeOverrides();
+  buyBuilt = false;
+  const btc=document.getElementById('buyTabContent'); if(btc) btc.dataset.built='';
+  const rtc=document.getElementById('rawmatTabContent'); if(rtc) rtc.dataset.built='';
+  computeTreeCosts(); buildCumulativeHours(); updateWHCells();
+  if(_curMainTab==='buy')    _populateBuyTab(true);
+  if(_curMainTab==='rawmat') _populateRawmatTab(true);
+  if(_curMainTab==='matfam') _populateMatFamTab();
+}
+
+function reclassifyRawmatToBuy(pb) {
+  rawTypeOverrides[pb] = 'buy';
+  saveRawTypeOverrides();
+  buyBuilt = false;
+  const btc=document.getElementById('buyTabContent'); if(btc) btc.dataset.built='';
+  const rtc=document.getElementById('rawmatTabContent'); if(rtc) rtc.dataset.built='';
+  computeTreeCosts(); buildCumulativeHours(); updateWHCells();
+  if(_curMainTab==='buy')    _populateBuyTab(true);
+  if(_curMainTab==='rawmat') _populateRawmatTab(true);
+  if(_curMainTab==='matfam') _populateMatFamTab();
+}
+
+function reclassifyBuyBackToRawmat(pb) {
   delete rawTypeOverrides[pb];
   saveRawTypeOverrides();
   buyBuilt = false;
@@ -5116,6 +5145,7 @@ function _populateRawmatTab(force){
         (configured?'<span style="cursor:pointer;text-decoration:underline" onclick="openRawMatEditor(this.parentElement.parentElement.dataset.pb, this.parentElement.parentElement.dataset.desc)" title="ערוך">✏️</span> ':'<button class="proc-btn" onclick="openRawMatEditor(this.parentElement.parentElement.dataset.pb, this.parentElement.parentElement.dataset.desc, this.parentElement.parentElement.dataset.tq)" style="font-size:11px">⚙ הגדר</button>')+
         (configured?kgStr:'')+
         (isOverriddenToRawmat?' <button class="proc-btn" onclick="reclassifyBackToBuy(\''+r.pb+'\')" style="font-size:11px;background:var(--warn,#c0392b);color:#fff;margin-right:4px" title="החזר לטבלת רכש">← רכש</button>':'')+
+        (configured&&!isOverriddenToRawmat?' <button class="proc-btn" onclick="reclassifyRawmatToBuy(\''+r.pb+'\')" style="font-size:11px;border-color:var(--accent2);color:var(--accent2);margin-right:4px" title="סווג כרכש רגיל">→ רכש</button>':'')+
       '</td>'+
       '</tr>';
   });
