@@ -1629,6 +1629,39 @@ function fmtTimeAuto(minutes) {
   const h = Math.round(minutes / 60 * 10) / 10;
   return h + ' hr';
 }
+
+// ─── _computeVisibleCosts ─────────────────────────────────────────────────────
+// Sums costs ONLY for rows currently visible in the BOM table (respects all filters).
+// Uses ownExtCosts[] (per-item own cost) from the last computeTreeCosts() run.
+// Returns { mfg, cots, rawm, nre, total } in ILS × projectQty (nre × 1).
+function _computeVisibleCosts() {
+  const pQty = projectQty || 1;
+  let mfg = 0, cots = 0, rawm = 0, nre = 0;
+  if (!ownExtCosts || !ownExtCosts.length) return { mfg:0, cots:0, rawm:0, nre:0, total:0 };
+  BOM.forEach(function(item, idx) {
+    const tr = rows[idx];
+    if (!tr || tr.classList.contains('hid') || isRowExcluded(idx)) return;
+    const pb  = item.pb || item.pn;
+    const ext = ownExtCosts[idx] || 0;
+    if (item.type === 'ELTDesign' && !eltBuyOverrides[pb]) {
+      mfg += ext;
+      nre += itemSetupCost[idx] || 0;
+    } else if (_isBuyRawMat(item)) {
+      rawm += ext;
+    } else {
+      cots += ext; // Buy + ELTDesign with eltBuyOverrides
+    }
+  });
+  const r = {
+    mfg:  Math.round(mfg  * pQty * 100) / 100,
+    cots: Math.round(cots * pQty * 100) / 100,
+    rawm: Math.round(rawm * pQty * 100) / 100,
+    nre:  Math.round(nre  * 100) / 100,
+  };
+  r.total = Math.round((r.mfg + r.cots + r.rawm + r.nre) * 100) / 100;
+  return r;
+}
+
 function buildTable(){
   const tbody=document.getElementById('bomBody');
   tbody.innerHTML='';
@@ -3743,10 +3776,11 @@ function _execRecalc() {
   const g = function(id){ const el=document.getElementById(id); return el?(parseFloat(el.value)||0):0; };
   const gs = function(id){ const el=document.getElementById(id); return el?(el.value||''):''; };
 
-  // Auto values
-  const mfgCostAuto = Math.round(treeMfgCost[0]||0);
-  const cotsAuto    = Math.round(treeCotsCost[0]||0);
-  const rmAuto      = Math.round(treeRawMatCost[0]||0);
+  // Auto values — filter-aware (only visible rows)
+  const _vcR = _computeVisibleCosts();
+  const mfgCostAuto = Math.round(_vcR.mfg);
+  const cotsAuto    = Math.round(_vcR.cots);
+  const rmAuto      = Math.round(_vcR.rawm);
   const hourRate    = g('er-hourRate');
 
   // Row costs (use auto if auto>0, else manual rate × hours)
@@ -3786,12 +3820,13 @@ function _populateReportsTab() {
   const elt      = BOM.filter(function(b){ return b.type==='ELTDesign'; }).length;
   const analyzed = BOM.filter(function(b){ return b.type==='ELTDesign' && procData[b.pb||b.pn] && (procData[b.pb||b.pn]||[]).length; }).length;
 
-  // ── Auto data extraction ──────────────────────────────────────────────
+  // ── Auto data extraction — filter-aware (only visible rows) ──────────────
   const mfgCycleH  = Math.round((cumCycleH[0]||0)*10)/10;
   const setupH     = Math.round(((cumHours[0]||0)-(cumCycleH[0]||0))*10)/10;
-  const mfgCostAuto= Math.round(treeMfgCost[0]||0);
-  const cotsAuto   = Math.round(treeCotsCost[0]||0);
-  const rmAuto     = Math.round(treeRawMatCost[0]||0);
+  const _vcP = _computeVisibleCosts();
+  const mfgCostAuto= Math.round(_vcP.mfg);
+  const cotsAuto   = Math.round(_vcP.cots);
+  const rmAuto     = Math.round(_vcP.rawm);
 
   // Buy items stats
   const buyAllPb = new Set(), buyPricedPb = new Set();
@@ -4397,24 +4432,14 @@ function updateStats(visCount){
     rows.forEach(function(tr){ if(tr&&!tr.classList.contains('hid')&&!tr.classList.contains('cc')) vis++; });
   }
   const n=BOM.length;
-  const tc=treeCosts[0]||0;
+  // Use filter-aware visible costs instead of full-BOM tree[0] values
+  const _vc = _computeVisibleCosts();
+  const tc = _vc.total;
   const th=(cumHours&&cumHours[0]||0)*(projectQty||1);
-  // Compute manufacturing cost from ELTDesign items only (hours × rate)
-  let mfgCost=0;
-  if(unitCosts&&unitCosts.length){
-    BOM.forEach(function(item,idx){
-      if(item.type==='ELTDesign'&&!isRowExcluded(idx)){
-        mfgCost+=(unitCosts[idx]||0)*(item.tq||1);
-      }
-    });
-  }
   let txt=n+' פריטים · '+vis+' מוצגים';
   if(projectQty>1) txt+=' · '+projectQty+' ערכות';
-  // Always show total cost (treeCosts[0] = materials + buy + manufacturing labor)
-  if(tc>0) txt+=' · עלות: '+fmtC(tc*(projectQty||1));
-  // If process rates are set, also show labor-only breakdown in parentheses
-  if(mfgCost>0 && mfgCost<tc*0.999) txt+=' (ייצור: '+fmtC(mfgCost*(projectQty||1))+')';
-  // Always show manufacturing hours
+  if(tc>0) txt+=' · עלות: '+fmtC(tc);
+  if(_vc.mfg>0 && _vc.mfg<tc*0.999) txt+=' (ייצור: '+fmtC(_vc.mfg)+')';
   if(th>0) txt+=' · '+fmtTimeAuto(th*60)+' שעות';
   bar.textContent=txt;
 }
@@ -7907,8 +7932,10 @@ async function exportBomExcel() {
   try {
     _xlsVisible.forEach(function(idx) {
       const item = BOM[idx];
-      if (item.type !== 'Buy') return;
-      const ent = getPriceEntry(item.pb);
+      const pb = item.pb || item.pn;
+      const isBuyOverride = item.type === 'ELTDesign' && eltBuyOverrides[pb];
+      if (item.type !== 'Buy' && !isBuyOverride) return;
+      const ent = getPriceEntry(pb);
       const unitPriceILS = ent ? toILS(ent.p, ent.currency||'USD') : 0;
       _preBuyTotal += unitPriceILS * (item.tq||0) * pQty;
     });
@@ -7920,6 +7947,7 @@ async function exportBomExcel() {
       const item = BOM[idx];
       if (item.type !== 'ELTDesign') return;
       const pb = item.pb || item.pn;
+      if (eltBuyOverrides[pb]) return; // treated as COTS — not manufacturing
       const tq = item.tq || 0;
       (procData[pb]||[]).forEach(function(p) {
         const pt = PROC_TYPES.find(function(x){ return x.id === p.type; });
@@ -7943,6 +7971,7 @@ async function exportBomExcel() {
       const item = BOM[idx];
       if (item.type !== 'ELTDesign') return;
       const pb = item.pb || item.pn;
+      if (eltBuyOverrides[pb]) return; // treated as COTS — not manufacturing
       const tq = item.tq || 0;
       (procData[pb]||[]).forEach(function(p) {
         const pt = PROC_TYPES.find(function(x){ return x.id === p.type; });
@@ -7954,12 +7983,14 @@ async function exportBomExcel() {
       });
     });
   } catch(e) {}
+  // All summary values are filter-aware (based on _xlsVisible only)
   const _sumNREFinal = Math.round(_preNRETotal * 100) / 100;
   const _sumREFinal  = Math.round(_preRETotal  * 100) / 100;
+  const _sumCotsFinalUsed = Math.round(_preBuyTotal * 100) / 100;
 
   // ── Sheet 0: סיכום מנהלים (Executive Summary) ─────────────────────────────
   const _sumHours = Math.round((cumHours[0] || 0) * pQty * 100) / 100;
-  const _sumTotalFinal = Math.round((_sumNREFinal + _sumREFinal + _sumCotsFinal + _sumRawmFinal) * 100) / 100;
+  const _sumTotalFinal = Math.round((_sumNREFinal + _sumREFinal + _sumCotsFinalUsed + _sumRawmFinal) * 100) / 100;
   // Cross-sheet formula link row trackers (set inside ws3/ws4/ws5 try blocks)
   let _ws3TotalRowNum, _ws4TotalRowNum, _ws5TotalRowNum;
 
