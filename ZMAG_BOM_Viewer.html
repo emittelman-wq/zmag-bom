@@ -8199,20 +8199,21 @@ async function exportBomExcel() {
   // Collapse all outline groups by default so top-level is visible
   ws2.properties = ws2.properties || {};
 
-  // ── Sheet 3: ח"ג — Raw Materials pricing summary ─────────────────────────
+  // ── Sheet 3: ח"ג — Raw Materials (individual BOM line items, filter-aware) ──
   try {
     const ws3 = wb.addWorksheet('ח"ג', {views:[{rightToLeft:true}]});
-    const RM_COLS = [
-      {header:'משפחה',         key:'family',   width:18},
-      {header:'מאפיין',        key:'grade',    width:16},
-      {header:'צורה',          key:'form',     width:12},
-      {header:'צפיפות (g/cc)', key:'density',  width:16},
-      {header:'שורות BOM',     key:'bomRows',  width:12},
-      {header:'מסה כוללת (kg)',key:'massKg',   width:16},
-      {header:'מחיר ₪/ק"ג',   key:'priceKg',  width:14},
-      {header:'עלות כוללת ₪',  key:'totalCost',width:16},
+    const RM_COLS3 = [
+      {header:'PB',              key:'pb',        width:20},
+      {header:'PN',              key:'pn',        width:20},
+      {header:'תיאור',           key:'desc',      width:38},
+      {header:'UOM',             key:'uom',       width:8},
+      {header:'כמות כוללת (TQ)', key:'tq',        width:14},
+      {header:'מחיר יחידה ₪',    key:'unitPrice', width:16},
+      {header:'עלות כוללת ₪',    key:'totalCost', width:16},
+      {header:'הערות',           key:'notes',     width:28},
+      {header:'לינק',            key:'link',      width:30},
     ];
-    ws3.columns = RM_COLS;
+    ws3.columns = RM_COLS3;
     ws3.getRow(1).eachCell(function(cell) {
       cell.font  = {bold:true, color:{argb:'FFFFFFFF'}};
       cell.fill  = {type:'pattern', pattern:'solid', fgColor:{argb:'FF7C3AED'}};
@@ -8220,63 +8221,63 @@ async function exportBomExcel() {
     });
     ws3.getRow(1).height = 20;
 
-    const rm3Map = _buildMatFamMap();
-    // Add matFamPrices-only entries not in BOM
-    Object.keys(matFamPrices).forEach(function(key) {
-      if (rm3Map.has(key)) return;
-      const parts = key.split('||');
-      const fam = parts[0], grade = parts[1]||'generic', form = parts[2]||'sheet';
-      const fd = MATERIAL_DB[fam]||{};
-      const gd = (fd.grades||[]).find(function(g){return g.id===grade;})||{};
-      rm3Map.set(key, {key:key, family:fam, grade:grade, form:form,
-        density:gd.density||fd.density||7850, totalMass:0, bomRows:0});
-    });
-    const rmEntries = Array.from(rm3Map.values())
-      .filter(function(e){ return e.bomRows > 0 || matFamPrices[e.key]; })
-      .sort(function(a,b){ return (a.family+a.grade).localeCompare(b.family+b.grade); });
-
     let rm3TotalCost = 0;
     let rm3DataRow = 2;
-    rmEntries.forEach(function(entry, ri) {
-      const fd  = MATERIAL_DB[entry.family] || {};
-      const gd  = (fd.grades||[]).find(function(g){return g.id===entry.grade;})||{};
-      const famLabel   = fd.label || entry.family;
-      const gradeLabel = gd.label || entry.grade;
-      const formLabel  = entry.form;
-      const densityVal = parseFloat(entry.density) || 0;
-      const massKg     = Math.round(entry.totalMass * 100) / 100;
-      const priceKg    = parseFloat(matFamPrices[entry.key]) || 0;
-      const totalCost  = Math.round(massKg * priceKg * 100) / 100;
-      rm3TotalCost += totalCost;
+
+    // Collect raw-mat items: non-ELTDesign items with rawMatData configured (or non-M/M2/AR Buy items that are ח"ג)
+    _xlsVisible.forEach(function(idx) {
+      const item = BOM[idx];
+      if (!_isBuyRawMat(item)) return; // only ח"ג classified items
+      const pb  = item.pb || item.pn;
+      const tq  = item.tq || 0;
+      const unitCostILS = unitCosts[idx] || 0;
+      const totalCostILS = Math.round(unitCostILS * tq * pQty * 100) / 100;
+      rm3TotalCost += totalCostILS;
+
+      const bn = buyNotes[pb] || {};
+      const notes = bn.notes || '';
+      const link  = bn.url   || bn.link || '';
+
       const r3 = ws3.addRow({
-        family:   famLabel,
-        grade:    gradeLabel,
-        form:     formLabel,
-        density:  densityVal,
-        bomRows:  entry.bomRows,
-        massKg:   massKg,
-        priceKg:  priceKg,
-        totalCost:totalCost,
+        pb:        pb,
+        pn:        item.pn,
+        desc:      item.desc,
+        uom:       item.uom,
+        tq:        tq,
+        unitPrice: Math.round(unitCostILS * 100) / 100,
+        totalCost: totalCostILS,
+        notes:     notes,
+        link:      link,
       });
-      // totalCost (col 8, H) = massKg (col 6, F) × priceKg (col 7, G) — user enters G
-      r3.getCell(8).value = {formula:'=F'+rm3DataRow+'*G'+rm3DataRow, result:totalCost};
-      rm3DataRow++;
-      const bg3 = ri % 2 === 0 ? 'FFEDE9FE' : 'FFF5F3FF';
-      r3.eachCell(function(cell){ cell.fill = {type:'pattern',pattern:'solid',fgColor:{argb:bg3}}; });
-      for (let c = 4; c <= RM_COLS.length; c++) {
-        r3.getCell(c).alignment = {horizontal:'right'};
-        r3.getCell(c).numFmt = '#,##0.00';
+      // totalCost = unitPrice × TQ × pQty
+      r3.getCell(7).value = {formula:'=F'+rm3DataRow+'*E'+rm3DataRow+'*'+pQty, result:totalCostILS};
+      // Link cell as hyperlink if present
+      if (link) {
+        r3.getCell(9).value = {text: link, hyperlink: link};
+        r3.getCell(9).font = {color:{argb:'FF2563EB'}, underline:true};
       }
+      rm3DataRow++;
+      const bg3 = rm3DataRow % 2 === 0 ? 'FFEDE9FE' : 'FFF5F3FF';
+      r3.eachCell(function(cell){ cell.fill = {type:'pattern',pattern:'solid',fgColor:{argb:bg3}}; });
+      r3.getCell(5).numFmt = '#,##0.00';
+      r3.getCell(6).numFmt = '#,##0.00';
+      r3.getCell(7).numFmt = '#,##0.00';
+      r3.getCell(5).alignment = {horizontal:'right'};
+      r3.getCell(6).alignment = {horizontal:'right'};
+      r3.getCell(7).alignment = {horizontal:'right'};
     });
-    // Total row with SUM formula
-    const rmTotal = ws3.addRow({family:'סה"כ'});
-    rmTotal.getCell(1).font = {bold:true};
-    rmTotal.getCell(RM_COLS.length).value = {formula:'=SUM(H2:H'+(rm3DataRow-1)+')', result:Math.round(rm3TotalCost*100)/100};
-    rmTotal.getCell(RM_COLS.length).numFmt = '#,##0.00';
-    rmTotal.getCell(RM_COLS.length).alignment = {horizontal:'right'};
-    rmTotal.getCell(RM_COLS.length).font = {bold:true};
-    _ws3TotalRowNum = rm3DataRow;  // total row = header(1) + data rows + 1
-    ws3.autoFilter = {from:{row:1,column:1}, to:{row:1,column:RM_COLS.length}};
+
+    // Total row
+    const rmTotal3 = ws3.addRow({pb:'סה"כ'});
+    rmTotal3.getCell(1).font = {bold:true};
+    const rm3TotalCell = rmTotal3.getCell(7);
+    rm3TotalCell.value = {formula:'=SUM(G2:G'+(rm3DataRow-1)+')', result:Math.round(rm3TotalCost*100)/100};
+    rm3TotalCell.numFmt = '#,##0.00';
+    rm3TotalCell.alignment = {horizontal:'right'};
+    rm3TotalCell.font = {bold:true};
+    _ws3TotalRowNum = rm3DataRow; // total row index for summary formula link
+
+    ws3.autoFilter = {from:{row:1,column:1}, to:{row:1,column:RM_COLS3.length}};
     ws3.views = [{state:'frozen', ySplit:1, rightToLeft:true}];
   } catch(e3) { console.warn('ח"ג sheet error:', e3); }
 
@@ -8503,8 +8504,8 @@ async function exportBomExcel() {
         row.getCell(2).value = _sumNREFinal;
       } else if (lbl.includes('רכש') && !lbl.includes('רכיב')) {
         row.getCell(2).value = _sumCotsFinalUsed;
-      } else if (lbl.includes('ח"ג')) {
-        row.getCell(2).value = _sumRawmFinalXls;
+      } else if (lbl.includes('ח"ג') && _ws3TotalRowNum) {
+        row.getCell(2).value = {formula: "='ח\"ג'!G" + _ws3TotalRowNum, result: _sumRawmFinalXls};
       }
     });
     } catch(e_ws0fl) { console.warn('ws0 formula links error:', e_ws0fl); }
