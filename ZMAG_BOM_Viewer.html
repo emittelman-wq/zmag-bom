@@ -8101,18 +8101,16 @@ async function exportBomExcel() {
   });
   ws2.getRow(1).height = 20;
 
-  let _h2RowNum = 0;
   let _ws2DataRow = 2;
   const _ws2RowMap   = {}; // BOM idx → ws2 Excel row number
   const _ws2RowStore = {}; // BOM idx → ExcelJS row object
   BOM.forEach(function(item, idx) {
     if (!_xlsVisible.has(idx)) return;
-    _h2RowNum++;
     const d = getRowData(item, idx);
     const ownRow = Math.round((ownExtCosts[idx]||0) * pQty * 100) / 100;
     const indent = '  '.repeat(item.lv);
     const r = ws2.addRow({
-      row:   _h2RowNum,
+      row:   idx + 1,  // original BOM table row number
       lv:    d.lv,
       pn:    d.pn,
       desc:  indent + d.desc,
@@ -8175,22 +8173,26 @@ async function exportBomExcel() {
         }
       }
       if (childRows.length === 0) return;
-      var firstCR = Math.min.apply(null, childRows);
-      var lastCR  = Math.max.apply(null, childRows);
       var rH = _ws2RowStore[idx];
       if (!rH) return;
-      var buyVal = rH.getCell(13).value;
-      var rawVal = rH.getCell(14).value;
-      const _fmlaM = childRows.length === 1
-        ? '=M' + childRows[0]
-        : '=' + childRows.map(function(r){ return 'M'+r; }).join('+');
-      const _fmlaN = childRows.length === 1
-        ? '=N' + childRows[0]
-        : '=' + childRows.map(function(r){ return 'N'+r; }).join('+');
-      const _buyResult = typeof buyVal === 'object' ? (buyVal.result||0) : (buyVal||0);
-      const _rawResult = typeof rawVal === 'object' ? (rawVal.result||0) : (rawVal||0);
-      rH.getCell(13).value = {formula: _fmlaM, result: _buyResult};
-      rH.getCell(14).value = {formula: _fmlaN, result: _rawResult};
+      // Build SUM formulas for ALL cost columns from direct visible children:
+      // col 12=L (Labor/Mfg), 13=M (Buy/COTS), 14=N (ח"ג), 15=O (NRE/Setup)
+      function _childSum(col) {
+        return childRows.length === 1
+          ? '=' + col + childRows[0]
+          : '=' + childRows.map(function(r){ return col+r; }).join('+');
+      }
+      function _childResult(cellIdx) {
+        var v = rH.getCell(cellIdx).value;
+        return typeof v === 'object' ? (v.result||0) : (v||0);
+      }
+      rH.getCell(12).value = {formula: _childSum('L'), result: _childResult(12)};
+      rH.getCell(13).value = {formula: _childSum('M'), result: _childResult(13)};
+      rH.getCell(14).value = {formula: _childSum('N'), result: _childResult(14)};
+      rH.getCell(15).value = {formula: _childSum('O'), result: _childResult(15)};
+      // Recompute pcost formula from updated cost columns
+      const _myRow = _ws2RowMap[idx];
+      rH.getCell(16).value = {formula:'=L'+_myRow+'+M'+_myRow+'+N'+_myRow+'+O'+_myRow, result: _childResult(16)};
     });
   } catch(e_ws2sum) { console.warn('ws2 SUM formula error:', e_ws2sum); }
 
