@@ -7983,14 +7983,17 @@ async function exportBomExcel() {
       });
     });
   } catch(e) {}
-  // All summary values are filter-aware (based on _xlsVisible only)
-  const _sumNREFinal = Math.round(_preNRETotal * 100) / 100;
-  const _sumREFinal  = Math.round(_preRETotal  * 100) / 100;
-  const _sumCotsFinalUsed = Math.round(_preBuyTotal * 100) / 100;
+  // Summary values: use tree[0] from computeTreeCosts() — same as root row in BOM table.
+  // This ensures Excel summary = BOM table top row (consistent, filter-independent).
+  const _sumREFinal       = Math.round((treeMfgCost[0]    || 0) * pQty * 100) / 100;
+  const _sumNREFinal      = Math.round((cumSetupCosts[0]  || 0) * 100) / 100;
+  const _sumCotsFinalUsed = Math.round((treeCotsCost[0]   || 0) * pQty * 100) / 100;
+  // Override raw-material total with tree-computed value for same reason
+  const _sumRawmFinalXls  = Math.round((treeRawMatCost[0] || 0) * pQty * 100) / 100;
 
   // ── Sheet 0: סיכום מנהלים (Executive Summary) ─────────────────────────────
   const _sumHours = Math.round((cumHours[0] || 0) * pQty * 100) / 100;
-  const _sumTotalFinal = Math.round((_sumNREFinal + _sumREFinal + _sumCotsFinalUsed + _sumRawmFinal) * 100) / 100;
+  const _sumTotalFinal = Math.round((_sumNREFinal + _sumREFinal + _sumCotsFinalUsed + _sumRawmFinalXls) * 100) / 100;
   // Cross-sheet formula link row trackers (set inside ws3/ws4/ws5 try blocks)
   let _ws3TotalRowNum, _ws4TotalRowNum, _ws5TotalRowNum;
 
@@ -8026,7 +8029,7 @@ async function exportBomExcel() {
   _w0Row('🔧 RE - ייצור (עבודה חוזרת) ₪', _sumREFinal,  false, 'FFDBEAFE');
   _w0Row('⚙ NRE - סטאפ / הגדרות ₪',     _sumNREFinal, false, 'FFFEF3C7');
   _w0Row('🛒 רכש (Buy items) ₪',           _sumCotsFinal, false, 'FFDCFCE7');
-  _w0Row('🧱 חומרי גלם (ח"ג) ₪',          _sumRawmFinal, false, 'FFEDE9FE');
+  _w0Row('🧱 חומרי גלם (ח"ג) ₪',          _sumRawmFinalXls, false, 'FFEDE9FE');
   _w0Row('💰 סה"כ עלות פרויקט ₪',   _sumTotalFinal, true, 'FF1E3A5F');
   { const _gtRow = ws0.getRow(ws0.rowCount);
     _gtRow.eachCell(function(c){ c.font={bold:true,color:{argb:'FFFFFFFF'}}; c.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FF1E3A5F'}}; }); }
@@ -8497,9 +8500,9 @@ async function exportBomExcel() {
       } else if (lbl.includes('NRE - \u05E1\u05D8\u05D0\u05E4') && _ws5TotalRowNum) {
         row.getCell(2).value = {formula: "='\u05E2\u05DC\u05D5\u05EA \u05E9\"\u05E2'!H" + _ws5TotalRowNum, result: _sumNREFinal};
       } else if (lbl.includes('\u05E8\u05DB\u05E9') && !lbl.includes('\u05E8\u05DB\u05D9\u05D1') && _ws4TotalRowNum) {
-        row.getCell(2).value = {formula: "=\u05E8\u05DB\u05E9!J" + _ws4TotalRowNum, result: _sumCotsFinal};
+        row.getCell(2).value = {formula: "=\u05E8\u05DB\u05E9!J" + _ws4TotalRowNum, result: _sumCotsFinalUsed};
       } else if (lbl.includes('\u05D7\"\u05D2') && _ws3TotalRowNum) {
-        row.getCell(2).value = {formula: "='\u05D7\"\u05D2'!H" + _ws3TotalRowNum, result: _sumRawmFinal};
+        row.getCell(2).value = {formula: "='\u05D7\"\u05D2'!H" + _ws3TotalRowNum, result: _sumRawmFinalXls};
       }
     });
   } catch(e_ws0fl) { console.warn('ws0 formula links error:', e_ws0fl); }
