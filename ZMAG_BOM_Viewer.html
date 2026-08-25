@@ -8170,15 +8170,15 @@ async function exportBomExcel() {
   try {
     const ws3 = wb.addWorksheet('ח"ג', {views:[{rightToLeft:true}]});
     const RM_COLS3 = [
-      {header:'PB',              key:'pb',        width:20},
-      {header:'PN',              key:'pn',        width:20},
-      {header:'תיאור',           key:'desc',      width:38},
-      {header:'UOM',             key:'uom',       width:8},
-      {header:'כמות כוללת (TQ)', key:'tq',        width:14},
-      {header:'מחיר יחידה ₪',    key:'unitPrice', width:16},
-      {header:'עלות כוללת ₪',    key:'totalCost', width:16},
-      {header:'הערות',           key:'notes',     width:28},
-      {header:'לינק',            key:'link',      width:30},
+      {header:'PB',              key:'pb',         width:20},
+      {header:'PN',              key:'pn',         width:20},
+      {header:'תיאור',           key:'desc',       width:38},
+      {header:'UOM',             key:'uom',        width:8},
+      {header:'כמות כוללת (TQ)', key:'tq',         width:14},
+      {header:'מחיר יחידה ₪',    key:'unitPrice',  width:16},
+      {header:'עלות כוללת ₪',    key:'totalCost',  width:16},
+      {header:'משקל מוערך (kg)', key:'weightKg',   width:16},
+      {header:'מחיר לק"ג (₪)',   key:'pricePerKg', width:16},
     ];
     ws3.columns = RM_COLS3;
     ws3.getRow(1).eachCell(function(cell) {
@@ -8201,37 +8201,33 @@ async function exportBomExcel() {
       const totalCostILS = Math.round(unitCostILS * tq * pQty * 100) / 100;
       rm3TotalCost += totalCostILS;
 
-      const bn = buyNotes[pb] || {};
-      const notes = bn.notes || '';
-      const link  = bn.url   || bn.link || '';
+      const rm3 = rawMatData[pb] || {};
+      const pricePerKg3 = rm3.unitCost ? Math.round(toILS(rm3.unitCost, rm3.costCurrency||'ILS') * 100) / 100 : 0;
+      // Estimated weight: total cost / price-per-kg (valid when costUnit==='kg')
+      const weightKg3 = (pricePerKg3 > 0 && rm3.costUnit !== 'm2' && rm3.costUnit !== 'm')
+        ? Math.round(totalCostILS / pricePerKg3 * 100) / 100
+        : 0;
 
       const r3 = ws3.addRow({
-        pb:        pb,
-        pn:        item.pn,
-        desc:      item.desc,
-        uom:       item.uom,
-        tq:        tq,
-        unitPrice: Math.round(unitCostILS * 100) / 100,
-        totalCost: totalCostILS,
-        notes:     notes,
-        link:      link,
+        pb:         pb,
+        pn:         item.pn,
+        desc:       item.desc,
+        uom:        item.uom,
+        tq:         tq,
+        unitPrice:  Math.round(unitCostILS * 100) / 100,
+        totalCost:  totalCostILS,
+        weightKg:   weightKg3,
+        pricePerKg: pricePerKg3,
       });
       // totalCost = unitPrice × TQ × pQty
       r3.getCell(7).value = {formula:'=F'+rm3DataRow+'*E'+rm3DataRow+'*'+pQty, result:totalCostILS};
-      // Link cell as hyperlink if present
-      if (link) {
-        r3.getCell(9).value = {text: link, hyperlink: link};
-        r3.getCell(9).font = {color:{argb:'FF2563EB'}, underline:true};
-      }
       rm3DataRow++;
       const bg3 = rm3DataRow % 2 === 0 ? 'FFEDE9FE' : 'FFF5F3FF';
       r3.eachCell(function(cell){ cell.fill = {type:'pattern',pattern:'solid',fgColor:{argb:bg3}}; });
-      r3.getCell(5).numFmt = '#,##0.00';
-      r3.getCell(6).numFmt = '#,##0.00';
-      r3.getCell(7).numFmt = '#,##0.00';
-      r3.getCell(5).alignment = {horizontal:'right'};
-      r3.getCell(6).alignment = {horizontal:'right'};
-      r3.getCell(7).alignment = {horizontal:'right'};
+      for (let c3 = 5; c3 <= 9; c3++) {
+        r3.getCell(c3).numFmt = '#,##0.00';
+        r3.getCell(c3).alignment = {horizontal:'right'};
+      }
     });
 
     // Total row
@@ -8262,6 +8258,8 @@ async function exportBomExcel() {
       {header:'מחיר יחידה ₪', key:'unitPrice',width:15},
       {header:'מטבע מקורי',   key:'currency', width:12},
       {header:'עלות כוללת (₪ ILS)', key:'totalCost',width:16},
+      {header:'הערות',         key:'notes',    width:28},
+      {header:'לינק',          key:'link',     width:30},
     ];
     ws4.columns = BUY_COLS;
     ws4.getRow(1).eachCell(function(cell) {
@@ -8294,6 +8292,9 @@ async function exportBomExcel() {
       const qty4 = Math.round(br.totalQty * pQty * 100) / 100;
       const totalCost4 = Math.round(unitPriceILS * qty4 * 100) / 100;
       buy4TotalCost += totalCost4;
+      const bn4 = buyNotes[br.pb] || {};
+      const notes4 = bn4.notes || '';
+      const link4  = bn4.url || bn4.link || '';
       const r4 = ws4.addRow({
         pb:        br.pb,
         pn:        br.pn,
@@ -8305,24 +8306,32 @@ async function exportBomExcel() {
         unitPrice: Math.round(unitPriceILS*100)/100,
         currency:  ent ? (ent.currency||'USD') : '',
         totalCost: totalCost4,
+        notes:     notes4,
+        link:      link4,
       });
-      // totalCost (col 10, J) = qty (col 7, G) × unitPrice (col 8, H) — user enters H
+      // totalCost (col 10, J) = qty (col 7, G) × unitPrice (col 8, H)
       r4.getCell(10).value = {formula:'=G'+buy4DataRow+'*H'+buy4DataRow, result:totalCost4};
+      // Link as hyperlink if present (col 12, L)
+      if (link4) {
+        r4.getCell(12).value = {text: link4, hyperlink: link4};
+        r4.getCell(12).font = {color:{argb:'FF2563EB'}, underline:true};
+      }
       buy4DataRow++;
       const bg4 = bi % 2 === 0 ? 'FFD1FAE5' : 'FFF0FDF4';
       r4.eachCell(function(cell){ cell.fill = {type:'pattern',pattern:'solid',fgColor:{argb:bg4}}; });
-      for (let c = 7; c <= BUY_COLS.length; c++) {
+      // Numeric format only for cols 7-10 (qty, unitPrice, currency, totalCost)
+      for (let c = 7; c <= 10; c++) {
         r4.getCell(c).alignment = {horizontal:'right'};
         r4.getCell(c).numFmt = '#,##0.00';
       }
     });
-    // Total row with SUM formula
+    // Total row with SUM formula for totalCost (col 10 = J)
     const buyTotal4 = ws4.addRow({pb:'סה"כ'});
     buyTotal4.getCell(1).font = {bold:true};
-    buyTotal4.getCell(BUY_COLS.length).value = {formula:'=SUM(J2:J'+(buy4DataRow-1)+')', result:Math.round(buy4TotalCost*100)/100};
-    buyTotal4.getCell(BUY_COLS.length).numFmt = '#,##0.00';
-    buyTotal4.getCell(BUY_COLS.length).alignment = {horizontal:'right'};
-    buyTotal4.getCell(BUY_COLS.length).font = {bold:true};
+    buyTotal4.getCell(10).value = {formula:'=SUM(J2:J'+(buy4DataRow-1)+')', result:Math.round(buy4TotalCost*100)/100};
+    buyTotal4.getCell(10).numFmt = '#,##0.00';
+    buyTotal4.getCell(10).alignment = {horizontal:'right'};
+    buyTotal4.getCell(10).font = {bold:true};
     _ws4TotalRowNum = buy4DataRow;  // total row = header(1) + data rows + 1
     ws4.autoFilter = {from:{row:1,column:1}, to:{row:1,column:BUY_COLS.length}};
     ws4.views = [{state:'frozen', ySplit:1, rightToLeft:true}];
