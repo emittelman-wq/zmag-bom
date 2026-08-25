@@ -775,10 +775,10 @@ const COLS = [
   {id:'rowcost',label:'🔧 ייצור שורה',w:90,  sort:false},
   {id:'lcost', label:'🔧 ייצור (עץ)', w:90,  sort:false},
   {id:'bcost', label:'🛒 COTS (עץ)',   w:85,  sort:false},
-  {id:'ucost', label:'🧱 ח"ג (עץ)',   w:85,  sort:false},
-  {id:'tcost', label:'⚙ Setup NRE ₪',  w:95,  sort:false},
-  {id:'paintCost', label:'🎨 עלות צבע',   w:95,  sort:false},
-  {id:'pcost', label:'💰 סה"כ פרויקט',w:100, sort:false},
+  {id:'ucost',     label:'🧱 ח"ג (עץ)',      w:85,  sort:false},
+  {id:'paintCost', label:'🎨 עלות צבע',      w:95,  sort:false},
+  {id:'tcost',     label:'⚙ Setup NRE ₪',   w:95,  sort:false},
+  {id:'pcost',     label:'💰 סה"כ פרויקט',  w:100, sort:false},
 ];
 let colWidths = COLS.map(c=>c.w);
 let cumHours = [];
@@ -1637,7 +1637,10 @@ function _itemPaintH(pb) {
   const procs = (procData[pb]||[]).filter(function(p){ return p.type==='painting'; });
   let hrs = 0;
   procs.forEach(function(p){
-    hrs += (p.unit==='h'||p.unit==='hr') ? (parseFloat(p.qty)||0) : (parseFloat(p.qty)||0)/60;
+    const u = (p.unit||'').toLowerCase();
+    if (u==='h'||u==='hr') hrs += parseFloat(p.qty)||0;
+    else if (u==='min'||u==='') hrs += (parseFloat(p.qty)||0)/60;
+    // m2 / ar / other area units → NOT treated as time
   });
   return hrs;
 }
@@ -2001,6 +2004,14 @@ function buildTable(){
       tdUC.title = 'Calculated from process costs (edit in ⚙ Process Types)';
     }
     tr.appendChild(tdUC);
+    // 🎨 Paint cost cell (direct own-item cost only, next to ח"ג)
+    const tdPaint = document.createElement('td');
+    tdPaint.className = 'cost-val cost-paint';
+    tdPaint.dataset.paintCostIdx = idx;
+    tdPaint.style.cssText = 'color:#a78bfa;cursor:pointer';
+    tdPaint.title = 'עלות חומר צבע. לחץ לעריכה ידנית';
+    tdPaint.addEventListener('click', function(ev){ ev.stopPropagation(); openPaintCostEdit(item.pb||item.pn, item.tq||item.qty||1); });
+    tr.appendChild(tdPaint);
     // 🌳 Tree cost cell
     const tdTC = document.createElement('td');
     tdTC.className = 'cost-val cost-tree';
@@ -2011,14 +2022,6 @@ function buildTable(){
     tdPC.className = 'cost-val cost-proj';
     tdPC.dataset.projCostIdx = idx;
     tr.appendChild(tdPC);
-    // 🎨 Paint cost cell
-    const tdPaint = document.createElement('td');
-    tdPaint.className = 'cost-val cost-paint';
-    tdPaint.dataset.paintCostIdx = idx;
-    tdPaint.style.cssText = 'color:#a78bfa;cursor:pointer';
-    tdPaint.title = 'עלות חומר צבע. לחץ לעריכה ידנית';
-    tdPaint.addEventListener('click', function(ev){ ev.stopPropagation(); openPaintCostEdit(item.pb||item.pn, item.tq||item.qty||1); });
-    tr.appendChild(tdPaint);
     tr.addEventListener('click',()=>selectRow(idx));
     if(disabledRows.has(idx)) tr.classList.add('row-disabled');
     tbody.appendChild(tr);
@@ -4587,13 +4590,14 @@ function refreshCostCells(){
     const v=cumSetupCosts[i]||0;
     td.textContent=v>0?fmtC(v):'—';
   });
-  // paintCost → tree paint cost × projectQty
+  // paintCost → direct (own-item only) paint cost × projectQty — tree NOT accumulated
   document.querySelectorAll('[data-paint-cost-idx]').forEach(function(td){
     const i=parseInt(td.dataset.paintCostIdx);
     if(isNaN(i)||!BOM[i]) return;
-    const v=(treePaintCost[i]||0)*(projectQty||1);
-    td.textContent=v>0?fmtC(v):'';
     const pb=BOM[i].pb||BOM[i].pn;
+    const tq=BOM[i].tq||BOM[i].qty||1;
+    const v=_itemPaintCostTotal(pb,tq)*(projectQty||1);
+    td.textContent=v>0?fmtC(v):'';
     td.style.fontWeight=paintCostOverrides[pb]!==undefined?'700':'';
   });
   // pcost → total project cost = (mfg + COTS + RM + paint) × projectQty + setup × 1
@@ -8006,9 +8010,9 @@ async function exportBomExcel() {
     {header:'⏱ Tree (h)',  key:'cumCH', width:13},
     {header:'🔧 Labor ₪',  key:'lcost', width:14},
     {header:'🛒 Buy ₪',    key:'bcost', width:14},
-    {header:'💰 Unit ₪',   key:'ucost', width:14},
-    {header:'🌳 Tree ₪',   key:'tcost',     width:14},
+    {header:'💰 Unit ₪',   key:'ucost',     width:14},
     {header:'🎨 צבע ₪',   key:'paintCost', width:14},
+    {header:'🌳 Tree ₪',   key:'tcost',     width:14},
     {header:'🌳 Project ₪',key:'pcost',     width:15},
   ];
   const NUM_COLS = COL_DEFS.length;
@@ -8246,9 +8250,9 @@ async function exportBomExcel() {
     {header:'🔧 שורה ₪',  key:'rowcost',width:13},
     {header:'🔧 Labor ₪',  key:'lcost', width:14},
     {header:'🛒 Buy ₪',    key:'bcost', width:14},
-    {header:'💰 ח"ג ₪',   key:'ucost', width:14},
-    {header:'⚙ Setup NRE ₪', key:'tcost',     width:15},
+    {header:'💰 ח"ג ₪',      key:'ucost',     width:14},
     {header:'🎨 צבע ₪',      key:'paintCost', width:14},
+    {header:'⚙ Setup NRE ₪', key:'tcost',     width:15},
     {header:'🌳 Project ₪',  key:'pcost',     width:15},
   ];
   ws2.columns = H_COLS;
