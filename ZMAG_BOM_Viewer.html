@@ -8494,18 +8494,20 @@ async function exportBomExcel() {
   // ── Update ws0 cost cells with cross-sheet formula links ─────────────────
   try {
     ws0.eachRow(function(row) {
+      // Use hardcoded tree[0] values (= BOM table root row) — no formula links.
+      // Sub-sheet formulas use different calculation methods and override the correct values.
       const lbl = (row.getCell(1).value || '').toString();
-      if (lbl.includes('RE - ייצור') && _ws5TotalRowNum) {
-        row.getCell(2).value = {formula: "='\u05E2\u05DC\u05D5\u05EA \u05E9\"\u05E2'!I" + _ws5TotalRowNum, result: _sumREFinal};
-      } else if (lbl.includes('NRE - \u05E1\u05D8\u05D0\u05E4') && _ws5TotalRowNum) {
-        row.getCell(2).value = {formula: "='\u05E2\u05DC\u05D5\u05EA \u05E9\"\u05E2'!H" + _ws5TotalRowNum, result: _sumNREFinal};
-      } else if (lbl.includes('\u05E8\u05DB\u05E9') && !lbl.includes('\u05E8\u05DB\u05D9\u05D1') && _ws4TotalRowNum) {
-        row.getCell(2).value = {formula: "=\u05E8\u05DB\u05E9!J" + _ws4TotalRowNum, result: _sumCotsFinalUsed};
-      } else if (lbl.includes('\u05D7\"\u05D2') && _ws3TotalRowNum) {
-        row.getCell(2).value = {formula: "='\u05D7\"\u05D2'!H" + _ws3TotalRowNum, result: _sumRawmFinalXls};
+      if (lbl.includes('RE - ') && lbl.includes('ייצור')) {
+        row.getCell(2).value = _sumREFinal;
+      } else if (lbl.includes('NRE')) {
+        row.getCell(2).value = _sumNREFinal;
+      } else if (lbl.includes('רכש') && !lbl.includes('רכיב')) {
+        row.getCell(2).value = _sumCotsFinalUsed;
+      } else if (lbl.includes('ח"ג')) {
+        row.getCell(2).value = _sumRawmFinalXls;
       }
     });
-  } catch(e_ws0fl) { console.warn('ws0 formula links error:', e_ws0fl); }
+    } catch(e_ws0fl) { console.warn('ws0 formula links error:', e_ws0fl); }
 
   // ── Sheet 6: שערי מטבע (Exchange Rates) ─────────────────────────────────
   try {
