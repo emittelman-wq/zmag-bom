@@ -6501,7 +6501,8 @@ function exportBackup() {
     rawMaterials: rawMatData,
     matFamPrices: matFamPrices,
     buyPrices: buyPrices,
-    rawTypeOverrides: rawTypeOverrides
+    rawTypeOverrides: rawTypeOverrides,
+    eltBuyOverrides: eltBuyOverrides
   };
   const blob = new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
@@ -6627,6 +6628,9 @@ function _mergeLoadedProc(obj) {
   }
   if (obj.rawTypeOverrides && typeof obj.rawTypeOverrides === 'object') {
     rawTypeOverrides = obj.rawTypeOverrides;
+  }
+  if (obj.eltBuyOverrides && typeof obj.eltBuyOverrides === 'object') {
+    eltBuyOverrides = obj.eltBuyOverrides;
   }
   if (obj.subcontractors) subData = obj.subcontractors;
   if (Array.isArray(obj.flaggedRows)) {
@@ -6784,6 +6788,9 @@ async function loadProcFromGraph() {
     }
     if (obj.rawTypeOverrides && typeof obj.rawTypeOverrides === 'object') {
       rawTypeOverrides = obj.rawTypeOverrides;
+    }
+    if (obj.eltBuyOverrides && typeof obj.eltBuyOverrides === 'object') {
+      eltBuyOverrides = obj.eltBuyOverrides;
     }
     {
       // MERGE flags: server + local → union (preserves all users' flags)
