@@ -5960,8 +5960,10 @@ function saveBuyNotes(pb) {
 
   document.getElementById('buyNotesModal').style.display = 'none';
   saveProcToFile();
-  buildCumulativeHours(); computeTreeCosts();
+  computeTreeCosts(); buildCumulativeHours();
   buildTable(); applyFilters();
+  updateWHCells(); // must run AFTER buildTable — builds the data-* DOM elements first
+  if (curIdx != null) selectRow(curIdx);
 }
 
 function applyFxRates() {
