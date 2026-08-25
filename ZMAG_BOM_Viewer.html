@@ -8177,7 +8177,8 @@ async function exportBomExcel() {
       {header:'כמות כוללת (TQ)', key:'tq',         width:14},
       {header:'מחיר יחידה ₪',    key:'unitPrice',  width:16},
       {header:'עלות כוללת ₪',    key:'totalCost',  width:16},
-      {header:'משקל מוערך (kg)', key:'weightKg',   width:16},
+      {header:'משקל נטו (kg)',   key:'weightKg',   width:16},
+      {header:'פחת %',           key:'wastePct',   width:10},
       {header:'מחיר לק"ג (₪)',   key:'pricePerKg', width:16},
     ];
     ws3.columns = RM_COLS3;
@@ -8202,11 +8203,19 @@ async function exportBomExcel() {
       rm3TotalCost += totalCostILS;
 
       const rm3 = rawMatData[pb] || {};
-      const pricePerKg3 = rm3.unitCost ? Math.round(toILS(rm3.unitCost, rm3.costCurrency||'ILS') * 100) / 100 : 0;
-      // Estimated weight: total cost / price-per-kg (valid when costUnit==='kg')
-      const weightKg3 = (pricePerKg3 > 0 && rm3.costUnit !== 'm2' && rm3.costUnit !== 'm')
-        ? Math.round(totalCostILS / pricePerKg3 * 100) / 100
+      // Find parent pb for this item (needed for per-parent CAD volume)
+      let parentPb3 = null;
+      for (let pi = idx - 1; pi >= 0; pi--) {
+        if (BOM[pi].lv < item.lv) { parentPb3 = BOM[pi].pb || BOM[pi].pn; break; }
+      }
+      // Weight from CAD: vol_m3 × density_kg_m3 × tq × pQty (same as computeTotalMassForPb)
+      const density3 = parseFloat(rm3.density) || (MATERIAL_DB[rm3.family]||{}).density || 7850;
+      const vol_m3_3 = _rmExactVol(rm3, parentPb3);
+      const weightKg3 = vol_m3_3 !== null
+        ? Math.round(vol_m3_3 * density3 * tq * pQty * 1000) / 1000
         : 0;
+      const wastePct3 = parseFloat(rm3.wastePct) || 0;
+      const pricePerKg3 = Math.round(toILS(rm3.unitCost||0, rm3.costCurrency||'ILS') * 100) / 100;
 
       const r3 = ws3.addRow({
         pb:         pb,
@@ -8217,16 +8226,18 @@ async function exportBomExcel() {
         unitPrice:  Math.round(unitCostILS * 100) / 100,
         totalCost:  totalCostILS,
         weightKg:   weightKg3,
+        wastePct:   wastePct3,
         pricePerKg: pricePerKg3,
       });
-      // totalCost = unitPrice × TQ × pQty
+      // totalCost (G) = unitPrice × TQ × pQty  (unitPrice already includes waste)
       r3.getCell(7).value = {formula:'=F'+rm3DataRow+'*E'+rm3DataRow+'*'+pQty, result:totalCostILS};
       rm3DataRow++;
       const bg3 = rm3DataRow % 2 === 0 ? 'FFEDE9FE' : 'FFF5F3FF';
       r3.eachCell(function(cell){ cell.fill = {type:'pattern',pattern:'solid',fgColor:{argb:bg3}}; });
-      for (let c3 = 5; c3 <= 9; c3++) {
-        r3.getCell(c3).numFmt = '#,##0.00';
+      // Numeric format for cost/weight/price columns (5-8, 10); wastePct (9) = integer %
+      for (let c3 = 5; c3 <= 10; c3++) {
         r3.getCell(c3).alignment = {horizontal:'right'};
+        r3.getCell(c3).numFmt = c3 === 9 ? '0"%"' : '#,##0.00';
       }
     });
 
@@ -8274,6 +8285,7 @@ async function exportBomExcel() {
     BOM.forEach(function(item, idx) {
       if (item.type !== 'Buy') return;
       if (!_xlsVisible.has(idx)) return;
+      if (_isBuyRawMat(item)) return; // ח"ג items appear in their own sheet
       const key = item.pb || item.pn;
       if (!buyMap4.has(key)) {
         buyMap4.set(key, {pb:item.pb||item.pn, pn:item.pn, desc:item.desc,
