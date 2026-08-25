@@ -777,6 +777,7 @@ const COLS = [
   {id:'bcost', label:'🛒 COTS (עץ)',   w:85,  sort:false},
   {id:'ucost', label:'🧱 ח"ג (עץ)',   w:85,  sort:false},
   {id:'tcost', label:'⚙ Setup NRE ₪',  w:95,  sort:false},
+  {id:'paintCost', label:'🎨 עלות צבע',   w:95,  sort:false},
   {id:'pcost', label:'💰 סה"כ פרויקט',w:100, sort:false},
 ];
 let colWidths = COLS.map(c=>c.w);
@@ -788,6 +789,12 @@ let directCycleH = [];  // cycle hours × item.tq per item (for tree accumulatio
 let cumCycleH = [];     // tree-cumulative cycle hours (no setup)
 let projectQty = 1;
 let buyNotes = {};
+var paintCostOverrides = {};   // {pb: totalCostOverride (₪, tq-inclusive)}
+var PAINT_RATE = 700;           // ₪ per painting-hour (user-configurable)
+var PAINT_LITERS_PER_HR = 12;   // liters per painting-hour (user-configurable)
+var treePaintCost = [];         // tree-accumulated paint cost per 1 ערכה
+const PAINT_OVERRIDES_KEY = 'zmag_paint_overrides_6910W021';
+const PAINT_SETTINGS_KEY  = 'zmag_paint_settings_6910W021';
 let buyPrices = {};   // pb → {p, src, currency} — cloud-persisted, replaces px_* localStorage keys
 let subData = {};
 let rawMatData = {};   // {pb: {family,grade,form,dims,density,unitCost,costUnit}}
@@ -1356,6 +1363,7 @@ function buildHeader(){
     const th=document.createElement('th');
     th.dataset.col=col.id;
     if(col.sort) th.onclick=()=>sortBy(col.id);
+    else if(col.id==='paintCost'){ th.style.cursor='pointer'; th.title='לחץ להגדרות עלות צבע (תעריף + ליטר/שעה)'; th.onclick=openPaintSettings; }
     th.innerHTML=(col.sort?`${col.label} <span class="si-sort">↕</span>`:col.label);
 
     // Resize handle
@@ -1578,6 +1586,7 @@ function computeTreeCosts() {
   treeCotsCost   = new Array(n).fill(0);
   treeRawMatCost = new Array(n).fill(0);
   ownExtCosts    = new Array(n).fill(0);
+  treePaintCost  = new Array(n).fill(0);
   for (let i = 0; i < n; i++) {
     if (isRowExcluded(i)) { unitCosts[i] = 0; itemSetupCost[i] = 0; continue; }
     try { unitCosts[i]    = getItemUnitCost(BOM[i], i) || 0; }
@@ -1613,8 +1622,59 @@ function computeTreeCosts() {
     treeCotsCost[i]  = cots;
     treeRawMatCost[i]= rawm;
     ownExtCosts[i]   = ownExt;
+    // Paint cost: own + children (same tree pattern as mfg/cots/rawm)
+    let paint = isRowExcluded(i) ? 0 : _itemPaintCostTotal(BOM[i].pb||BOM[i].pn, BOM[i].tq||0);
+    for (let jp = i+1; jp < n; jp++) {
+      if (BOM[jp].lv <= lv) break;
+      if (!isRowExcluded(jp)) paint += _itemPaintCostTotal(BOM[jp].pb||BOM[jp].pn, BOM[jp].tq||0);
+    }
+    treePaintCost[i] = paint;
   }
 }
+
+// ─── Paint cost helpers ──────────────────────────────────────────────────────
+function _itemPaintH(pb) {
+  const procs = (procData[pb]||[]).filter(function(p){ return p.type==='painting'; });
+  let hrs = 0;
+  procs.forEach(function(p){
+    hrs += (p.unit==='h'||p.unit==='hr') ? (parseFloat(p.qty)||0) : (parseFloat(p.qty)||0)/60;
+  });
+  return hrs;
+}
+function _itemPaintCostTotal(pb, tq) {
+  if (paintCostOverrides[pb] !== undefined) return parseFloat(paintCostOverrides[pb]) || 0;
+  return _itemPaintH(pb) * PAINT_RATE * tq;
+}
+function loadPaintSettings() {
+  try { const s=JSON.parse(localStorage.getItem(PAINT_SETTINGS_KEY)||'{}'); if(s.rate>0) PAINT_RATE=s.rate; if(s.litersPerHr>0) PAINT_LITERS_PER_HR=s.litersPerHr; } catch(e){}
+  try { paintCostOverrides=JSON.parse(localStorage.getItem(PAINT_OVERRIDES_KEY)||'{}'); } catch(e){}
+}
+function savePaintSettings() {
+  localStorage.setItem(PAINT_SETTINGS_KEY, JSON.stringify({rate:PAINT_RATE, litersPerHr:PAINT_LITERS_PER_HR}));
+  localStorage.setItem(PAINT_OVERRIDES_KEY, JSON.stringify(paintCostOverrides));
+}
+function openPaintSettings() {
+  const r = prompt('תעריף צבע (₪/שעה) — נוכחי: '+PAINT_RATE, PAINT_RATE);
+  if (r===null) return;
+  const rv = parseFloat(r); if (rv>0) PAINT_RATE=rv;
+  const l = prompt('כמות צבע (ליטר/שעה) — נוכחי: '+PAINT_LITERS_PER_HR, PAINT_LITERS_PER_HR);
+  if (l!==null) { const lv2=parseFloat(l); if(lv2>0) PAINT_LITERS_PER_HR=lv2; }
+  savePaintSettings(); computeTreeCosts(); updateWHCells();
+}
+function openPaintCostEdit(pb, tq) {
+  const autoH = _itemPaintH(pb);
+  const autoCost = Math.round(autoH * PAINT_RATE * tq * 100) / 100;
+  const override = paintCostOverrides[pb];
+  const hint = autoCost > 0
+    ? 'אוטומטי: ₪'+autoCost+' ('+Math.round(autoH*60)+' דק × '+PAINT_RATE+'₪/שעה × '+tq+' יח)'
+    : 'אין תהליך צביעה מוגדר (ניתן להזין ידנית)';
+  const val = prompt('עלות צבע ל-'+pb+'\n'+hint+'\n\nהזן עלות כוללת ₪ (ריק = איפוס לאוטומטי):', override!==undefined ? override : '');
+  if (val===null) return;
+  if (val.trim()==='') { delete paintCostOverrides[pb]; }
+  else { const p=parseFloat(val.replace(/[^0-9.]/g,'')); if(!isNaN(p)) paintCostOverrides[pb]=p; }
+  savePaintSettings(); computeTreeCosts(); updateWHCells();
+}
+
 function fmtC(n) {
   if (!n || isNaN(n)) return '';
   if (n < 0.01) return '₪' + n.toFixed(4);
@@ -1659,7 +1719,18 @@ function _computeVisibleCosts() {
     rawm: Math.round(rawm * pQty * 100) / 100,
     nre:  Math.round(nre  * 100) / 100,
   };
-  r.total = Math.round((r.mfg + r.cots + r.rawm + r.nre) * 100) / 100;
+  // Paint cost: sum across visible items × projectQty
+  let _paintSum = 0, _paintHrs = 0;
+  BOM.forEach(function(item2, idx2) {
+    const tr2 = rows[idx2];
+    if (!tr2 || tr2.classList.contains('hid') || isRowExcluded(idx2)) return;
+    const tq2 = item2.tq || item2.qty || 0;
+    _paintSum += _itemPaintCostTotal(item2.pb||item2.pn, tq2);
+    _paintHrs += _itemPaintH(item2.pb||item2.pn) * tq2;
+  });
+  r.paint = Math.round(_paintSum * pQty * 100) / 100;
+  r.paintLiters = Math.round(_paintHrs * pQty * PAINT_LITERS_PER_HR * 100) / 100;
+  r.total = Math.round((r.mfg + r.cots + r.rawm + r.nre + r.paint) * 100) / 100;
   return r;
 }
 
@@ -1940,6 +2011,14 @@ function buildTable(){
     tdPC.className = 'cost-val cost-proj';
     tdPC.dataset.projCostIdx = idx;
     tr.appendChild(tdPC);
+    // 🎨 Paint cost cell
+    const tdPaint = document.createElement('td');
+    tdPaint.className = 'cost-val cost-paint';
+    tdPaint.dataset.paintCostIdx = idx;
+    tdPaint.style.cssText = 'color:#a78bfa;cursor:pointer';
+    tdPaint.title = 'עלות חומר צבע. לחץ לעריכה ידנית';
+    tdPaint.addEventListener('click', function(ev){ ev.stopPropagation(); openPaintCostEdit(item.pb||item.pn, item.tq||item.qty||1); });
+    tr.appendChild(tdPaint);
     tr.addEventListener('click',()=>selectRow(idx));
     if(disabledRows.has(idx)) tr.classList.add('row-disabled');
     tbody.appendChild(tr);
@@ -4441,6 +4520,7 @@ function updateStats(visCount){
   if(projectQty>1) txt+=' · '+projectQty+' ערכות';
   if(tc>0) txt+=' · עלות: '+fmtC(tc);
   if(_vc.mfg>0 && _vc.mfg<tc*0.999) txt+=' (ייצור: '+fmtC(_vc.mfg)+')';
+  if(_vc.paint>0) txt+=' · 🎨 '+fmtC(_vc.paint)+' ('+(_vc.paintLiters||0).toFixed(1)+"ל')";
   if(th>0) txt+=' · '+fmtTimeAuto(th*60)+' שעות';
   bar.textContent=txt;
 }
@@ -4507,10 +4587,19 @@ function refreshCostCells(){
     const v=cumSetupCosts[i]||0;
     td.textContent=v>0?fmtC(v):'—';
   });
-  // pcost → total project cost = (mfg + COTS + RM) × projectQty + setup × 1
+  // paintCost → tree paint cost × projectQty
+  document.querySelectorAll('[data-paint-cost-idx]').forEach(function(td){
+    const i=parseInt(td.dataset.paintCostIdx);
+    if(isNaN(i)||!BOM[i]) return;
+    const v=(treePaintCost[i]||0)*(projectQty||1);
+    td.textContent=v>0?fmtC(v):'';
+    const pb=BOM[i].pb||BOM[i].pn;
+    td.style.fontWeight=paintCostOverrides[pb]!==undefined?'700':'';
+  });
+  // pcost → total project cost = (mfg + COTS + RM + paint) × projectQty + setup × 1
   document.querySelectorAll('[data-proj-cost-idx]').forEach(function(td){
     const i=parseInt(td.dataset.projCostIdx);
-    const varCost = ((treeMfgCost[i]||0)+(treeCotsCost[i]||0)+(treeRawMatCost[i]||0))*pQty;
+    const varCost = ((treeMfgCost[i]||0)+(treeCotsCost[i]||0)+(treeRawMatCost[i]||0)+(treePaintCost[i]||0))*pQty;
     const fixCost = cumSetupCosts[i]||0;
     const total = varCost + fixCost;
     td.textContent=total>0?fmtC(total):'—';
@@ -6494,7 +6583,10 @@ async function _spWriteFile() {
     matFamPrices: matFamPrices,
     buyPrices: buyPrices,
     rawTypeOverrides: rawTypeOverrides,
-    eltBuyOverrides: eltBuyOverrides
+    eltBuyOverrides: eltBuyOverrides,
+    paintCostOverrides: paintCostOverrides,
+    paintRate: PAINT_RATE,
+    paintLitersPerHr: PAINT_LITERS_PER_HR
   }, null, 2);
   const r = await fetch(_spUploadUrl(), {
     method: 'POST',
@@ -6635,6 +6727,12 @@ function _restoreFromBackup(obj) {
   if (obj.eltBuyOverrides && typeof obj.eltBuyOverrides === 'object') {
     eltBuyOverrides = obj.eltBuyOverrides;
   }
+  if (obj.paintCostOverrides && typeof obj.paintCostOverrides === 'object') {
+    paintCostOverrides = obj.paintCostOverrides;
+    savePaintSettings();
+  }
+  if (obj.paintRate > 0) { PAINT_RATE = obj.paintRate; savePaintSettings(); }
+  if (obj.paintLitersPerHr > 0) { PAINT_LITERS_PER_HR = obj.paintLitersPerHr; savePaintSettings(); }
   if (obj.subcontractors) subData = obj.subcontractors;
   if (Array.isArray(obj.flaggedRows)) {
     flaggedRows = new Set(obj.flaggedRows.map(Number));
@@ -6687,6 +6785,12 @@ function _mergeLoadedProc(obj) {
   if (obj.eltBuyOverrides && typeof obj.eltBuyOverrides === 'object') {
     eltBuyOverrides = obj.eltBuyOverrides;
   }
+  if (obj.paintCostOverrides && typeof obj.paintCostOverrides === 'object') {
+    paintCostOverrides = obj.paintCostOverrides;
+    savePaintSettings();
+  }
+  if (obj.paintRate > 0) { PAINT_RATE = obj.paintRate; savePaintSettings(); }
+  if (obj.paintLitersPerHr > 0) { PAINT_LITERS_PER_HR = obj.paintLitersPerHr; savePaintSettings(); }
   if (obj.subcontractors) subData = obj.subcontractors;
   if (Array.isArray(obj.flaggedRows)) {
     const serverFlags = new Set(obj.flaggedRows.map(Number));
@@ -6741,7 +6845,10 @@ async function _graphWriteProcFile() {
     matFamPrices: matFamPrices,
     buyPrices: buyPrices,
     rawTypeOverrides: rawTypeOverrides,
-    eltBuyOverrides: eltBuyOverrides
+    eltBuyOverrides: eltBuyOverrides,
+    paintCostOverrides: paintCostOverrides,
+    paintRate: PAINT_RATE,
+    paintLitersPerHr: PAINT_LITERS_PER_HR
   }, null, 2);
   const r = await fetch(url, {
     method: 'PUT',
@@ -6894,7 +7001,10 @@ async function _writeProcFile() {
     matFamPrices: matFamPrices,
     buyPrices: buyPrices,
     rawTypeOverrides: rawTypeOverrides,
-    eltBuyOverrides: eltBuyOverrides
+    eltBuyOverrides: eltBuyOverrides,
+    paintCostOverrides: paintCostOverrides,
+    paintRate: PAINT_RATE,
+    paintLitersPerHr: PAINT_LITERS_PER_HR
   }, null, 2);
   const w = await _procFileHandle.createWritable();
   await w.write(payload); await w.close();
@@ -6985,6 +7095,7 @@ function setFileSyncStatus(msg, state) {
 }
 
 loadProcData();
+loadPaintSettings();
 // Refresh UI — buildTable() ran in script-block-1 before procData was loaded from localStorage.
 // Now that procData is available, update row highlighting + time columns without a full rebuild.
 try { computeTreeCosts(); } catch(e) {}
@@ -7896,8 +8007,9 @@ async function exportBomExcel() {
     {header:'🔧 Labor ₪',  key:'lcost', width:14},
     {header:'🛒 Buy ₪',    key:'bcost', width:14},
     {header:'💰 Unit ₪',   key:'ucost', width:14},
-    {header:'🌳 Tree ₪',   key:'tcost', width:14},
-    {header:'🌳 Project ₪',key:'pcost', width:15},
+    {header:'🌳 Tree ₪',   key:'tcost',     width:14},
+    {header:'🎨 צבע ₪',   key:'paintCost', width:14},
+    {header:'🌳 Project ₪',key:'pcost',     width:15},
   ];
   const NUM_COLS = COL_DEFS.length;
 
@@ -7933,8 +8045,9 @@ async function exportBomExcel() {
       lcost:  Math.round(mfg  * 100) / 100,
       bcost:  Math.round(cots * 100) / 100,
       ucost:  Math.round(rawm * 100) / 100,
-      tcost:  Math.round(setup* 100) / 100,
-      pcost:  Math.round((mfg + cots + rawm + setup) * 100) / 100,
+      tcost:     Math.round(setup* 100) / 100,
+      paintCost: Math.round((treePaintCost[idx]||0) * pQty * 100) / 100,
+      pcost:     Math.round((mfg + cots + rawm + setup + (treePaintCost[idx]||0)*pQty) * 100) / 100,
     };
   }
 
@@ -8020,10 +8133,18 @@ async function exportBomExcel() {
   const _sumCotsFinalUsed = Math.round((treeCotsCost[0]   || 0) * pQty * 100) / 100;
   // Override raw-material total with tree-computed value for same reason
   const _sumRawmFinalXls  = Math.round((treeRawMatCost[0] || 0) * pQty * 100) / 100;
+  const _sumPaintFinalXls = Math.round((treePaintCost[0]  || 0) * pQty * 100) / 100;
+  // Total paint hours and liters (across visible BOM rows)
+  let _paintHrsXls = 0;
+  _xlsVisible.forEach(function(idx) {
+    const item = BOM[idx];
+    _paintHrsXls += _itemPaintH(item.pb||item.pn) * (item.tq||0);
+  });
+  const _paintLitersXls = Math.round(_paintHrsXls * pQty * PAINT_LITERS_PER_HR * 100) / 100;
 
   // ── Sheet 0: סיכום מנהלים (Executive Summary) ─────────────────────────────
   const _sumHours = Math.round((cumHours[0] || 0) * pQty * 100) / 100;
-  const _sumTotalFinal = Math.round((_sumNREFinal + _sumREFinal + _sumCotsFinalUsed + _sumRawmFinalXls) * 100) / 100;
+  const _sumTotalFinal = Math.round((_sumNREFinal + _sumREFinal + _sumCotsFinalUsed + _sumRawmFinalXls + _sumPaintFinalXls) * 100) / 100;
   // Cross-sheet formula link row trackers (set inside ws3/ws4/ws5 try blocks)
   let _ws3TotalRowNum, _ws4TotalRowNum, _ws5TotalRowNum;
 
@@ -8060,6 +8181,7 @@ async function exportBomExcel() {
   _w0Row('⚙ NRE - סטאפ / הגדרות ₪',     _sumNREFinal, false, 'FFFEF3C7');
   _w0Row('🛒 רכש (Buy items) ₪',           _sumCotsFinal, false, 'FFDCFCE7');
   _w0Row('🧱 חומרי גלם (ח"ג) ₪',          _sumRawmFinalXls, false, 'FFEDE9FE');
+  if (_sumPaintFinalXls > 0) _w0Row('🎨 עלות צבע (חומר) ₪',       _sumPaintFinalXls, false, 'FFF3E8FF');
   _w0Row('💰 סה"כ עלות פרויקט ₪',   _sumTotalFinal, true, 'FF1E3A5F');
   { const _gtRow = ws0.getRow(ws0.rowCount);
     _gtRow.eachCell(function(c){ c.font={bold:true,color:{argb:'FFFFFFFF'}}; c.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FF1E3A5F'}}; }); }
@@ -8067,6 +8189,11 @@ async function exportBomExcel() {
   ws0.addRow([]);
   _w0Title('שעות עבודה', 'FF374151');
   _w0Row('שעות כוללות (שע"א)', _sumHours);
+  if (_paintLitersXls > 0) {
+    _w0Row('🎨 שעות צביעה', Math.round(_paintHrsXls * pQty * 100)/100);
+    _w0Row('🎨 כמות צבע (ל\') — '+PAINT_LITERS_PER_HR+' ל\'/שעה', _paintLitersXls);
+    _w0Row('🎨 תעריף חומר צבע (₪/שעה)', PAINT_RATE);
+  }
 
   // ── Sheet 1: Full BOM with all costs ──────────────────────────────────────
   const ws1 = wb.addWorksheet('BOM', {views:[{rightToLeft:true}]});
@@ -8081,8 +8208,8 @@ async function exportBomExcel() {
     if (!_xlsVisible.has(idx)) return;
     const d = getRowData(item, idx);
     const r = ws1.addRow(d);
-    // pcost (col 17 = Q) formula: lcost(M)+bcost(N)+ucost(O)+tcost(P)
-    r.getCell(17).value = {formula:'=M'+_ws1DataRow+'+N'+_ws1DataRow+'+O'+_ws1DataRow+'+P'+_ws1DataRow, result:d.pcost};
+    // pcost (col 18 = R) formula: lcost(M)+bcost(N)+ucost(O)+tcost(P)+paintCost(Q)
+    r.getCell(18).value = {formula:'=M'+_ws1DataRow+'+N'+_ws1DataRow+'+O'+_ws1DataRow+'+P'+_ws1DataRow+'+Q'+_ws1DataRow, result:d.pcost};
     _ws1DataRow++;
     // Zebra + type colour
     const bgArgb = idx % 2 === 0
@@ -8120,8 +8247,9 @@ async function exportBomExcel() {
     {header:'🔧 Labor ₪',  key:'lcost', width:14},
     {header:'🛒 Buy ₪',    key:'bcost', width:14},
     {header:'💰 ח"ג ₪',   key:'ucost', width:14},
-    {header:'⚙ Setup NRE ₪', key:'tcost', width:15},
-    {header:'🌳 Project ₪',  key:'pcost', width:15},
+    {header:'⚙ Setup NRE ₪', key:'tcost',     width:15},
+    {header:'🎨 צבע ₪',      key:'paintCost', width:14},
+    {header:'🌳 Project ₪',  key:'pcost',     width:15},
   ];
   ws2.columns = H_COLS;
   ws2.getRow(1).eachCell(function(cell) {
@@ -8154,11 +8282,12 @@ async function exportBomExcel() {
       lcost:  d.lcost,
       bcost:  d.bcost,
       ucost:  d.ucost,
-      tcost:  d.tcost,
-      pcost:  d.pcost,
+      tcost:     d.tcost,
+      paintCost: d.paintCost,
+      pcost:     d.pcost,
     });
-    // pcost (col 16 = P) formula: lcost(L)+bcost(M)+ucost(N)+tcost(O)
-    r.getCell(16).value = {formula:'=L'+_ws2DataRow+'+M'+_ws2DataRow+'+N'+_ws2DataRow+'+O'+_ws2DataRow, result:d.pcost};
+    // pcost (col 17 = Q) formula: lcost(L)+bcost(M)+ucost(N)+tcost(O)+paintCost(P)
+    r.getCell(17).value = {formula:'=L'+_ws2DataRow+'+M'+_ws2DataRow+'+N'+_ws2DataRow+'+O'+_ws2DataRow+'+P'+_ws2DataRow, result:d.pcost};
     _ws2RowMap[idx]   = _ws2DataRow;
     _ws2RowStore[idx] = r;
     _ws2DataRow++;
