@@ -4590,13 +4590,12 @@ function refreshCostCells(){
     const v=cumSetupCosts[i]||0;
     td.textContent=v>0?fmtC(v):'—';
   });
-  // paintCost → direct (own-item only) paint cost × projectQty — tree NOT accumulated
+  // paintCost → tree-accumulated paint cost × projectQty (own + all descendants, like lcost/bcost/ucost)
   document.querySelectorAll('[data-paint-cost-idx]').forEach(function(td){
     const i=parseInt(td.dataset.paintCostIdx);
     if(isNaN(i)||!BOM[i]) return;
     const pb=BOM[i].pb||BOM[i].pn;
-    const tq=BOM[i].tq||BOM[i].qty||1;
-    const v=_itemPaintCostTotal(pb,tq)*(projectQty||1);
+    const v=(treePaintCost[i]||0)*(projectQty||1);
     td.textContent=v>0?fmtC(v):'';
     td.style.fontWeight=paintCostOverrides[pb]!==undefined?'700':'';
   });
@@ -8212,7 +8211,7 @@ async function exportBomExcel() {
     if (!_xlsVisible.has(idx)) return;
     const d = getRowData(item, idx);
     const r = ws1.addRow(d);
-    // pcost (col 18 = R) formula: lcost(M)+bcost(N)+ucost(O)+tcost(P)+paintCost(Q)
+    // pcost (col 18 = R): lcost(M)+bcost(N)+ucost(O)+paintCost(P)+tcost(Q) — all tree-accumulated, no double-counting
     r.getCell(18).value = {formula:'=M'+_ws1DataRow+'+N'+_ws1DataRow+'+O'+_ws1DataRow+'+P'+_ws1DataRow+'+Q'+_ws1DataRow, result:d.pcost};
     _ws1DataRow++;
     // Zebra + type colour
@@ -8290,7 +8289,7 @@ async function exportBomExcel() {
       paintCost: d.paintCost,
       pcost:     d.pcost,
     });
-    // pcost (col 17 = Q) formula: lcost(L)+bcost(M)+ucost(N)+tcost(O)+paintCost(P)
+    // pcost (col 17 = Q): lcost(L)+bcost(M)+ucost(N)+paintCost(O)+tcost(P) — all tree-accumulated
     r.getCell(17).value = {formula:'=L'+_ws2DataRow+'+M'+_ws2DataRow+'+N'+_ws2DataRow+'+O'+_ws2DataRow+'+P'+_ws2DataRow, result:d.pcost};
     _ws2RowMap[idx]   = _ws2DataRow;
     _ws2RowStore[idx] = r;
