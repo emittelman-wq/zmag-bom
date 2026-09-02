@@ -8416,52 +8416,41 @@ async function exportBomExcel() {
     });
     ws3.getRow(1).height = 20;
 
-    let rm3TotalCost = 0;
-    let rm3DataRow = 2;
-
-    // Collect raw-mat items: non-ELTDesign items with rawMatData configured (or non-M/M2/AR Buy items that are ח"ג)
+    // Collect raw-mat items, then sort by totalCost descending
+    const rm3Rows = [];
     _xlsVisible.forEach(function(idx) {
       const item = BOM[idx];
-      if (!_isBuyRawMat(item)) return; // only ח"ג classified items
+      if (!_isBuyRawMat(item)) return;
       const pb  = item.pb || item.pn;
       const tq  = item.tq || 0;
       const unitCostILS = unitCosts[idx] || 0;
       const totalCostILS = Math.round(unitCostILS * tq * pQty * 100) / 100;
-      rm3TotalCost += totalCostILS;
-
       const rm3 = rawMatData[pb] || {};
-      // Find parent pb for this item (needed for per-parent CAD volume)
       let parentPb3 = null;
       for (let pi = idx - 1; pi >= 0; pi--) {
         if (BOM[pi].lv < item.lv) { parentPb3 = BOM[pi].pb || BOM[pi].pn; break; }
       }
-      // Weight from CAD: vol_m3 × density_kg_m3 × tq × pQty (same as computeTotalMassForPb)
       const density3 = parseFloat(rm3.density) || (MATERIAL_DB[rm3.family]||{}).density || 7850;
       const vol_m3_3 = _rmExactVol(rm3, parentPb3);
-      const weightKg3 = vol_m3_3 !== null
-        ? Math.round(vol_m3_3 * density3 * tq * pQty * 1000) / 1000
-        : 0;
-      const wastePct3 = parseFloat(rm3.wastePct) || 0;
-      const pricePerKg3 = Math.round(toILS(rm3.unitCost||0, rm3.costCurrency||'ILS') * 100) / 100;
-
-      const r3 = ws3.addRow({
-        pb:         pb,
-        pn:         item.pn,
-        desc:       item.desc,
-        uom:        item.uom,
-        tq:         tq,
+      const weightKg3 = vol_m3_3 !== null ? Math.round(vol_m3_3 * density3 * tq * pQty * 1000)/1000 : 0;
+      rm3Rows.push({
+        pb, pn:item.pn, desc:item.desc, uom:item.uom, tq,
         unitPrice:  Math.round(unitCostILS * 100) / 100,
         totalCost:  totalCostILS,
         weightKg:   weightKg3,
-        wastePct:   wastePct3,
-        pricePerKg: pricePerKg3,
+        wastePct:   parseFloat(rm3.wastePct) || 0,
+        pricePerKg: Math.round(toILS(rm3.unitCost||0, rm3.costCurrency||'ILS') * 100) / 100,
       });
-      // totalCost (G) = unitPrice × TQ × pQty  (unitPrice already includes waste)
-      r3.getCell(7).value = {formula:'=F'+rm3DataRow+'*E'+rm3DataRow+'*'+pQty, result:totalCostILS};
+    });
+    rm3Rows.sort(function(a,b){ return b.totalCost - a.totalCost; });
+
+    let rm3TotalCost = 0, rm3DataRow = 2;
+    rm3Rows.forEach(function(rowData) {
+      rm3TotalCost += rowData.totalCost;
+      const r3 = ws3.addRow(rowData);
       rm3DataRow++;
       const bg3 = rm3DataRow % 2 === 0 ? 'FFEDE9FE' : 'FFF5F3FF';
       r3.eachCell(function(cell){ cell.fill = {type:'pattern',pattern:'solid',fgColor:{argb:bg3}}; });
-      // Numeric format for cost/weight/price columns (5-8, 10); wastePct (9) = integer %
       for (let c3 = 5; c3 <= 10; c3++) {
         r3.getCell(c3).alignment = {horizontal:'right'};
         r3.getCell(c3).numFmt = c3 === 9 ? '0"%"' : '#,##0.00';
@@ -8476,11 +8465,91 @@ async function exportBomExcel() {
     rm3TotalCell.numFmt = '#,##0.00';
     rm3TotalCell.alignment = {horizontal:'right'};
     rm3TotalCell.font = {bold:true};
-    _ws3TotalRowNum = rm3DataRow; // total row index for summary formula link
+    _ws3TotalRowNum = rm3DataRow;
 
     ws3.autoFilter = {from:{row:1,column:1}, to:{row:1,column:RM_COLS3.length}};
     ws3.views = [{state:'frozen', ySplit:1, rightToLeft:true}];
   } catch(e3) { console.warn('ח"ג sheet error:', e3); }
+
+  // ── Sheet 3b: ח"ג מאוחד — Consolidated raw materials by PN ──────────────
+  try {
+    const ws3b = wb.addWorksheet('ח"ג מאוחד', {views:[{rightToLeft:true}]});
+    ws3b.columns = [
+      {header:'PN',             key:'pn',         width:22},
+      {header:'תיאור',          key:'desc',       width:40},
+      {header:'UOM',            key:'uom',        width:8},
+      {header:'כמות כוללת',     key:'tq',         width:14},
+      {header:'מחיר יחידה ₪',   key:'unitPrice',  width:16},
+      {header:'עלות כוללת ₪',   key:'totalCost',  width:16},
+      {header:'משקל נטו (kg)',  key:'weightKg',   width:16},
+      {header:'פחת %',          key:'wastePct',   width:10},
+      {header:'מחיר לק"ג (₪)',  key:'pricePerKg', width:16},
+    ];
+    ws3b.getRow(1).eachCell(function(cell) {
+      cell.font  = {bold:true, color:{argb:'FFFFFFFF'}};
+      cell.fill  = {type:'pattern', pattern:'solid', fgColor:{argb:'FF059669'}};
+      cell.alignment = {horizontal:'center', vertical:'middle'};
+    });
+    ws3b.getRow(1).height = 20;
+
+    // ── Aggregate by PN (raw-material type + geometry) ──────────────────────
+    const rmAgg3b = {};
+    _xlsVisible.forEach(function(idx) {
+      const item = BOM[idx];
+      if (!_isBuyRawMat(item)) return;
+      const pn = item.pn || item.pb;
+      const tq = item.tq || 0;
+      const unitCostILS = unitCosts[idx] || 0;
+      const totalCostILS = Math.round(unitCostILS * tq * pQty * 100) / 100;
+      const rm3b = rawMatData[item.pb||item.pn] || {};
+      let parentPb3b = null;
+      for (let pi = idx-1; pi >= 0; pi--) {
+        if (BOM[pi].lv < item.lv) { parentPb3b = BOM[pi].pb || BOM[pi].pn; break; }
+      }
+      const dens3b = parseFloat(rm3b.density) || (MATERIAL_DB[rm3b.family]||{}).density || 7850;
+      const vol3b  = _rmExactVol(rm3b, parentPb3b);
+      const wt3b   = vol3b !== null ? Math.round(vol3b * dens3b * tq * pQty * 1000)/1000 : 0;
+      if (!rmAgg3b[pn]) {
+        rmAgg3b[pn] = {
+          pn, desc:item.desc, uom:item.uom,
+          tq:0, unitPrice:Math.round(unitCostILS*100)/100,
+          totalCost:0, weightKg:0,
+          wastePct:parseFloat(rm3b.wastePct)||0,
+          pricePerKg:Math.round(toILS(rm3b.unitCost||0, rm3b.costCurrency||'ILS')*100)/100,
+        };
+      }
+      rmAgg3b[pn].tq        += tq;
+      rmAgg3b[pn].totalCost += totalCostILS;
+      rmAgg3b[pn].weightKg  += wt3b;
+    });
+
+    let agg3bTotal = 0, agg3bRow = 2;
+    Object.values(rmAgg3b)
+      .sort((a,b)=> b.totalCost - a.totalCost)
+      .forEach(function(row) {
+        agg3bTotal += row.totalCost;
+        const r3b = ws3b.addRow(row);
+        const bg3b = agg3bRow % 2 === 0 ? 'FFD1FAE5' : 'FFF0FDF4';
+        r3b.eachCell(function(cell){ cell.fill={type:'pattern',pattern:'solid',fgColor:{argb:bg3b}}; });
+        for (let c=4; c<=9; c++) {
+          r3b.getCell(c).alignment = {horizontal:'right'};
+          r3b.getCell(c).numFmt   = c===8 ? '0"%"' : '#,##0.00';
+        }
+        agg3bRow++;
+      });
+
+    // Total row
+    const tot3b = ws3b.addRow({pn:'סה"כ'});
+    tot3b.getCell(1).font = {bold:true};
+    const totCell3b = tot3b.getCell(6);
+    totCell3b.value     = {formula:'=SUM(F2:F'+(agg3bRow-1)+')', result:Math.round(agg3bTotal*100)/100};
+    totCell3b.numFmt    = '#,##0.00';
+    totCell3b.alignment = {horizontal:'right'};
+    totCell3b.font      = {bold:true};
+
+    ws3b.autoFilter = {from:{row:1,column:1}, to:{row:1,column:9}};
+    ws3b.views = [{state:'frozen', ySplit:1, rightToLeft:true}];
+  } catch(e3b) { console.warn('ח"ג מאוחד sheet error:', e3b); }
 
   // ── Sheet 4: רכש — Purchasing summary ────────────────────────────────────
   try {
@@ -8507,7 +8576,7 @@ async function exportBomExcel() {
     });
     ws4.getRow(1).height = 20;
 
-    // Build fresh buy data
+    // Build fresh buy data — store unitCostILS from pre-computed unitCosts[]
     const buyMap4 = new Map();
     BOM.forEach(function(item, idx) {
       if (item.type !== 'Buy') return;
@@ -8516,20 +8585,30 @@ async function exportBomExcel() {
       const key = item.pb || item.pn;
       if (!buyMap4.has(key)) {
         buyMap4.set(key, {pb:item.pb||item.pn, pn:item.pn, desc:item.desc,
-          cat:item.cat||'', mf:item.mf||'', uom:item.uom||'', totalQty:0});
+          cat:item.cat||'', mf:item.mf||'', uom:item.uom||'',
+          totalQty:0, unitCostILS: unitCosts[idx] || 0});
       }
       buyMap4.get(key).totalQty += (item.tq||0);
     });
-    const buyList4 = Array.from(buyMap4.values())
-      .sort(function(a,b){ return (a.pb||a.pn).localeCompare(b.pb||b.pn); });
+
+    // Compute totalCost per item (needed for sort), then sort descending
+    const buyList4 = Array.from(buyMap4.values()).map(function(br) {
+      const ent = getPriceEntry(br.pb);
+      const entPrice = ent ? toILS(ent.p, ent.currency||'USD') : 0;
+      // Prefer pre-computed unitCostILS (always correct); fall back to getPriceEntry
+      br.resolvedUnitPrice = br.unitCostILS > 0 ? br.unitCostILS : entPrice;
+      br.resolvedCurrency  = ent ? (ent.currency||'ILS') : 'ILS';
+      const qty4 = Math.round(br.totalQty * pQty * 100) / 100;
+      br.resolvedTotalCost = Math.round(br.resolvedUnitPrice * qty4 * 100) / 100;
+      return br;
+    }).sort(function(a,b){ return b.resolvedTotalCost - a.resolvedTotalCost; });
 
     let buy4TotalCost = 0;
     let buy4DataRow = 2;
-    buyList4.forEach(function(br, bi) {
-      const ent = getPriceEntry(br.pb);
-      const unitPriceILS = ent ? toILS(ent.p, ent.currency||'USD') : 0;
+    buyList4.forEach(function(br) {
+      const unitPriceILS = br.resolvedUnitPrice;
       const qty4 = Math.round(br.totalQty * pQty * 100) / 100;
-      const totalCost4 = Math.round(unitPriceILS * qty4 * 100) / 100;
+      const totalCost4 = br.resolvedTotalCost;
       buy4TotalCost += totalCost4;
       const bn4 = buyNotes[br.pb] || {};
       const notes4 = bn4.notes || '';
@@ -8543,7 +8622,7 @@ async function exportBomExcel() {
         uom:       br.uom,
         qty:       qty4,
         unitPrice: Math.round(unitPriceILS*100)/100,
-        currency:  ent ? (ent.currency||'USD') : '',
+        currency:  br.resolvedCurrency,
         totalCost: totalCost4,
         notes:     notes4,
         link:      link4,
@@ -8556,7 +8635,7 @@ async function exportBomExcel() {
         r4.getCell(12).font = {color:{argb:'FF2563EB'}, underline:true};
       }
       buy4DataRow++;
-      const bg4 = bi % 2 === 0 ? 'FFD1FAE5' : 'FFF0FDF4';
+      const bg4 = buy4DataRow % 2 === 0 ? 'FFD1FAE5' : 'FFF0FDF4';
       r4.eachCell(function(cell){ cell.fill = {type:'pattern',pattern:'solid',fgColor:{argb:bg4}}; });
       // Numeric format only for cols 7-10 (qty, unitPrice, currency, totalCost)
       for (let c = 7; c <= 10; c++) {
