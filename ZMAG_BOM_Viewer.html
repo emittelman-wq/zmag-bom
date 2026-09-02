@@ -776,6 +776,7 @@ const COLS = [
   {id:'lcost', label:'🔧 ייצור (עץ)', w:90,  sort:false},
   {id:'bcost', label:'🛒 COTS (עץ)',   w:85,  sort:false},
   {id:'ucost',     label:'🧱 ח"ג (עץ)',      w:85,  sort:false},
+  {id:'paintArea', label:'📐 שטח מ"ר',        w:75,  sort:false},
   {id:'paintCost', label:'🎨 עלות צבע',      w:95,  sort:false},
   {id:'tcost',     label:'⚙ Setup NRE ₪',   w:95,  sort:false},
   {id:'pcost',     label:'💰 סה"כ פרויקט',  w:100, sort:false},
@@ -790,11 +791,13 @@ let cumCycleH = [];     // tree-cumulative cycle hours (no setup)
 let projectQty = 1;
 let buyNotes = {};
 var paintCostOverrides = {};   // {pb: totalCostOverride (₪, tq-inclusive)}
-var PAINT_RATE = 700;           // ₪ per painting-hour (user-configurable)
-var PAINT_LITERS_PER_HR = 12;   // liters per painting-hour (user-configurable)
+var PAINT_RATE_PER_M2 = 150;    // ₪ per m² of painted surface (user-configurable)
+var PAINT_LITERS_PER_M2 = 0.3;  // liters per m² of painted surface (user-configurable)
+var SURFACE_AREAS = {};         // {partNumber: area_m2} — loaded from surface_areas.csv
 var treePaintCost = [];         // tree-accumulated paint cost per 1 ערכה
 const PAINT_OVERRIDES_KEY = 'zmag_paint_overrides_6910W021';
 const PAINT_SETTINGS_KEY  = 'zmag_paint_settings_6910W021';
+const SURFACE_AREAS_KEY   = 'zmag_surface_areas_6910W021';
 let buyPrices = {};   // pb → {p, src, currency} — cloud-persisted, replaces px_* localStorage keys
 let subData = {};
 let rawMatData = {};   // {pb: {family,grade,form,dims,density,unitCost,costUnit}}
@@ -1363,7 +1366,8 @@ function buildHeader(){
     const th=document.createElement('th');
     th.dataset.col=col.id;
     if(col.sort) th.onclick=()=>sortBy(col.id);
-    else if(col.id==='paintCost'){ th.style.cursor='pointer'; th.title='לחץ להגדרות עלות צבע (תעריף + ליטר/שעה)'; th.onclick=openPaintSettings; }
+    else if(col.id==='paintArea'){ th.style.cursor='pointer'; th.title='שטח חיצוני (מ"ר) לפי surface_areas.csv. לחץ לטעינת CSV'; th.onclick=loadSurfaceAreasCSV; }
+    else if(col.id==='paintCost'){ th.style.cursor='pointer'; th.title='עלות צבע = שטח(מ"ר) × '+PAINT_RATE_PER_M2+'₪/מ"ר. לחץ לשינוי תעריף'; th.onclick=openPaintSettings; }
     th.innerHTML=(col.sort?`${col.label} <span class="si-sort">↕</span>`:col.label);
 
     // Resize handle
@@ -1633,44 +1637,85 @@ function computeTreeCosts() {
 }
 
 // ─── Paint cost helpers ──────────────────────────────────────────────────────
-function _itemPaintH(pb) {
-  const procs = (procData[pb]||[]).filter(function(p){ return p.type==='painting'; });
-  let hrs = 0;
-  procs.forEach(function(p){
-    const u = (p.unit||'').toLowerCase();
-    if (u==='h'||u==='hr') hrs += parseFloat(p.qty)||0;
-    else if (u==='min'||u==='') hrs += (parseFloat(p.qty)||0)/60;
-    // m2 / ar / other area units → NOT treated as time
-  });
-  return hrs;
+function _itemPaintArea(pb) {
+  // Returns surface area in m² only if a 'painting' process is defined for this part.
+  const hasProc = (procData[pb]||[]).some(function(p){ return p.type==='painting'; });
+  if (!hasProc) return 0;
+  return SURFACE_AREAS[pb] || 0;
 }
 function _itemPaintCostTotal(pb, tq) {
   if (paintCostOverrides[pb] !== undefined) return parseFloat(paintCostOverrides[pb]) || 0;
-  return _itemPaintH(pb) * PAINT_RATE * tq;
+  return _itemPaintArea(pb) * PAINT_RATE_PER_M2 * tq;
 }
 function loadPaintSettings() {
-  try { const s=JSON.parse(localStorage.getItem(PAINT_SETTINGS_KEY)||'{}'); if(s.rate>0) PAINT_RATE=s.rate; if(s.litersPerHr>0) PAINT_LITERS_PER_HR=s.litersPerHr; } catch(e){}
+  try { const s=JSON.parse(localStorage.getItem(PAINT_SETTINGS_KEY)||'{}');
+    if(s.ratePerM2>0) PAINT_RATE_PER_M2=s.ratePerM2;
+    if(s.litersPerM2>0) PAINT_LITERS_PER_M2=s.litersPerM2;
+  } catch(e){}
   try { paintCostOverrides=JSON.parse(localStorage.getItem(PAINT_OVERRIDES_KEY)||'{}'); } catch(e){}
+  try { const sa=JSON.parse(localStorage.getItem(SURFACE_AREAS_KEY)||'{}');
+    if(typeof sa==='object') SURFACE_AREAS=sa;
+  } catch(e){}
 }
 function savePaintSettings() {
-  localStorage.setItem(PAINT_SETTINGS_KEY, JSON.stringify({rate:PAINT_RATE, litersPerHr:PAINT_LITERS_PER_HR}));
+  localStorage.setItem(PAINT_SETTINGS_KEY, JSON.stringify({ratePerM2:PAINT_RATE_PER_M2, litersPerM2:PAINT_LITERS_PER_M2}));
   localStorage.setItem(PAINT_OVERRIDES_KEY, JSON.stringify(paintCostOverrides));
+  localStorage.setItem(SURFACE_AREAS_KEY, JSON.stringify(SURFACE_AREAS));
 }
 function openPaintSettings() {
-  const r = prompt('תעריף צבע (₪/שעה) — נוכחי: '+PAINT_RATE, PAINT_RATE);
+  const r = prompt(
+    '═══ הגדרות עלות צבע ═══\n\n' +
+    '① עלות צבע (₪/מ"ר)\n' +
+    '   → עלות = שטח(מ"ר) × תעריף × כמות יחידות\n' +
+    '   שטחים נטענים מקובץ surface_areas.csv\n\n' +
+    'תעריף נוכחי: ' + PAINT_RATE_PER_M2 + ' ₪/מ"ר',
+    PAINT_RATE_PER_M2);
   if (r===null) return;
-  const rv = parseFloat(r); if (rv>0) PAINT_RATE=rv;
-  const l = prompt('כמות צבע (ליטר/שעה) — נוכחי: '+PAINT_LITERS_PER_HR, PAINT_LITERS_PER_HR);
-  if (l!==null) { const lv2=parseFloat(l); if(lv2>0) PAINT_LITERS_PER_HR=lv2; }
+  const rv = parseFloat(r); if (rv>0) PAINT_RATE_PER_M2=rv;
+  const l = prompt(
+    '② קצב צריכת צבע (ליטר/מ"ר)\n' +
+    '   → משמש לחישוב כמות הצבע לצורך הזמנה בלבד\n' +
+    '   כמות = שטח(מ"ר) × קצב  (לא משפיע על עלות)\n\n' +
+    'קצב נוכחי: ' + PAINT_LITERS_PER_M2 + ' ל\'/מ"ר',
+    PAINT_LITERS_PER_M2);
+  if (l!==null) { const lv2=parseFloat(l); if(lv2>0) PAINT_LITERS_PER_M2=lv2; }
   savePaintSettings(); computeTreeCosts(); updateWHCells();
 }
+function loadSurfaceAreasCSV() {
+  const input = document.createElement('input');
+  input.type = 'file'; input.accept = '.csv';
+  input.onchange = function(e) {
+    const file = e.target.files[0]; if (!file) return;
+    const reader = new FileReader();
+    reader.onload = function(ev) {
+      const lines = ev.target.result.split(/\r?\n/);
+      const header = lines[0].split(',');
+      const fileIdx  = header.indexOf('file');
+      const areaIdx  = header.indexOf('area_mm2');
+      if (fileIdx<0||areaIdx<0) { alert('קובץ CSV לא תקין — חסרות עמודות file / area_mm2'); return; }
+      SURFACE_AREAS = {};
+      let count = 0;
+      for (let i=1; i<lines.length; i++) {
+        const cols = lines[i].split(','); if (cols.length<2) continue;
+        const fname = (cols[fileIdx]||'').trim();
+        const pn = fname.replace(/\.(stp|step)$/i,'').trim();
+        const a = parseFloat(cols[areaIdx]);
+        if (pn && a>0) { SURFACE_AREAS[pn] = a/1e6; count++; } // store as m²
+      }
+      savePaintSettings(); computeTreeCosts(); updateWHCells();
+      alert('✓ נטענו שטחים עבור ' + count + ' חלקים');
+    };
+    reader.readAsText(file, 'utf-8');
+  };
+  input.click();
+}
 function openPaintCostEdit(pb, tq) {
-  const autoH = _itemPaintH(pb);
-  const autoCost = Math.round(autoH * PAINT_RATE * tq * 100) / 100;
+  const autoArea = _itemPaintArea(pb);
+  const autoCost = Math.round(autoArea * PAINT_RATE_PER_M2 * tq * 100) / 100;
   const override = paintCostOverrides[pb];
-  const hint = autoCost > 0
-    ? 'אוטומטי: ₪'+autoCost+' ('+Math.round(autoH*60)+' דק × '+PAINT_RATE+'₪/שעה × '+tq+' יח)'
-    : 'אין תהליך צביעה מוגדר (ניתן להזין ידנית)';
+  const hint = autoArea > 0
+    ? 'אוטומטי: ₪'+autoCost+' ('+autoArea.toFixed(4)+' מ"ר × '+PAINT_RATE_PER_M2+'₪/מ"ר × '+tq+' יח)'
+    : 'אין שטח מוגדר לחלק זה — טען surface_areas.csv (ניתן להזין ידנית)';
   const val = prompt('עלות צבע ל-'+pb+'\n'+hint+'\n\nהזן עלות כוללת ₪ (ריק = איפוס לאוטומטי):', override!==undefined ? override : '');
   if (val===null) return;
   if (val.trim()==='') { delete paintCostOverrides[pb]; }
@@ -1723,16 +1768,16 @@ function _computeVisibleCosts() {
     nre:  Math.round(nre  * 100) / 100,
   };
   // Paint cost: sum across visible items × projectQty
-  let _paintSum = 0, _paintHrs = 0;
+  let _paintSum = 0, _paintAreaTotal = 0;
   BOM.forEach(function(item2, idx2) {
     const tr2 = rows[idx2];
     if (!tr2 || tr2.classList.contains('hid') || isRowExcluded(idx2)) return;
     const tq2 = item2.tq || item2.qty || 0;
     _paintSum += _itemPaintCostTotal(item2.pb||item2.pn, tq2);
-    _paintHrs += _itemPaintH(item2.pb||item2.pn) * tq2;
+    _paintAreaTotal += _itemPaintArea(item2.pb||item2.pn) * tq2;
   });
   r.paint = Math.round(_paintSum * pQty * 100) / 100;
-  r.paintLiters = Math.round(_paintHrs * pQty * PAINT_LITERS_PER_HR * 100) / 100;
+  r.paintLiters = Math.round(_paintAreaTotal * pQty * PAINT_LITERS_PER_M2 * 100) / 100;
   r.total = Math.round((r.mfg + r.cots + r.rawm + r.nre + r.paint) * 100) / 100;
   return r;
 }
@@ -2004,6 +2049,14 @@ function buildTable(){
       tdUC.title = 'Calculated from process costs (edit in ⚙ Process Types)';
     }
     tr.appendChild(tdUC);
+    // 📐 Paint area cell — shows surface area in m² from SURFACE_AREAS CSV
+    const tdArea = document.createElement('td');
+    tdArea.className = 'cost-val';
+    tdArea.dataset.paintAreaIdx = idx;
+    tdArea.style.cssText = 'color:#60a5fa;font-size:11px;cursor:pointer';
+    tdArea.title = 'שטח חיצוני (מ"ר). לחץ לטעינת CSV';
+    tdArea.addEventListener('click', function(ev){ ev.stopPropagation(); loadSurfaceAreasCSV(); });
+    tr.appendChild(tdArea);
     // 🎨 Paint cost cell (direct own-item cost only, next to ח"ג)
     const tdPaint = document.createElement('td');
     tdPaint.className = 'cost-val cost-paint';
@@ -4590,6 +4643,13 @@ function refreshCostCells(){
     const v=cumSetupCosts[i]||0;
     td.textContent=v>0?fmtC(v):'—';
   });
+  // paintArea → surface area (m²) for own item only
+  document.querySelectorAll('[data-paint-area-idx]').forEach(function(td){
+    const i=parseInt(td.dataset.paintAreaIdx);
+    if(isNaN(i)||!BOM[i]) return;
+    const a=_itemPaintArea(BOM[i].pb||BOM[i].pn);
+    td.textContent = a>0 ? a.toFixed(4) : '';
+  });
   // paintCost → tree-accumulated paint cost × projectQty (own + all descendants, like lcost/bcost/ucost)
   document.querySelectorAll('[data-paint-cost-idx]').forEach(function(td){
     const i=parseInt(td.dataset.paintCostIdx);
@@ -6588,8 +6648,9 @@ async function _spWriteFile() {
     rawTypeOverrides: rawTypeOverrides,
     eltBuyOverrides: eltBuyOverrides,
     paintCostOverrides: paintCostOverrides,
-    paintRate: PAINT_RATE,
-    paintLitersPerHr: PAINT_LITERS_PER_HR
+    paintRatePerM2: PAINT_RATE_PER_M2,
+    paintLitersPerM2: PAINT_LITERS_PER_M2,
+    surfaceAreas: SURFACE_AREAS
   }, null, 2);
   const r = await fetch(_spUploadUrl(), {
     method: 'POST',
@@ -6734,8 +6795,9 @@ function _restoreFromBackup(obj) {
     paintCostOverrides = obj.paintCostOverrides;
     savePaintSettings();
   }
-  if (obj.paintRate > 0) { PAINT_RATE = obj.paintRate; savePaintSettings(); }
-  if (obj.paintLitersPerHr > 0) { PAINT_LITERS_PER_HR = obj.paintLitersPerHr; savePaintSettings(); }
+  if (obj.paintRatePerM2 > 0) { PAINT_RATE_PER_M2 = obj.paintRatePerM2; savePaintSettings(); }
+  if (obj.paintLitersPerM2 > 0) { PAINT_LITERS_PER_M2 = obj.paintLitersPerM2; savePaintSettings(); }
+  if (obj.surfaceAreas && typeof obj.surfaceAreas==='object') { SURFACE_AREAS = obj.surfaceAreas; savePaintSettings(); }
   if (obj.subcontractors) subData = obj.subcontractors;
   if (Array.isArray(obj.flaggedRows)) {
     flaggedRows = new Set(obj.flaggedRows.map(Number));
@@ -6792,8 +6854,9 @@ function _mergeLoadedProc(obj) {
     paintCostOverrides = obj.paintCostOverrides;
     savePaintSettings();
   }
-  if (obj.paintRate > 0) { PAINT_RATE = obj.paintRate; savePaintSettings(); }
-  if (obj.paintLitersPerHr > 0) { PAINT_LITERS_PER_HR = obj.paintLitersPerHr; savePaintSettings(); }
+  if (obj.paintRatePerM2 > 0) { PAINT_RATE_PER_M2 = obj.paintRatePerM2; savePaintSettings(); }
+  if (obj.paintLitersPerM2 > 0) { PAINT_LITERS_PER_M2 = obj.paintLitersPerM2; savePaintSettings(); }
+  if (obj.surfaceAreas && typeof obj.surfaceAreas==='object') { SURFACE_AREAS = obj.surfaceAreas; savePaintSettings(); }
   if (obj.subcontractors) subData = obj.subcontractors;
   if (Array.isArray(obj.flaggedRows)) {
     const serverFlags = new Set(obj.flaggedRows.map(Number));
@@ -6850,8 +6913,9 @@ async function _graphWriteProcFile() {
     rawTypeOverrides: rawTypeOverrides,
     eltBuyOverrides: eltBuyOverrides,
     paintCostOverrides: paintCostOverrides,
-    paintRate: PAINT_RATE,
-    paintLitersPerHr: PAINT_LITERS_PER_HR
+    paintRatePerM2: PAINT_RATE_PER_M2,
+    paintLitersPerM2: PAINT_LITERS_PER_M2,
+    surfaceAreas: SURFACE_AREAS
   }, null, 2);
   const r = await fetch(url, {
     method: 'PUT',
@@ -7006,8 +7070,9 @@ async function _writeProcFile() {
     rawTypeOverrides: rawTypeOverrides,
     eltBuyOverrides: eltBuyOverrides,
     paintCostOverrides: paintCostOverrides,
-    paintRate: PAINT_RATE,
-    paintLitersPerHr: PAINT_LITERS_PER_HR
+    paintRatePerM2: PAINT_RATE_PER_M2,
+    paintLitersPerM2: PAINT_LITERS_PER_M2,
+    surfaceAreas: SURFACE_AREAS
   }, null, 2);
   const w = await _procFileHandle.createWritable();
   await w.write(payload); await w.close();
@@ -8137,13 +8202,13 @@ async function exportBomExcel() {
   // Override raw-material total with tree-computed value for same reason
   const _sumRawmFinalXls  = Math.round((treeRawMatCost[0] || 0) * pQty * 100) / 100;
   const _sumPaintFinalXls = Math.round((treePaintCost[0]  || 0) * pQty * 100) / 100;
-  // Total paint hours and liters (across visible BOM rows)
-  let _paintHrsXls = 0;
+  // Total paint area and liters (across visible BOM rows)
+  let _paintAreaXls = 0;
   _xlsVisible.forEach(function(idx) {
     const item = BOM[idx];
-    _paintHrsXls += _itemPaintH(item.pb||item.pn) * (item.tq||0);
+    _paintAreaXls += _itemPaintArea(item.pb||item.pn) * (item.tq||0);
   });
-  const _paintLitersXls = Math.round(_paintHrsXls * pQty * PAINT_LITERS_PER_HR * 100) / 100;
+  const _paintLitersXls = Math.round(_paintAreaXls * pQty * PAINT_LITERS_PER_M2 * 100) / 100;
 
   // ── Sheet 0: סיכום מנהלים (Executive Summary) ─────────────────────────────
   const _sumHours = Math.round((cumHours[0] || 0) * pQty * 100) / 100;
@@ -8192,10 +8257,10 @@ async function exportBomExcel() {
   ws0.addRow([]);
   _w0Title('שעות עבודה', 'FF374151');
   _w0Row('שעות כוללות (שע"א)', _sumHours);
-  if (_paintLitersXls > 0) {
-    _w0Row('🎨 שעות צביעה', Math.round(_paintHrsXls * pQty * 100)/100);
-    _w0Row('🎨 כמות צבע (ל\') — '+PAINT_LITERS_PER_HR+' ל\'/שעה', _paintLitersXls);
-    _w0Row('🎨 תעריף חומר צבע (₪/שעה)', PAINT_RATE);
+  if (_paintAreaXls > 0 || _paintLitersXls > 0) {
+    _w0Row('🎨 שטח צביעה כולל (מ"ר)', Math.round(_paintAreaXls * pQty * 10000)/10000);
+    _w0Row('🎨 כמות צבע (ל\') — '+PAINT_LITERS_PER_M2+' ל\'/מ"ר', _paintLitersXls);
+    _w0Row('🎨 תעריף חומר צבע (₪/מ"ר)', PAINT_RATE_PER_M2);
   }
 
   // ── Sheet 1: Full BOM with all costs ──────────────────────────────────────
