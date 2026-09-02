@@ -8577,11 +8577,12 @@ async function exportBomExcel() {
     ws4.getRow(1).height = 20;
 
     // Build fresh buy data — store unitCostILS from pre-computed unitCosts[]
+    // Include ALL COTS items: same logic as computeTreeCosts (everything that is not a make-ELTDesign and not ח"ג)
     const buyMap4 = new Map();
     BOM.forEach(function(item, idx) {
-      if (item.type !== 'Buy') return;
       if (!_xlsVisible.has(idx)) return;
       if (_isBuyRawMat(item)) return; // ח"ג items appear in their own sheet
+      if (item.type === 'ELTDesign' && !eltBuyOverrides[item.pb||item.pn]) return; // make item → skip
       const key = item.pb || item.pn;
       if (!buyMap4.has(key)) {
         buyMap4.set(key, {pb:item.pb||item.pn, pn:item.pn, desc:item.desc,
