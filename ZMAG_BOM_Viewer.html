@@ -2605,6 +2605,7 @@ const MATERIAL_FORMS = [
   {id:'sheet',      label:'פח / לוח',              dims:[{k:'L',u:'mm',ph:'אורך'},{k:'W',u:'mm',ph:'רוחב'},{k:'T',u:'mm',ph:'עובי'}]},
   {id:'bar_round',  label:'מוט עגול',               dims:[{k:'L',u:'mm',ph:'אורך'},{k:'D',u:'mm',ph:'קוטר'}]},
   {id:'bar_square', label:'מוט מרובע/שטוח',         dims:[{k:'L',u:'mm',ph:'אורך'},{k:'S',u:'mm',ph:'רוחב'},{k:'S2',u:'mm',ph:'גובה'}]},
+  {id:'bar_hex',    label:'מוט משושה (HEX)',         dims:[{k:'L',u:'mm',ph:'אורך'},{k:'S',u:'mm',ph:'מרחק בין פאות (AF)'}]},
   {id:'tube_round', label:'צינור עגול',              dims:[{k:'L',u:'mm',ph:'אורך'},{k:'D',u:'mm',ph:'⌀ חיצוני'},{k:'d',u:'mm',ph:'⌀ פנימי'}]},
   {id:'tube_square',label:'צינור מרובע (SHS)',       dims:[{k:'L',u:'mm',ph:'אורך'},{k:'S',u:'mm',ph:'צלע'},{k:'t',u:'mm',ph:'עובי דופן'}]},
   {id:'tube_rect',  label:'צינור מלבני (RHS)',       dims:[{k:'L',u:'mm',ph:'אורך'},{k:'W',u:'mm',ph:'רוחב חיצוני'},{k:'H',u:'mm',ph:'גובה חיצוני'},{k:'t',u:'mm',ph:'עובי דופן'}]},
@@ -2632,6 +2633,7 @@ function calcRawMatVolume(form, dims) {
     case 'sheet':       return m('L')*m('W')*m('T');
     case 'bar_round':   return Math.PI*Math.pow(m('D')/2,2)*m('L');
     case 'bar_square':  return m('L')*m('S')*(parseFloat(dims.S2)||parseFloat(dims.S)||0)/1000;
+    case 'bar_hex':     return (Math.sqrt(3)/2)*Math.pow(m('S'),2)*m('L');  // S=across-flats (AF)
     case 'tube_round':  return Math.PI*(Math.pow(m('D')/2,2)-Math.pow(m('d')/2,2))*m('L');
     case 'tube_square': { const o=Math.pow(m('S'),2), i=Math.pow(Math.max(0,m('S')-2*m('t')),2); return (o-i)*m('L'); }
     case 'tube_rect':   { const o=m('W')*m('H'), i=Math.max(0,m('W')-2*m('t'))*Math.max(0,m('H')-2*m('t')); return (o-i)*m('L'); }
@@ -2687,10 +2689,13 @@ function parseRawMatHints(pb, desc) {
   } else if (/\b(304|316|STAINLESS|INOX)\b|(\bSS\b)/.test(src)) {
     h.family = 'stainless';
     h.grade  = /316/.test(src) ? '316' : '304';
-  } else if (/\b(STEEL|S235|S275|S355|A36|ST37|ST52|S235JRH|S275JRH|4140|42CRMO|CARBON)\b/.test(src)) {
+  } else if (/\b(STEEL|S235|S275|S355|A36|ST37|ST52|S235JRH|S275JRH|4140|42CRMO|CARBON|SAE\s*\d{4}|SAE\s*E\d{4}|1045|1020|4130|4140|4340)\b/.test(src)) {
     h.family = 'steel';
-    h.grade  = /4140|42CR/.test(src) ? '4140' : 'A36';
-  } else if (/\b(BRASS|BRONZE|CUZN)\b/.test(src)) {
+    if      (/4140|42CR|SAE\s*E?4140/.test(src)) h.grade = '4140';
+    else if (/4130|SAE\s*E?4130/.test(src))       h.grade = '4130';
+    else if (/4340|SAE\s*E?4340/.test(src))       h.grade = '4340';
+    else                                           h.grade = 'A36';
+  } else if (/\b(BRASS|BRONZE|CUZN|CDA\s*\d+)\b/.test(src)) {
     h.family = 'brass'; h.grade = 'generic';
   } else if (/\b(COPPER)\b|\bCU\b/.test(src)) {
     h.family = 'copper'; h.grade = 'generic';
@@ -2735,10 +2740,20 @@ function parseRawMatHints(pb, desc) {
       h.dims = {D:String(d1), d:String(Math.round(id*100)/100)};
     }
   }
+  // Hexagonal bar
+  else if (/\b(HEX\s*BAR|BAR\s*HEX|BAR\s*HEXAG|HEXAG\w*\s*BAR|\bHX\b)/.test(src) || /^\s*HX\s/.test(pb||'')) {
+    h.form = 'bar_hex';
+    // Try NxN, then standalone MM, then standalone inch (bare number ≤4 at end of PN)
+    let _hxSize = d1 || (function(){ const m=src.match(/(?<![0-9])(\d+(?:\.\d+)?)\s*MM\b/); return m?parseFloat(m[1]):0; })();
+    if (!_hxSize) { const _in=((pb||'').match(/(?<!\d)(\d+(?:[./]\d+)?)\s*$/) || [])[1]; if(_in) _hxSize=parseFloat(_in.split('/').reduce(function(a,b){return a/b}))*25.4; }
+    if (_hxSize) h.dims = {S:String(Math.round(_hxSize*100)/100)};
+  }
   // Round bar / rod
-  else if (/\b(ROD\b|ROUND\s*BAR|BAR\s*ROUND|RD\s*BAR|\bRB\b|\bBR\b)/.test(src)) {
+  else if (/\b(ROD\b|ROUND\s*BAR|BAR\s*ROUND|RD\s*BAR|\bRB\b|\bBR\b)/.test(src) || /^\s*D\s/.test(pb||'')) {
     h.form = 'bar_round';
-    if (d1) h.dims = {D:String(d1)};
+    // Try NxN pattern first, then standalone "NN MM" in src (covers "40.0 MM" format)
+    const _dVal = d1 || (function(){ const m=src.match(/(?<![0-9])(\d+(?:\.\d+)?)\s*MM\b/); return m?parseFloat(m[1]):0; })();
+    if (_dVal) h.dims = {D:String(_dVal)};
   }
   // Flat bar / square bar
   else if (/\b(FLAT\s*BAR|BAR\s*FLAT|\bFB\b|SQUARE\s*BAR|SQ\s*BAR|BAR\s*SQ|\bBFS\b)/.test(src)) {
@@ -3414,7 +3429,13 @@ function openRawMatEditor(pb, desc, tq) {
   const mergedDims = Object.assign({}, _hDims);
   Object.keys(_eDims).forEach(function(k){ if (_eDims[k] !== '' && _eDims[k] != null) mergedDims[k] = _eDims[k]; });
   const curDens = existing.density || hints.density || famData.density;
+  const _bInfo0 = getBOMInfoForPb(pb);
+  const _isUomM  = /^m$/i.test((_bInfo0.uom||'').trim());
+  const _isUomM2 = /^m2$/i.test((_bInfo0.uom||'').trim());
+  // Always default to ₪/kg — cost is calculated from dims/STEP volume × density × price
   const curCostUnit = existing.costUnit || 'kg';
+  // Store hints for rmOnFormChange (so re-detected dims aren't lost when form type changes)
+  window._curRmHints = hints;
 
   // Build detection banner
   const detectedLabels = [];
@@ -3589,7 +3610,11 @@ function rmOnFormChange(pb){
   const formId=document.getElementById('rmForm').value;
   const formData=MATERIAL_FORMS.find(function(f){return f.id===formId;})||MATERIAL_FORMS[0];
   const existing=rawMatData[pb]||{};
-  const mergedDims=Object.assign({},existing.dims||{});
+  // Merge hints dims + existing dims (hints fill gaps when existing dims are empty)
+  const _rmHints = (window._curRmHints||{}).dims || {};
+  const _rmExisting = existing.dims || {};
+  const mergedDims = Object.assign({}, _rmHints);
+  Object.keys(_rmExisting).forEach(function(k){ if (_rmExisting[k] !== '' && _rmExisting[k] != null) mergedDims[k] = _rmExisting[k]; });
   const dimFields=formData.dims.map(function(d){
     const val=mergedDims[d.k]||'';
     const safePb=(window._curRmPb||pb).replace(/[^a-zA-Z0-9_.-]/g,'_');
@@ -5275,18 +5300,26 @@ function _populateRawmatTab(force){
         try{ const a=computeARAggregate(r.pb,true)||{}; mass=a.mass||0; costStr=a.cost>0?fmtC(a.cost):'—'; }catch(e){}
       } else {
         const dens=parseFloat(rm.density)||(MATERIAL_DB[rm.family]||{}).density||2700;
-        // M2 items: normalise to 1 m² (L=1000, W=1000); M items: normalise to 1 m (L=1000 only)
         const isM2uom=/^m2$/i.test((r.uom||'').trim());
-        const nd=isM2uom
-          ?Object.assign({},rm.dims||{},{L:'1000',W:'1000'})
-          :Object.assign({},rm.dims||{},{L:'1000'});
-        const vol=calcRawMatVolume(rm.form||'sheet',nd);
-        const massPerM=vol*dens;
+        const isMuom=/^m$/i.test((r.uom||'').trim());
         const wasteFactor=1+(parseFloat(rm.wastePct)||0)/100;
-        mass=massPerM*wasteFactor*r.tq;
         const uc=parseFloat(rm.unitCost)||0;
-        const cost=uc>0?mass*uc:0;
-        if(cost>0) costStr=fmtC(cost);
+        // costUnit='m' or 'm2' → direct linear/area cost (no mass calculation needed)
+        if ((isMuom && rm.costUnit==='m') || (isM2uom && rm.costUnit==='m2')) {
+          const cost=uc>0?uc*r.tq*wasteFactor:0;
+          if(cost>0) costStr=fmtC(cost);
+          // mass unknown — leave as '—'
+        } else {
+          // M2 items: normalise to 1 m² (L=1000, W=1000); M items: normalise to 1 m (L=1000 only)
+          const nd=isM2uom
+            ?Object.assign({},rm.dims||{},{L:'1000',W:'1000'})
+            :Object.assign({},rm.dims||{},{L:'1000'});
+          const vol=calcRawMatVolume(rm.form||'sheet',nd);
+          const massPerM=vol*dens;
+          mass=massPerM*wasteFactor*r.tq;
+          const cost=uc>0?mass*uc:0;
+          if(cost>0) costStr=fmtC(cost);
+        }
       }
       massStr=mass>0?(mass>=1?mass.toFixed(2)+' kg':(mass*1000).toFixed(0)+' g'):'—';
       const uc=parseFloat(rm.unitCost)||0;
