@@ -5296,21 +5296,16 @@ function _populateRawmatTab(force){
       dimsStr=_fmtDims(rm.dims);
       // mass
       let mass=0;
-      if(IS_AR.test(r.uom)){
-        try{ const a=computeARAggregate(r.pb,true)||{}; mass=a.mass||0; costStr=a.cost>0?fmtC(a.cost):'—'; }catch(e){}
-      } else {
-        const dens=parseFloat(rm.density)||(MATERIAL_DB[rm.family]||{}).density||2700;
-        const isM2uom=/^m2$/i.test((r.uom||'').trim());
-        const isMuom=/^m$/i.test((r.uom||'').trim());
-        const wasteFactor=1+(parseFloat(rm.wastePct)||0)/100;
-        const uc=parseFloat(rm.unitCost)||0;
-        // costUnit='m' or 'm2' → direct linear/area cost (no mass calculation needed)
-        if ((isMuom && rm.costUnit==='m') || (isM2uom && rm.costUnit==='m2')) {
-          const cost=uc>0?uc*r.tq*wasteFactor:0;
-          if(cost>0) costStr=fmtC(cost);
-          // mass unknown — leave as '—'
-        } else {
-          // M2 items: normalise to 1 m² (L=1000, W=1000); M items: normalise to 1 m (L=1000 only)
+      const isM2uom=/^m2$/i.test((r.uom||'').trim());
+      const isMuom=/^m$/i.test((r.uom||'').trim());
+      if(IS_AR.test(r.uom) || isMuom || isM2uom){
+        // Try computeARAggregate first — uses per-parent STEP volumes when available
+        try{ const a=computeARAggregate(r.pb,true)||{}; mass=a.mass||0; if(a.cost>0) costStr=fmtC(a.cost); }catch(e){}
+        // If no STEP volumes (cost still '—'), fall back to dims-based calculation
+        if(costStr==='—'){
+          const dens=parseFloat(rm.density)||(MATERIAL_DB[rm.family]||{}).density||2700;
+          const wasteFactor=1+(parseFloat(rm.wastePct)||0)/100;
+          const uc=parseFloat(rm.unitCost)||0;
           const nd=isM2uom
             ?Object.assign({},rm.dims||{},{L:'1000',W:'1000'})
             :Object.assign({},rm.dims||{},{L:'1000'});
@@ -5372,19 +5367,23 @@ function exportRawMaterials(){
     const ff=rm?MATERIAL_FORMS.find(function(f){return f.id===rm.form;}):{};
     let mass=0,cost=0;
     if(rm){
-      if(IS_AR.test(r.uom)){
+      const isM2exp=/^m2$/i.test((r.uom||'').trim());
+      const isMexp=/^m$/i.test((r.uom||'').trim());
+      if(IS_AR.test(r.uom) || isMexp || isM2exp){
+        // Try STEP-based aggregate first
         try{ const a=computeARAggregate(r.pb,true)||{}; mass=a.mass||0; cost=a.cost||0; }catch(e){}
-      } else {
-        const dens=parseFloat(rm.density)||(fd.density||2700);
-        const isM2exp=/^m2$/i.test((r.uom||'').trim());
-        const nd=isM2exp
-          ?Object.assign({},rm.dims||{},{L:'1000',W:'1000'})
-          :Object.assign({},rm.dims||{},{L:'1000'});
-        const vol=calcRawMatVolume(rm.form||'sheet',nd);
-        const wasteFactor=1+(parseFloat(rm.wastePct)||0)/100;
-        mass=vol*dens*wasteFactor*r.tq;
-        const uc=parseFloat(rm.unitCost)||0;
-        cost=uc>0?mass*uc:0;
+        // Fall back to dims if no STEP data
+        if(!cost){
+          const dens=parseFloat(rm.density)||(fd.density||2700);
+          const nd=isM2exp
+            ?Object.assign({},rm.dims||{},{L:'1000',W:'1000'})
+            :Object.assign({},rm.dims||{},{L:'1000'});
+          const vol=calcRawMatVolume(rm.form||'sheet',nd);
+          const wasteFactor=1+(parseFloat(rm.wastePct)||0)/100;
+          mass=vol*dens*wasteFactor*r.tq;
+          const uc=parseFloat(rm.unitCost)||0;
+          cost=uc>0?mass*uc:0;
+        }
       }
     }
     rows2.push({
