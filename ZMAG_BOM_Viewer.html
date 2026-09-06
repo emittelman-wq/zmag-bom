@@ -576,6 +576,7 @@ tr.row-disabled .badge,tr.row-disabled .proc-btn{opacity:.5}
   <div class="mtp" id="mtp-rawmat">
     <div class="tab-action-bar">
       <button class="btn" id="rmExcelBtn" onclick="exportRawMaterials()">🧱 ייצוא ח"ג Excel</button>
+      <button class="btn" onclick="setAllWastePct(10)" title="קבע פחת 10% לכל חומרי הגלם" style="background:rgba(245,158,11,.12);border-color:#d97706;color:#b45309">📐 פחת 10% לכולם</button>
       <div class="search-wrap" style="max-width:220px">
         <span class="si">🔍</span>
         <input type="text" id="rawmatTabSearch" placeholder="חיפוש חומר…" oninput="_rawmatFilter(this.value)">
@@ -868,7 +869,7 @@ function autoPopulateFromStepDB() {
                 density:  hints.density || famData.density || 7850,
                 unitCost: 0,
                 costUnit: 'kg',
-                wastePct: 0,
+                wastePct: 10,
                 perParent: {}
               };
             }
@@ -3559,6 +3560,17 @@ function openRawMatEditor(pb, desc, tq) {
 function closeRawMat(){
   const m=document.getElementById('rawMatModal');
   if(m) m.style.display='none';
+}
+
+function setAllWastePct(pct){
+  const keys=Object.keys(rawMatData);
+  if(!keys.length){ alert('אין חומרי גלם מוגדרים'); return; }
+  if(!confirm('קבע פחת '+pct+'% עבור כל '+keys.length+' חומרי גלם?\n\nפעולה זו תדרוס את ערכי הפחת הקיימים.')){ return; }
+  keys.forEach(function(pb){ rawMatData[pb].wastePct = pct; });
+  saveProcToFile();
+  try{ computeTreeCosts(); refreshCostCells(); updateWHCells(); }catch(e){}
+  renderRawmatTab();
+  alert('✓ פחת '+pct+'% הוגדר עבור '+keys.length+' חומרי גלם');
 }
 
 function rmOnFamilyChange(pb){
