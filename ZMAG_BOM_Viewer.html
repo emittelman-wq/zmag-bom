@@ -3786,9 +3786,9 @@ function saveRawMat(pb){
   saveProcToFile();
   closeRawMat();
   computeTreeCosts(); buildCumulativeHours(); updateWHCells();
-  // Rebuild rawmat tab next time
+  // Rebuild rawmat tab — immediately if visible, else mark for next visit
   const rtc=document.getElementById('rawmatTabContent');
-  if(rtc) rtc.dataset.built='';
+  if(rtc) { rtc.dataset.built=''; _populateRawmatTab(true); }
   // Rebuild BOM table proc buttons
   buildTable(); buildCumulativeHours(); updateWHCells(); applyFilters();
 }
@@ -6894,7 +6894,20 @@ async function saveProcToFile() {
     clearTimeout(_fileSaveTimer);
     _fileSaveTimer = setTimeout(async function() {
       try { await _graphWriteProcFile(); setFileSyncStatus('✓ נשמר ב-SharePoint', 'ok'); }
-      catch(e) { console.error('[saveProcToFile Graph]', e); setFileSyncStatus('⚠ שגיאת שמירה: ' + e.message, 'err'); }
+      catch(e) {
+        console.error('[saveProcToFile Graph]', e);
+        setFileSyncStatus('⚠ שגיאת שמירה — הנתונים נשמרו מקומית בלבד', 'err');
+        // Show prominent warning so user knows cloud save failed
+        if (!window._cloudSaveWarnShown) {
+          window._cloudSaveWarnShown = true;
+          setTimeout(function(){
+            if(confirm('⚠ שמירה לענן נכשלה!\n\nהנתונים נשמרו מקומית בדפדפן.\nייתכן שהטוקן פג — יש להתנתק ולהתחבר מחדש עם Microsoft.\n\nלחץ אישור כדי לנסות שמירה שוב, או ביטול להמשיך מקומית.')){
+              window._cloudSaveWarnShown = false;
+              saveProcToFile();
+            }
+          }, 200);
+        }
+      }
     }, 800);
     return;
   }
