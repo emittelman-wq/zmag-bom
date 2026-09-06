@@ -3569,7 +3569,7 @@ function setAllWastePct(pct){
   keys.forEach(function(pb){ rawMatData[pb].wastePct = pct; });
   saveProcToFile();
   try{ computeTreeCosts(); refreshCostCells(); updateWHCells(); }catch(e){}
-  renderRawmatTab();
+  try{ const _rtc=document.getElementById('rawmatTabContent'); if(_rtc) _rtc.dataset.built=''; _populateRawmatTab(true); }catch(e){}
   alert('✓ פחת '+pct+'% הוגדר עבור '+keys.length+' חומרי גלם');
 }
 
@@ -3782,6 +3782,7 @@ function saveRawMat(pb){
   const _prevExactVol = (rawMatData[pb]||{}).exact_volume_mm3;
   rawMatData[pb]={family,grade,form,dims,density,unitCost,costUnit,wastePct,perParent,_uom:uom};
   if (_prevExactVol) rawMatData[pb].exact_volume_mm3 = _prevExactVol;
+  _saveRawMatLocal();
   saveProcToFile();
   closeRawMat();
   computeTreeCosts(); buildCumulativeHours(); updateWHCells();
@@ -6493,8 +6494,9 @@ const SETUP_UNITS = [
   {id:'min', label:'דקות (min)'},
 ];
 
-const PROC_STORAGE_KEY = 'zmag_proc_6910W021';
+const PROC_STORAGE_KEY  = 'zmag_proc_6910W021';
 const TYPES_STORAGE_KEY = 'zmag_proc_types_6910W021';
+const RAWMAT_STORAGE_KEY = 'zmag_rawmat_6910W021';  // backup for rawMatData
 // THEME_KEY, FILTER_STATE_KEY, FLAG_KEY declared in first script block
 const PROC_JSON_FILENAME = 'ZMAG_Manufacturing_Processes.json';
 
@@ -6537,6 +6539,15 @@ function loadProcData() {
       if (Array.isArray(saved) && saved.length) PROC_TYPES = saved;
     }
   } catch(e) {}
+  // Restore rawMatData from localStorage backup (safety net if cloud sync fails)
+  try {
+    const rawM = localStorage.getItem(RAWMAT_STORAGE_KEY);
+    if (rawM) { const saved = JSON.parse(rawM); if (typeof saved === 'object' && saved) rawMatData = saved; }
+  } catch(e) {}
+}
+
+function _saveRawMatLocal() {
+  try { localStorage.setItem(RAWMAT_STORAGE_KEY, JSON.stringify(rawMatData)); } catch(e) {}
 }
 
 function saveProcData() {
@@ -6780,7 +6791,7 @@ function _restoreFromBackup(obj) {
     procMeta = obj.procMeta;
   }
   if (obj.rawMaterials && typeof obj.rawMaterials === 'object') {
-    rawMatData = obj.rawMaterials;
+    rawMatData = Object.assign({}, rawMatData, obj.rawMaterials); _saveRawMatLocal();
   }
   if (obj.matFamPrices && typeof obj.matFamPrices === 'object') {
     matFamPrices = obj.matFamPrices;
@@ -6839,7 +6850,7 @@ function _mergeLoadedProc(obj) {
   });
   // Restore all additional data stores
   if (obj.rawMaterials && typeof obj.rawMaterials === 'object') {
-    rawMatData = obj.rawMaterials;
+    rawMatData = Object.assign({}, rawMatData, obj.rawMaterials); _saveRawMatLocal();
   }
   if (obj.matFamPrices && typeof obj.matFamPrices === 'object') {
     matFamPrices = obj.matFamPrices;
@@ -7009,7 +7020,7 @@ async function loadProcFromGraph() {
       });
     }
     if (obj.rawMaterials && typeof obj.rawMaterials === 'object') {
-      rawMatData = obj.rawMaterials;
+      rawMatData = Object.assign({}, rawMatData, obj.rawMaterials); _saveRawMatLocal();
     }
     if (obj.matFamPrices && typeof obj.matFamPrices === 'object') {
       // Merge: cloud wins for keys it has; preserve local-only keys (entered since last cloud save)
