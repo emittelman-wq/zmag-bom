@@ -417,6 +417,8 @@ tr.row-disabled .badge,tr.row-disabled .proc-btn{opacity:.5}
 .auth-btn.signed-out{background:var(--border);color:var(--text2)}
 .auth-status{font-size:11px;color:var(--accent2);opacity:.8;white-space:nowrap}
 </style>
+<!-- PDF.js for parsing ELTDESIGN drawings -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 </head>
 <body>
 
@@ -1260,6 +1262,9 @@ function saveRawTypeOverrides() {
 }
 let eltBuyOverrides = {}; // pb → true (ELTDesign item treated as Buy/COTS) — persisted in procData JSON
 function saveEltBuyOverrides() { saveProcToFile(); }
+// vendorItemsData: ELTDESIGN drawings that contain a sub-BOM (VENDOR ITEM CONTROL DRAWING)
+// Structure: { [eltDesignPb]: [{pcNo, pn, desc, qty, material}] }
+let vendorItemsData = {};
 let anomalies = [];
 let dismissedAnomalies = {};
 const ANOMALY_DISMISS_KEY = 'zmag_anom_dismissed';
@@ -1836,6 +1841,16 @@ function buildTable(){
         scBadge.style.cssText = 'font-size:10px;margin-left:2px;cursor:default';
         tdP.appendChild(scBadge);
       }
+      // Vendor items button (📋) for ELTDESIGN drawings with purchase sub-items
+      const _eltPb = item.pb || item.pn;
+      const _hasVendor = Array.isArray(vendorItemsData[_eltPb]) && vendorItemsData[_eltPb].length > 0;
+      const vBtn = document.createElement('button');
+      vBtn.className = 'proc-btn' + (_hasVendor ? ' proc-has' : '');
+      vBtn.title = _hasVendor ? vendorItemsData[_eltPb].length + ' פריטי ספק — לחץ לעריכה' : 'הוסף פריטי ספק (VENDOR ITEM CONTROL DWG)';
+      vBtn.textContent = _hasVendor ? '📋 ' + vendorItemsData[_eltPb].length : '📋';
+      vBtn.style.cssText = 'font-size:10px;margin-left:2px';
+      vBtn.addEventListener('click', ev => { ev.stopPropagation(); openVendorItemsModal(_eltPb, item.desc); });
+      tdP.appendChild(vBtn);
       // ELT→Buy override button is placed in the type badge cell (tdT) below for visibility
     } else if (item.type === 'Buy' || (item.type === 'ELTDesign' && eltBuyOverrides[item.pb || item.pn])) {
       const pb = item.pb || item.pn;
@@ -3583,6 +3598,383 @@ function closeRawMat(){
   if(m) m.style.display='none';
 }
 
+// ═══════════════════════════════════════════════════════════════════
+// VENDOR ITEMS — ELTDESIGN "VENDOR ITEM CONTROL DRAWING" sub-BOM
+// ═══════════════════════════════════════════════════════════════════
+
+// Parse text extracted from PDF pages into BOM rows
+function _parseEltBomText(fullText) {
+  const lines = fullText.split(/\n/).map(s => s.trim()).filter(Boolean);
+  // Find header row containing PC NO. and P.N. and DESCRIPTION
+  let headerIdx = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (/PC\s*NO\.?/i.test(lines[i]) && /P\.N\.?/i.test(lines[i]) && /DESCRIPTION/i.test(lines[i])) {
+      headerIdx = i; break;
+    }
+    // Sometimes columns are split across adjacent lines — look for PC NO. alone
+    if (/^PC\s*NO\.?\s*$/i.test(lines[i]) && i + 2 < lines.length && /^P\.N\.?$/i.test(lines[i+1])) {
+      headerIdx = i; break;
+    }
+  }
+  // Alternative: scan all text for the table pattern (PC NO. as standalone number followed by PN/desc)
+  const items = [];
+  // Regex: line starting with an integer (1–99) optionally followed by PN, then description
+  // We scan the whole text for patterns like "1\n6910M734-001-1\nLEFT ENGINE..." or "1 6910M734-001-1 LEFT ENGINE..."
+  // Strategy: find all occurrences of a standalone integer, then collect next tokens
+  const allText = fullText.replace(/\r/g, '');
+  // Match lines like: "1\n<pn_or_blank>\n<desc>\n<qty>\n<material>"
+  // or: "1 6910... LEFT ... 1 PLATE..."
+  const rowRe = /(?:^|\n)(\d{1,2})\n([^\n]*)\n([^\n]{5,})\n(\d+(?:\.\d+)?)\n?([^\n]*)/gm;
+  let m;
+  while ((m = rowRe.exec(allText)) !== null) {
+    const pcNo = m[1];
+    const pnRaw = m[2].trim();
+    const desc = m[3].trim();
+    const qty = parseFloat(m[4]) || 1;
+    const material = (m[5] || '').trim();
+    if (!desc || desc.length < 3) continue;
+    // PN: if it looks like a real PN (has letters+digits), use it; else leave blank (will be auto-built)
+    const pn = /[A-Z0-9]{3,}/i.test(pnRaw) && !/^(TAKE|SEE|REF|NOTE)/i.test(pnRaw) ? pnRaw : '';
+    items.push({pcNo, pn, desc, qty, material});
+  }
+  return items;
+}
+
+// Fetch file as ArrayBuffer (Graph API or File System Access API)
+async function _fetchFileBuffer(filePath) {
+  if (_graphMode && _msalAcct) {
+    const token = await _graphToken();
+    const siteBase = 'https://graph.microsoft.com/v1.0/sites/' + _graphSiteId;
+    const encPath = encodeURIComponent(_graphDriveFolder + '/' + filePath.split(/[/\\]/).pop());
+    const url = siteBase + '/drives/' + _graphDriveId + '/root:/' + encPath + ':/content';
+    const r = await fetch(url, { headers: { Authorization: 'Bearer ' + token } });
+    if (!r.ok) throw new Error('Fetch error ' + r.status);
+    return await r.arrayBuffer();
+  }
+  if (rootDirHandle) {
+    const parts = filePath.replace(/\\/g, '/').split('/');
+    let handle = rootDirHandle;
+    for (let i = 0; i < parts.length; i++) {
+      if (!parts[i]) continue;
+      handle = await handle.getDirectoryHandle ? handle.getDirectoryHandle(parts[i]).catch(() => handle.getFileHandle(parts[i])) : handle;
+    }
+    const file = await handle.getFile();
+    return await file.arrayBuffer();
+  }
+  throw new Error('No file access');
+}
+
+// Extract all text from a PDF using pdf.js
+async function _extractPdfText(buffer) {
+  if (!window.pdfjsLib) throw new Error('pdf.js not loaded');
+  window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+  const doc = await window.pdfjsLib.getDocument({data: buffer}).promise;
+  let fullText = '';
+  for (let p = 1; p <= doc.numPages; p++) {
+    const page = await doc.getPage(p);
+    const tc = await page.getTextContent();
+    fullText += tc.items.map(function(it){ return it.str; }).join('\n') + '\n';
+  }
+  return fullText;
+}
+
+// Main function to parse an ELTDESIGN drawing PDF
+async function parseEltDrawingPDF(filePath) {
+  try {
+    const buf = await _fetchFileBuffer(filePath);
+    const text = await _extractPdfText(buf);
+    const items = _parseEltBomText(text);
+    return { items, text };
+  } catch(e) {
+    console.error('[parseEltDrawingPDF]', e);
+    return { items: [], text: '', error: e.message };
+  }
+}
+
+// Save vendor items for a parent ELTDesign part
+function saveVendorItems(parentPb, items) {
+  if (!items || !items.length) {
+    delete vendorItemsData[parentPb];
+  } else {
+    // Auto-build PN for items that don't have one
+    vendorItemsData[parentPb] = items.map(function(it) {
+      return {
+        pcNo: String(it.pcNo),
+        pn: it.pn || (parentPb + '-' + it.pcNo),
+        desc: it.desc || '',
+        qty: parseFloat(it.qty) || 1,
+        material: it.material || ''
+      };
+    });
+  }
+  buyBuilt = false;
+  saveProcToFile();
+  const btc = document.getElementById('buyTabContent');
+  if (btc) { btc.dataset.built = ''; _populateBuyTab(true); }
+  computeTreeCosts(); buildTable();
+}
+
+// Open modal to view/edit/import vendor items for an ELTDESIGN part
+function openVendorItemsModal(parentPb, parentDesc) {
+  let m = document.getElementById('vendorItemsModal');
+  if (!m) {
+    m = document.createElement('div');
+    m.id = 'vendorItemsModal';
+    m.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:3600;display:none;align-items:center;justify-content:center';
+    document.body.appendChild(m);
+  }
+  window._viParentPb = parentPb;
+  const existing = vendorItemsData[parentPb] || [];
+
+  function renderModal(rows) {
+    const tableRows = rows.map(function(it, idx){
+      return '<tr data-idx="'+idx+'" style="border-bottom:1px solid var(--border,#333)">'+_viRowHtml(it, idx, parentPb)+'</tr>';
+    }).join('');
+    m.innerHTML = '<div style="background:var(--surface,#1e1e2e);border:1px solid var(--border,#333);border-radius:10px;padding:20px;max-width:1050px;width:97vw;max-height:88vh;overflow:auto;color:var(--text,#eee)">' +
+      '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">' +
+        '<div><div style="font-size:15px;font-weight:700;color:var(--accent2,#d97706)">📋 פריטי ספק — VENDOR ITEM CONTROL DWG</div>' +
+        '<div style="font-size:11px;color:var(--text3,#888);margin-top:2px">'+escHtml(parentPb)+' · '+escHtml(parentDesc||'')+'</div></div>' +
+        '<button onclick="document.getElementById(\'vendorItemsModal\').style.display=\'none\'" style="background:none;border:none;cursor:pointer;color:var(--text3);font-size:20px;padding:2px 6px">✕</button>' +
+      '</div>' +
+      '<div style="margin-bottom:10px;display:flex;gap:8px;flex-wrap:wrap">' +
+        '<button onclick="_viImportPDF()" style="'+_viBtnStyle+'background:rgba(66,153,225,.12);border-color:#4299e1;color:#4299e1">📥 ייבא מ-PDF שרטוט</button>' +
+        '<button onclick="_viAddRow()" style="'+_viBtnStyle+'background:rgba(56,161,105,.12);border-color:#38a169;color:#38a169">➕ הוסף שורה</button>' +
+        '<button onclick="_viSave()" style="'+_viBtnStyle+'background:rgba(245,158,11,.12);border-color:#d97706;color:#b45309;font-weight:700">💾 שמור</button>' +
+      '</div>' +
+      '<div id="viImportStatus" style="margin-bottom:8px;font-size:11px;color:var(--accent,#4299e1)"></div>' +
+      '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:11px">' +
+        '<thead><tr style="background:var(--header-bg,#111);color:var(--text3,#888)">' +
+          '<th style="padding:5px 4px;width:36px">PC NO.</th>'+
+          '<th style="padding:5px 4px;text-align:left">P.N.</th>' +
+          '<th style="padding:5px 4px;text-align:left">DESCRIPTION</th>'+
+          '<th style="padding:5px 4px;width:44px">QTY</th>' +
+          '<th style="padding:5px 4px;text-align:left">MATERIAL</th>'+
+          '<th style="padding:5px 4px;width:75px;text-align:right">מחיר</th>'+
+          '<th style="padding:5px 4px;width:55px">מטבע</th>'+
+          '<th style="padding:5px 4px;text-align:left">קישור</th>'+
+          '<th style="padding:5px 4px;width:70px;text-align:center">תמונה</th>'+
+          '<th style="width:26px"></th>' +
+        '</tr></thead>' +
+        '<tbody id="viTableBody">'+tableRows+'</tbody>' +
+      '</table></div>' +
+      '</div>';
+    m.style.display = 'flex';
+  }
+
+  renderModal(existing.length ? existing : []);
+  m.style.display = 'flex';
+}
+
+const _viInputStyle = 'padding:3px 5px;background:var(--surface2,#2a2a3e);border:1px solid var(--border,#333);color:var(--text,#eee);border-radius:3px;font-size:11px';
+const _viBtnStyle = 'padding:4px 12px;border-radius:5px;cursor:pointer;font-size:12px;border:1px solid;';
+
+// Build inner HTML for a vendor item table row (used in renderModal, _viAddRow, _viImportPDF)
+function _viRowHtml(it, idx, parentPb) {
+  const pcNo = it.pcNo || (idx+1);
+  const vpn = it.pn || (parentPb + '-' + pcNo);
+  const pe = getPriceEntry(vpn) || {};
+  const price = (it.price != null && it.price !== '') ? it.price : (pe.p || '');
+  const cur = it.currency || pe.currency || 'ILS';
+  const link = it.link || (buyNotes[vpn] && buyNotes[vpn].link) || '';
+  const image = it.image || (buyNotes[vpn] && buyNotes[vpn].image) || '';
+  const curOpts = ['ILS','USD','EUR'].map(function(c){ return '<option'+(c===cur?' selected':'')+'>'+c+'</option>'; }).join('');
+  const uid = 'viimg_' + idx + '_' + Date.now();
+  const thumbHtml = image
+    ? '<img src="'+escHtml(image)+'" style="width:54px;height:40px;object-fit:cover;border-radius:3px;cursor:pointer;display:block;margin:0 auto" onclick="_viZoomImg(this.src)" title="לחץ להגדלה">'
+    : '<span style="font-size:18px;opacity:.35;display:block;text-align:center">🖼</span>';
+  return '<td style="padding:3px 4px;text-align:center"><input type="text" value="'+escHtml(String(pcNo))+'" data-f="pcNo" style="width:32px;'+_viInputStyle+'"></td>'+
+    '<td style="padding:3px 4px"><input type="text" value="'+escHtml(it.pn||'')+'" data-f="pn" placeholder="'+escHtml(vpn)+'" style="width:130px;'+_viInputStyle+'"></td>'+
+    '<td style="padding:3px 4px"><input type="text" value="'+escHtml(it.desc||'')+'" data-f="desc" style="width:180px;'+_viInputStyle+'"></td>'+
+    '<td style="padding:3px 4px;text-align:center"><input type="number" value="'+(it.qty||1)+'" data-f="qty" min="1" style="width:40px;'+_viInputStyle+'"></td>'+
+    '<td style="padding:3px 4px"><input type="text" value="'+escHtml(it.material||'')+'" data-f="material" style="width:120px;'+_viInputStyle+'"></td>'+
+    '<td style="padding:3px 4px;text-align:right"><input type="number" value="'+escHtml(String(price))+'" data-f="price" min="0" step="0.01" placeholder="מחיר" style="width:70px;'+_viInputStyle+'"></td>'+
+    '<td style="padding:3px 4px"><select data-f="currency" style="'+_viInputStyle+'">'+curOpts+'</select></td>'+
+    '<td style="padding:3px 4px"><input type="url" value="'+escHtml(link)+'" data-f="link" placeholder="https://..." style="width:130px;'+_viInputStyle+'"></td>'+
+    '<td style="padding:3px 4px;text-align:center">'+
+      '<div data-f="image" data-src="'+escHtml(image)+'" style="position:relative;width:58px;margin:0 auto">'+
+        thumbHtml+
+        '<input type="file" id="'+uid+'" accept="image/*" style="display:none" onchange="_viUploadImage(this)">'+
+        '<button onclick="document.getElementById(\''+uid+'\').click()" title="העלה תמונה" style="margin-top:2px;font-size:9px;padding:1px 4px;background:var(--surface2,#2a2a3e);border:1px solid var(--border,#333);border-radius:3px;cursor:pointer;color:var(--text2,#aaa);display:block;width:100%">📷 העלה</button>'+
+        (image ? '<button onclick="_viClearImg(this)" title="מחק תמונה" style="font-size:9px;padding:1px 4px;background:rgba(229,62,62,.15);border:1px solid #e53e3e;border-radius:3px;cursor:pointer;color:#e53e3e;display:block;width:100%;margin-top:1px">✕ מחק</button>' : '')+
+      '</div>'+
+    '</td>'+
+    '<td style="padding:3px 4px;text-align:center"><button onclick="this.closest(\'tr\').remove()" style="background:rgba(229,62,62,.15);border:1px solid #e53e3e;border-radius:3px;cursor:pointer;color:#e53e3e;font-size:11px;padding:1px 5px">✕</button></td>';
+}
+
+// Upload image → resize to thumbnail (max 200px wide) → store as base64 in row
+function _viUploadImage(input) {
+  const file = input.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = function(e) {
+    const img = new Image();
+    img.onload = function() {
+      const maxW = 200, maxH = 150;
+      let w = img.width, h = img.height;
+      const scale = Math.min(maxW/w, maxH/h, 1);
+      w = Math.round(w*scale); h = Math.round(h*scale);
+      const canvas = document.createElement('canvas');
+      canvas.width = w; canvas.height = h;
+      canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+      const dataUrl = canvas.toDataURL('image/jpeg', 0.82);
+      // Update the data-src and thumbnail in the cell
+      const td = input.closest('td[data-f="image"]') || input.closest('[data-f="image"]');
+      if (!td) return;
+      td.dataset.src = dataUrl;
+      const existing = td.querySelector('img');
+      if (existing) { existing.src = dataUrl; }
+      else {
+        const imgEl = document.createElement('img');
+        imgEl.src = dataUrl;
+        imgEl.style.cssText = 'width:54px;height:40px;object-fit:cover;border-radius:3px;cursor:pointer;display:block;margin:0 auto';
+        imgEl.title = 'לחץ להגדלה';
+        imgEl.onclick = function(){ _viZoomImg(this.src); };
+        const placeholder = td.querySelector('span');
+        if (placeholder) placeholder.replaceWith(imgEl);
+        else td.querySelector('div').prepend(imgEl);
+      }
+      // Add clear button if missing
+      if (!td.querySelector('[onclick*="_viClearImg"]')) {
+        const clrBtn = document.createElement('button');
+        clrBtn.textContent = '✕ מחק';
+        clrBtn.title = 'מחק תמונה';
+        clrBtn.style.cssText = 'font-size:9px;padding:1px 4px;background:rgba(229,62,62,.15);border:1px solid #e53e3e;border-radius:3px;cursor:pointer;color:#e53e3e;display:block;width:100%;margin-top:1px';
+        clrBtn.onclick = function(){ _viClearImg(this); };
+        td.querySelector('div').appendChild(clrBtn);
+      }
+    };
+    img.src = e.target.result;
+  };
+  reader.readAsDataURL(file);
+}
+
+function _viClearImg(btn) {
+  const td = btn.closest('[data-f="image"]');
+  if (!td) return;
+  td.dataset.src = '';
+  const img = td.querySelector('img');
+  if (img) {
+    const span = document.createElement('span');
+    span.style.cssText = 'font-size:18px;opacity:.35;display:block;text-align:center';
+    span.textContent = '🖼';
+    img.replaceWith(span);
+  }
+  btn.remove();
+}
+
+function _viZoomImg(src) {
+  let ov = document.getElementById('viImgZoom');
+  if (!ov) {
+    ov = document.createElement('div');
+    ov.id = 'viImgZoom';
+    ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:9999;display:flex;align-items:center;justify-content:center;cursor:zoom-out';
+    ov.onclick = function(){ this.style.display='none'; };
+    document.body.appendChild(ov);
+  }
+  ov.innerHTML = '<img src="'+escHtml(src)+'" style="max-width:90vw;max-height:90vh;border-radius:8px;box-shadow:0 0 40px rgba(0,0,0,.8)">';
+  ov.style.display = 'flex';
+}
+
+function _viAddRow() {
+  const tb = document.getElementById('viTableBody');
+  if (!tb) return;
+  const idx = tb.rows.length;
+  const parentPb = window._viParentPb || '';
+  const tr = document.createElement('tr');
+  tr.dataset.idx = idx;
+  tr.style.borderBottom = '1px solid var(--border,#333)';
+  tr.innerHTML = _viRowHtml({pcNo: idx+1, pn:'', desc:'', qty:1, material:'', price:'', currency:'ILS', link:''}, idx, parentPb);
+  tb.appendChild(tr);
+}
+
+function _viCollectRows() {
+  const rows = [];
+  document.querySelectorAll('#viTableBody tr').forEach(function(tr) {
+    const get = function(f) { const inp = tr.querySelector('[data-f="'+f+'"]'); return inp ? inp.value.trim() : ''; };
+    const sel = function(f) { const s = tr.querySelector('select[data-f="'+f+'"]'); return s ? s.value : 'ILS'; };
+    const imgCell = tr.querySelector('[data-f="image"]');
+    const price = parseFloat(get('price'));
+    rows.push({
+      pcNo: get('pcNo'), pn: get('pn'), desc: get('desc'),
+      qty: parseFloat(get('qty'))||1, material: get('material'),
+      price: isNaN(price) ? null : price,
+      currency: sel('currency'),
+      link: get('link'),
+      image: imgCell ? (imgCell.dataset.src || '') : ''
+    });
+  });
+  return rows.filter(function(r){ return r.desc || r.pn; });
+}
+
+function _viSave() {
+  const rows = _viCollectRows();
+  const parentPb = window._viParentPb;
+  // Persist price + link into buyPrices / buyNotes for each sub-item
+  rows.forEach(function(it) {
+    const vpb = it.pn || (parentPb + '-' + it.pcNo);
+    if (it.price != null && it.price >= 0) {
+      buyPrices[vpb] = { p: it.price, src: '', currency: it.currency || 'ILS' };
+      if (!buyNotes[vpb]) buyNotes[vpb] = {};
+      buyNotes[vpb].price = it.price;
+      buyNotes[vpb].currency = it.currency || 'ILS';
+    }
+    if (it.link) {
+      if (!buyNotes[vpb]) buyNotes[vpb] = {};
+      buyNotes[vpb].link = it.link;
+    }
+    if (it.image) {
+      if (!buyNotes[vpb]) buyNotes[vpb] = {};
+      buyNotes[vpb].image = it.image;
+    } else if (buyNotes[vpb]) {
+      delete buyNotes[vpb].image; // clear if removed
+    }
+  });
+  saveVendorItems(parentPb, rows);
+  document.getElementById('vendorItemsModal').style.display = 'none';
+  alert('✓ נשמרו ' + rows.length + ' פריטי ספק עבור ' + parentPb);
+}
+
+async function _viImportPDF() {
+  const st = document.getElementById('viImportStatus');
+  if (st) st.textContent = '⏳ מחפש קובץ PDF לשרטוט...';
+  // Find PDF path for the parent item in BOM
+  const parentPb = window._viParentPb;
+  let pdfPath = null;
+  for (let i = 0; i < BOM.length; i++) {
+    const item = BOM[i];
+    if ((item.pb || item.pn) !== parentPb) continue;
+    const allPdfs = Array.isArray(item.pdfs) && item.pdfs.length ? item.pdfs : (item.pdf ? [item.pdf] : []);
+    if (allPdfs.length) { pdfPath = allPdfs[0]; break; }
+  }
+  if (!pdfPath) {
+    if (st) st.textContent = '⚠ לא נמצא קובץ PDF עבור פריט זה — הזן פריטים ידנית';
+    return;
+  }
+  if (st) st.textContent = '⏳ קורא PDF: ' + pdfPath.split(/[/\\]/).pop() + '...';
+  const result = await parseEltDrawingPDF(pdfPath);
+  if (result.error) {
+    if (st) st.textContent = '⚠ שגיאה בקריאת PDF: ' + result.error;
+    return;
+  }
+  if (!result.items.length) {
+    if (st) st.textContent = '⚠ לא נמצאה טבלת BOM בשרטוט — הזן פריטים ידנית';
+    return;
+  }
+  // Populate table with parsed items
+  const tb = document.getElementById('viTableBody');
+  if (!tb) return;
+  tb.innerHTML = '';
+  result.items.forEach(function(it, idx) {
+    const tr = document.createElement('tr');
+    tr.dataset.idx = idx;
+    tr.style.borderBottom = '1px solid var(--border,#333)';
+    tr.innerHTML = _viRowHtml(it, idx, window._viParentPb || '');
+    tb.appendChild(tr);
+  });
+  if (st) st.textContent = '✓ זוהו ' + result.items.length + ' פריטים מהשרטוט — אשר ושמור';
+}
+
+// ═══════════════════════════════════════════════════════════════════
 function setAllWastePct(pct){
   const keys=Object.keys(rawMatData);
   if(!keys.length){ alert('אין חומרי גלם מוגדרים'); return; }
@@ -4955,10 +5347,16 @@ function _populateBuyTab(force){
             : '<button onclick="reclassifyToRawmat(\'' + r.pb.replace(/\\/g, '\\\\').replace(/'/g, "\\'") + '\',\'' + ((r.desc || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'")).substring(0, 80) + '\')" title="העבר לחומרי גלם (ח\'\' ג)" style="background:none;border:1px solid var(--border);border-radius:3px;cursor:pointer;font-size:11px;padding:1px 5px;color:var(--text2)">→ ח&quot;ג</button>')+
       '</td>'+
       (function(){
-        const srcText = (pentry&&pentry.src) ? escHtml(pentry.src) : '';
+        const srcText = r._vendorParent
+          ? ('ספק עבור '+r._vendorParent+(r._material?' | '+r._material.substring(0,40):''))
+          : ((pentry&&pentry.src) ? escHtml(pentry.src) : '');
         const linkUrl = (buyNotes[r.pb]&&buyNotes[r.pb].link) ? buyNotes[r.pb].link : '';
+        const imgSrc = (buyNotes[r.pb]&&buyNotes[r.pb].image) ? buyNotes[r.pb].image : '';
+        const imgHtml = imgSrc
+          ? '<img src="'+escHtml(imgSrc)+'" style="width:32px;height:24px;object-fit:cover;border-radius:3px;cursor:pointer;vertical-align:middle;margin-right:4px" onclick="_viZoomImg(this.src)" title="לחץ להגדלה">'
+          : '';
         return '<td style="padding:4px 8px;font-size:10px;color:var(--text3);max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+srcText+'">'+srcText+'</td>'+
-          '<td style="padding:4px 4px;text-align:center">'+(linkUrl?'<a href="'+escHtml(linkUrl)+'" target="_blank" style="font-size:14px;text-decoration:none" title="'+escHtml(linkUrl)+'">🔗</a>':'')+'</td>';
+          '<td style="padding:4px 4px;text-align:center">'+imgHtml+(linkUrl?'<a href="'+escHtml(linkUrl)+'" target="_blank" style="font-size:14px;text-decoration:none" title="'+escHtml(linkUrl)+'">🔗</a>':'')+'</td>';
       })()+
       '</tr>';
   });
@@ -5790,6 +6188,35 @@ function buildBuyData() {
     map.get(key).totalQty += (item.tq || 0);
   });
   buyData = Array.from(map.values());
+  // Add vendor sub-items from ELTDESIGN drawings
+  Object.keys(vendorItemsData).forEach(function(eltPb) {
+    const items = vendorItemsData[eltPb];
+    if (!Array.isArray(items)) return;
+    // Find total quantity of the parent ELTDesign in BOM
+    let parentTq = 0;
+    BOM.forEach(function(item, idx) {
+      if ((item.pb || item.pn) === eltPb && !isRowHiddenForTabs(idx)) parentTq += (item.tq || 0);
+    });
+    if (parentTq <= 0) parentTq = 1;
+    items.forEach(function(vi) {
+      const vpb = vi.pn || (eltPb + '-' + vi.pcNo);
+      const existing = map.get(vpb);
+      if (existing) {
+        existing.totalQty += vi.qty * parentTq;
+      } else {
+        buyData.push({
+          pb: vpb, pn: vpb,
+          desc: vi.desc || '',
+          cat: '', mf: '',
+          uom: 'EA',
+          totalQty: vi.qty * parentTq,
+          _vendorParent: eltPb,
+          _material: vi.material || '',
+          _pcNo: vi.pcNo
+        });
+      }
+    });
+  });
   buyBuilt = true;
 }
 
@@ -6705,7 +7132,8 @@ async function _spWriteFile() {
     paintCostOverrides: paintCostOverrides,
     paintRatePerM2: PAINT_RATE_PER_M2,
     paintLitersPerM2: PAINT_LITERS_PER_M2,
-    surfaceAreas: SURFACE_AREAS
+    surfaceAreas: SURFACE_AREAS,
+    vendorItems: vendorItemsData
   }, null, 2);
   const r = await fetch(_spUploadUrl(), {
     method: 'POST',
@@ -6853,6 +7281,7 @@ function _restoreFromBackup(obj) {
   if (obj.paintRatePerM2 > 0) { PAINT_RATE_PER_M2 = obj.paintRatePerM2; savePaintSettings(); }
   if (obj.paintLitersPerM2 > 0) { PAINT_LITERS_PER_M2 = obj.paintLitersPerM2; savePaintSettings(); }
   if (obj.surfaceAreas && typeof obj.surfaceAreas==='object') { SURFACE_AREAS = obj.surfaceAreas; savePaintSettings(); }
+  if (obj.vendorItems && typeof obj.vendorItems === 'object') { Object.assign(vendorItemsData, obj.vendorItems); }
   if (obj.subcontractors) subData = obj.subcontractors;
   if (Array.isArray(obj.flaggedRows)) {
     flaggedRows = new Set(obj.flaggedRows.map(Number));
@@ -6912,6 +7341,7 @@ function _mergeLoadedProc(obj) {
   if (obj.paintRatePerM2 > 0) { PAINT_RATE_PER_M2 = obj.paintRatePerM2; savePaintSettings(); }
   if (obj.paintLitersPerM2 > 0) { PAINT_LITERS_PER_M2 = obj.paintLitersPerM2; savePaintSettings(); }
   if (obj.surfaceAreas && typeof obj.surfaceAreas==='object') { SURFACE_AREAS = obj.surfaceAreas; savePaintSettings(); }
+  if (obj.vendorItems && typeof obj.vendorItems === 'object') { Object.assign(vendorItemsData, obj.vendorItems); }
   if (obj.subcontractors) subData = obj.subcontractors;
   if (Array.isArray(obj.flaggedRows)) {
     const serverFlags = new Set(obj.flaggedRows.map(Number));
@@ -6983,7 +7413,8 @@ async function _graphWriteProcFile() {
     paintCostOverrides: paintCostOverrides,
     paintRatePerM2: PAINT_RATE_PER_M2,
     paintLitersPerM2: PAINT_LITERS_PER_M2,
-    surfaceAreas: SURFACE_AREAS
+    surfaceAreas: SURFACE_AREAS,
+    vendorItems: vendorItemsData
   }, null, 2);
   const r = await fetch(url, {
     method: 'PUT',
@@ -7054,7 +7485,8 @@ async function loadProcFromGraph() {
       const savedBy = obj.savedBy ? ' (נשמר ע"י ' + obj.savedBy + ')' : '';
       setFileSyncStatus('✅ נטען מ-SharePoint' + savedBy, 'ok');
     }
-    if (obj.subcontractors) subData = obj.subcontractors;
+    if (obj.vendorItems && typeof obj.vendorItems === 'object') { Object.assign(vendorItemsData, obj.vendorItems); }
+  if (obj.subcontractors) subData = obj.subcontractors;
     if (obj.buyNotes) {
       buyNotes = obj.buyNotes;
       // Sync prices stored in buyNotes into buyPrices for getPriceEntry() to pick up
@@ -7140,7 +7572,8 @@ async function _writeProcFile() {
     paintCostOverrides: paintCostOverrides,
     paintRatePerM2: PAINT_RATE_PER_M2,
     paintLitersPerM2: PAINT_LITERS_PER_M2,
-    surfaceAreas: SURFACE_AREAS
+    surfaceAreas: SURFACE_AREAS,
+    vendorItems: vendorItemsData
   }, null, 2);
   const w = await _procFileHandle.createWritable();
   await w.write(payload); await w.close();
