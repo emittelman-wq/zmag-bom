@@ -3699,26 +3699,94 @@ async function _decompressZlib(data) {
   return new Uint8Array(0);
 }
 
+// Decode a PDF literal string — handles 2-byte CID/Identity-H and plain ASCII
+function _pdfDecodeLiteral(raw) {
+  // Unescape PDF escapes first
+  const s = raw.replace(/\\n/g,'\n').replace(/\\r/g,'\r').replace(/\\t/g,'\t')
+               .replace(/\\\(/g,'(').replace(/\\\)/g,')').replace(/\\\\/g,'\\')
+               .replace(/\\(\d{3})/g, function(_, o){ return String.fromCharCode(parseInt(o,8)); });
+  // Detect 2-byte CID: pairs where high byte is 0x00 or very small
+  const bytes = [];
+  for (let i = 0; i < s.length; i++) bytes.push(s.charCodeAt(i) & 0xFF);
+  if (bytes.length >= 2 && bytes.length % 2 === 0) {
+    let cidLike = true;
+    for (let i = 0; i < bytes.length; i += 2) {
+      if (bytes[i] > 0x02) { cidLike = false; break; }
+    }
+    if (cidLike) {
+      let out = '';
+      for (let i = 0; i < bytes.length; i += 2) {
+        const code = (bytes[i] << 8) | bytes[i+1];
+        if (code >= 32) out += String.fromCharCode(code);
+      }
+      return out;
+    }
+  }
+  // Plain: filter non-printable bytes
+  let out = '';
+  for (let i = 0; i < bytes.length; i++) {
+    if (bytes[i] >= 32 && bytes[i] <= 126) out += String.fromCharCode(bytes[i]);
+  }
+  return out;
+}
+
+// Decode a PDF hex string <004100420043> — 2-byte or 1-byte Unicode
+function _pdfDecodeHex(hex) {
+  const h = hex.replace(/\s/g,'');
+  if (h.length % 4 === 0) {
+    let out = '';
+    for (let i = 0; i < h.length; i += 4) {
+      const code = parseInt(h.substring(i, i+4), 16);
+      if (code >= 32) out += String.fromCharCode(code);
+    }
+    if (out.trim()) return out;
+  }
+  // 1-byte fallback
+  let out = '';
+  for (let i = 0; i < h.length; i += 2) {
+    const code = parseInt(h.substring(i, i+2), 16);
+    if (code >= 32 && code <= 126) out += String.fromCharCode(code);
+  }
+  return out;
+}
+
 // Extract BT/ET text tokens from a decoded content string
 function _pdfExtractBtEt(content, texts) {
-  const btRe = /BT([\s\S]{1,4000}?)ET/g;
+  const btRe = /BT([\s\S]{1,6000}?)ET/g;
   let m;
   while ((m = btRe.exec(content)) !== null) {
     const block = m[1];
-    const tjRe = /\(([^)\\]*(?:\\.[^)\\]*)*)\)\s*(?:Tj|TJ)/g;
+    // Literal strings: (text) Tj
+    const tjRe = /\(([^)\\]*(?:\\.[^)\\]*)*)\)\s*Tj\b/g;
     let tj;
     while ((tj = tjRe.exec(block)) !== null) {
-      const t = tj[1].replace(/\\n/g,' ').replace(/\\\(/g,'(').replace(/\\\)/g,')').replace(/\\\\/g,'\\').trim();
-      if (t) texts.push(t);
+      const t = _pdfDecodeLiteral(tj[1]).trim();
+      if (t && t.length > 0) texts.push(t);
     }
-    const arRe = /\[([\s\S]{1,1000}?)\]\s*TJ/g;
+    // Hex strings: <hexdata> Tj
+    const hexTjRe = /<([0-9A-Fa-f\s]+)>\s*Tj\b/g;
+    let ht;
+    while ((ht = hexTjRe.exec(block)) !== null) {
+      const t = _pdfDecodeHex(ht[1]).trim();
+      if (t && t.length > 0) texts.push(t);
+    }
+    // Array TJ: [(...)...] TJ or [<...>...] TJ
+    const arRe = /\[([\s\S]{1,2000}?)\]\s*TJ\b/g;
     let ar;
     while ((ar = arRe.exec(block)) !== null) {
-      const parts = ar[1].match(/\(([^)\\]*(?:\\.[^)\\]*)*)\)/g);
-      if (parts) parts.forEach(function(p){
-        const t = p.slice(1,-1).replace(/\\\(/g,'(').replace(/\\\)/g,')').trim();
-        if (t) texts.push(t);
-      });
+      const inner = ar[1];
+      // Literal parts
+      const litParts = inner.match(/\(([^)\\]*(?:\\.[^)\\]*)*)\)/g);
+      if (litParts) {
+        const combined = litParts.map(function(p){ return _pdfDecodeLiteral(p.slice(1,-1)); }).join('');
+        if (combined.trim()) texts.push(combined.trim());
+      }
+      // Hex parts
+      const hexParts = inner.match(/<([0-9A-Fa-f\s]+)>/g);
+      if (hexParts) {
+        const combined = hexParts.map(function(h){ return _pdfDecodeHex(h.slice(1,-1)); }).join('');
+        if (combined.trim()) texts.push(combined.trim());
+      }
     }
   }
 }
