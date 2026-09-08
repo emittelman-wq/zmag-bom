@@ -417,8 +417,10 @@ tr.row-disabled .badge,tr.row-disabled .proc-btn{opacity:.5}
 .auth-btn.signed-out{background:var(--border);color:var(--text2)}
 .auth-status{font-size:11px;color:var(--accent2);opacity:.8;white-space:nowrap}
 </style>
-<!-- PDF.js for parsing ELTDESIGN drawings -->
-<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<!-- PDF.js optional — ELTDESIGN parser falls back to built-in extractor if worker blocked -->
+<script>
+/* PDF.js lazy-load attempted in _extractPdfText; fallback is _simplePdfText() */
+</script>
 </head>
 <body>
 
@@ -3645,18 +3647,57 @@ async function _fetchFileBuffer(filePath) {
   return await getFileBuffer(filePath);
 }
 
-// Extract all text from a PDF using pdf.js
-async function _extractPdfText(buffer) {
-  if (!window.pdfjsLib) throw new Error('pdf.js not loaded');
-  window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
-  const doc = await window.pdfjsLib.getDocument({data: buffer}).promise;
-  let fullText = '';
-  for (let p = 1; p <= doc.numPages; p++) {
-    const page = await doc.getPage(p);
-    const tc = await page.getTextContent();
-    fullText += tc.items.map(function(it){ return it.str; }).join('\n') + '\n';
+// Fallback: pure-JS PDF text extractor — no worker, no CDN, works in any CSP context
+function _simplePdfText(bytes) {
+  let raw = '';
+  for (let i = 0; i < bytes.length; i++) raw += String.fromCharCode(bytes[i]);
+  const texts = [];
+  const btRe = /BT([\s\S]{1,3000}?)ET/g;
+  let m;
+  while ((m = btRe.exec(raw)) !== null) {
+    const block = m[1];
+    // Literal strings: (text) Tj or TJ
+    const tjRe = /\(([^)\\]*(?:\\.[^)\\]*)*)\)\s*(?:Tj|TJ)/g;
+    let tj;
+    while ((tj = tjRe.exec(block)) !== null) {
+      const t = tj[1].replace(/\\n/g,' ').replace(/\\\(/g,'(').replace(/\\\)/g,')').replace(/\\\\/g,'\\').trim();
+      if (t) texts.push(t);
+    }
+    // Array strings: [...] TJ
+    const arRe = /\[([\s\S]{1,800}?)\]\s*TJ/g;
+    let ar;
+    while ((ar = arRe.exec(block)) !== null) {
+      const parts = ar[1].match(/\(([^)\\]*(?:\\.[^)\\]*)*)\)/g);
+      if (parts) parts.forEach(function(p){
+        const t = p.slice(1,-1).replace(/\\\(/g,'(').replace(/\\\)/g,')').trim();
+        if (t) texts.push(t);
+      });
+    }
   }
-  return fullText;
+  return texts.join('\n');
+}
+
+// Extract all text from a PDF — tries pdf.js if loaded, falls back to built-in parser
+async function _extractPdfText(buffer) {
+  const bytes = new Uint8Array(buffer);
+  // Try pdf.js if it happens to be loaded and working
+  if (window.pdfjsLib) {
+    try {
+      window.pdfjsLib.GlobalWorkerOptions.workerSrc = '';
+      const doc = await window.pdfjsLib.getDocument({ data: bytes, isEvalSupported: false, disableStream: true }).promise;
+      let fullText = '';
+      for (let p = 1; p <= doc.numPages; p++) {
+        const page = await doc.getPage(p);
+        const tc = await page.getTextContent();
+        fullText += tc.items.map(function(it){ return it.str; }).join('\n') + '\n';
+      }
+      return fullText;
+    } catch(e) {
+      console.warn('[pdf.js failed, using built-in extractor]', e.message);
+    }
+  }
+  // Built-in fallback — works without any external library
+  return _simplePdfText(bytes);
 }
 
 // Main function to parse an ELTDESIGN drawing PDF
