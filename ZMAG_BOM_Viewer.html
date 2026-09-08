@@ -3640,28 +3640,9 @@ function _parseEltBomText(fullText) {
   return items;
 }
 
-// Fetch file as ArrayBuffer (Graph API or File System Access API)
+// Fetch file as ArrayBuffer — delegates to existing getFileBuffer() which handles Graph + FS API
 async function _fetchFileBuffer(filePath) {
-  if (_graphMode && _msalAcct) {
-    const token = await _graphToken();
-    const siteBase = 'https://graph.microsoft.com/v1.0/sites/' + _graphSiteId;
-    const encPath = encodeURIComponent(_graphDriveFolder + '/' + filePath.split(/[/\\]/).pop());
-    const url = siteBase + '/drives/' + _graphDriveId + '/root:/' + encPath + ':/content';
-    const r = await fetch(url, { headers: { Authorization: 'Bearer ' + token } });
-    if (!r.ok) throw new Error('Fetch error ' + r.status);
-    return await r.arrayBuffer();
-  }
-  if (rootDirHandle) {
-    const parts = filePath.replace(/\\/g, '/').split('/');
-    let handle = rootDirHandle;
-    for (let i = 0; i < parts.length; i++) {
-      if (!parts[i]) continue;
-      handle = await handle.getDirectoryHandle ? handle.getDirectoryHandle(parts[i]).catch(() => handle.getFileHandle(parts[i])) : handle;
-    }
-    const file = await handle.getFile();
-    return await file.arrayBuffer();
-  }
-  throw new Error('No file access');
+  return await getFileBuffer(filePath);
 }
 
 // Extract all text from a PDF using pdf.js
