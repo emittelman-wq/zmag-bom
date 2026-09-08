@@ -3674,24 +3674,44 @@ async function _fetchFileBuffer(filePath) {
   return await getFileBuffer(filePath);
 }
 
-// Fallback: pure-JS PDF text extractor — no worker, no CDN, works in any CSP context
-function _simplePdfText(bytes) {
-  let raw = '';
-  for (let i = 0; i < bytes.length; i++) raw += String.fromCharCode(bytes[i]);
-  const texts = [];
-  const btRe = /BT([\s\S]{1,3000}?)ET/g;
+// Decompress a zlib/deflate stream using the browser's built-in DecompressionStream
+async function _decompressZlib(data) {
+  // CAD PDFs use /FlateDecode which is zlib (deflate with zlib header)
+  for (const fmt of ['deflate', 'deflate-raw']) {
+    try {
+      const ds = new DecompressionStream(fmt);
+      const writer = ds.writable.getWriter();
+      const reader = ds.readable.getReader();
+      writer.write(data).catch(function(){});
+      writer.close().catch(function(){});
+      const chunks = [];
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+      }
+      const total = chunks.reduce(function(a,c){ return a+c.length; }, 0);
+      const out = new Uint8Array(total);
+      let off = 0; chunks.forEach(function(c){ out.set(c,off); off+=c.length; });
+      if (out.length > 0) return out;
+    } catch(e) { /* try next format */ }
+  }
+  return new Uint8Array(0);
+}
+
+// Extract BT/ET text tokens from a decoded content string
+function _pdfExtractBtEt(content, texts) {
+  const btRe = /BT([\s\S]{1,4000}?)ET/g;
   let m;
-  while ((m = btRe.exec(raw)) !== null) {
+  while ((m = btRe.exec(content)) !== null) {
     const block = m[1];
-    // Literal strings: (text) Tj or TJ
     const tjRe = /\(([^)\\]*(?:\\.[^)\\]*)*)\)\s*(?:Tj|TJ)/g;
     let tj;
     while ((tj = tjRe.exec(block)) !== null) {
       const t = tj[1].replace(/\\n/g,' ').replace(/\\\(/g,'(').replace(/\\\)/g,')').replace(/\\\\/g,'\\').trim();
       if (t) texts.push(t);
     }
-    // Array strings: [...] TJ
-    const arRe = /\[([\s\S]{1,800}?)\]\s*TJ/g;
+    const arRe = /\[([\s\S]{1,1000}?)\]\s*TJ/g;
     let ar;
     while ((ar = arRe.exec(block)) !== null) {
       const parts = ar[1].match(/\(([^)\\]*(?:\\.[^)\\]*)*)\)/g);
@@ -3701,6 +3721,50 @@ function _simplePdfText(bytes) {
       });
     }
   }
+}
+
+// Pure-JS PDF text extractor — handles both plain and FlateDecode-compressed streams
+async function _simplePdfText(bytes) {
+  // Build Latin-1 string for stream boundary detection (binary-safe for ASCII markers)
+  let raw = '';
+  for (let i = 0; i < bytes.length; i++) raw += String.fromCharCode(bytes[i]);
+
+  const texts = [];
+
+  // Find every stream object and process it
+  const streamMarkerRe = /<<([\s\S]{1,500}?)>>\s*stream\r?\n/g;
+  let sm;
+  const seen = new Set();
+  while ((sm = streamMarkerRe.exec(raw)) !== null) {
+    const dictStr = sm[1];
+    const dataStart = sm.index + sm[0].length;
+    if (seen.has(dataStart)) continue;
+    seen.add(dataStart);
+
+    const endIdx = raw.indexOf('\nendstream', dataStart);
+    if (endIdx < 0) continue;
+
+    const isFlateDecode = /FlateDecode/i.test(dictStr);
+    const isText = !/\/Image/i.test(dictStr);
+    if (!isText) continue;
+
+    if (isFlateDecode) {
+      // Decompress using binary byte slice (avoids Latin-1 corruption of compressed data)
+      const streamBytes = bytes.slice(dataStart, endIdx);
+      try {
+        const dec = await _decompressZlib(streamBytes);
+        let decompStr = '';
+        for (let i = 0; i < dec.length; i++) decompStr += String.fromCharCode(dec[i]);
+        _pdfExtractBtEt(decompStr, texts);
+      } catch(e) { /* skip */ }
+    } else {
+      _pdfExtractBtEt(raw.substring(dataStart, endIdx), texts);
+    }
+  }
+
+  // Also scan entire file for plain BT/ET (covers unstreamed text)
+  _pdfExtractBtEt(raw, texts);
+
   return texts.join('\n');
 }
 
@@ -3723,8 +3787,8 @@ async function _extractPdfText(buffer) {
       console.warn('[pdf.js failed, using built-in extractor]', e.message);
     }
   }
-  // Built-in fallback — works without any external library
-  return _simplePdfText(bytes);
+  // Built-in fallback — decompresses FlateDecode streams
+  return await _simplePdfText(bytes);
 }
 
 // Main function to parse an ELTDESIGN drawing PDF
