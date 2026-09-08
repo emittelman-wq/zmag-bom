@@ -3606,26 +3606,11 @@ function closeRawMat(){
 
 // Parse text extracted from PDF pages into BOM rows
 function _parseEltBomText(fullText) {
-  const lines = fullText.split(/\n/).map(s => s.trim()).filter(Boolean);
-  // Find header row containing PC NO. and P.N. and DESCRIPTION
-  let headerIdx = -1;
-  for (let i = 0; i < lines.length; i++) {
-    if (/PC\s*NO\.?/i.test(lines[i]) && /P\.N\.?/i.test(lines[i]) && /DESCRIPTION/i.test(lines[i])) {
-      headerIdx = i; break;
-    }
-    // Sometimes columns are split across adjacent lines — look for PC NO. alone
-    if (/^PC\s*NO\.?\s*$/i.test(lines[i]) && i + 2 < lines.length && /^P\.N\.?$/i.test(lines[i+1])) {
-      headerIdx = i; break;
-    }
-  }
-  // Alternative: scan all text for the table pattern (PC NO. as standalone number followed by PN/desc)
-  const items = [];
-  // Regex: line starting with an integer (1–99) optionally followed by PN, then description
-  // We scan the whole text for patterns like "1\n6910M734-001-1\nLEFT ENGINE..." or "1 6910M734-001-1 LEFT ENGINE..."
-  // Strategy: find all occurrences of a standalone integer, then collect next tokens
+  console.log('[_parseEltBomText] raw text (first 800 chars):\n', fullText.substring(0, 800));
   const allText = fullText.replace(/\r/g, '');
-  // Match lines like: "1\n<pn_or_blank>\n<desc>\n<qty>\n<material>"
-  // or: "1 6910... LEFT ... 1 PLATE..."
+  const items = [];
+
+  // ── Strategy 1: row-sequential (item#\nPN\nDESC\nQTY) ──
   const rowRe = /(?:^|\n)(\d{1,2})\n([^\n]*)\n([^\n]{5,})\n(\d+(?:\.\d+)?)\n?([^\n]*)/gm;
   let m;
   while ((m = rowRe.exec(allText)) !== null) {
@@ -3635,10 +3620,52 @@ function _parseEltBomText(fullText) {
     const qty = parseFloat(m[4]) || 1;
     const material = (m[5] || '').trim();
     if (!desc || desc.length < 3) continue;
-    // PN: if it looks like a real PN (has letters+digits), use it; else leave blank (will be auto-built)
     const pn = /[A-Z0-9]{3,}/i.test(pnRaw) && !/^(TAKE|SEE|REF|NOTE)/i.test(pnRaw) ? pnRaw : '';
     items.push({pcNo, pn, desc, qty, material});
   }
+  if (items.length > 0) { console.log('[_parseEltBomText] S1 found', items.length, 'items'); return items; }
+
+  // ── Strategy 2: PN-anchor scan (handles column-order or mixed-order text) ──
+  const lines = allText.split('\n').map(function(s){ return s.trim(); }).filter(Boolean);
+  const pnPat  = /^[A-Z0-9][A-Z0-9\/\-\.+]{2,}$/i;
+  const itemPat = /^\d{1,2}$/;
+  const qtyPat  = /^\d{1,3}(\.\d+)?$/;
+  const skipWords = /^(PC|NO|PN|P\.N|QTY|DESCRIPTION|MATERIAL|ITEM|PART|NUMBER|NOTE|SEE|REF|TAKE|REV|DWG|DATE|DRAWN|CHECKED|APPROVED|SCALE|SHEET|OF|SIZE|CAGE|FSCM|ECP)$/i;
+
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i];
+    if (!pnPat.test(l) || qtyPat.test(l) || skipWords.test(l)) continue;
+    // PN candidate found
+    let pcNo = String(items.length + 1);
+    if (i > 0 && itemPat.test(lines[i-1]) && +lines[i-1] >= 1 && +lines[i-1] <= 50) pcNo = lines[i-1];
+    // Collect description from following tokens
+    const descParts = [];
+    let qty = 1;
+    let j = i + 1;
+    while (j < lines.length && j < i + 8) {
+      const n = lines[j];
+      if (qtyPat.test(n) && +n >= 1 && +n <= 200) { qty = parseFloat(n); j++; break; }
+      if (itemPat.test(n) && +n >= 1 && +n <= 50) break;
+      if (pnPat.test(n) && !skipWords.test(n)) break;
+      descParts.push(n);
+      j++;
+    }
+    const desc = descParts.join(' ').trim();
+    if ((desc && desc.length >= 3) || l.length >= 4) {
+      items.push({ pcNo, pn: l, desc: desc || l, qty, material: '' });
+      i = j - 1;
+    }
+  }
+
+  // ── Strategy 3: space-separated rows on same line ──
+  if (items.length === 0) {
+    const spaceRowRe = /\b(\d{1,2})\s+([A-Z0-9][A-Z0-9\-]{3,})\s+([A-Z][A-Z0-9 \-\/+]{5,}?)\s+(\d{1,3})\b/g;
+    while ((m = spaceRowRe.exec(allText)) !== null) {
+      items.push({ pcNo: m[1], pn: m[2], desc: m[3].trim(), qty: parseFloat(m[4]), material: '' });
+    }
+  }
+
+  console.log('[_parseEltBomText] S2/S3 found', items.length, 'items');
   return items;
 }
 
