@@ -3896,15 +3896,22 @@ function saveVendorItems(parentPb, items) {
   if (!items || !items.length) {
     delete vendorItemsData[parentPb];
   } else {
-    // Auto-build PN for items that don't have one
+    // Store all fields in vendorItemsData so they persist to cloud and reach all users
     vendorItemsData[parentPb] = items.map(function(it) {
-      return {
-        pcNo: String(it.pcNo),
-        pn: it.pn || (parentPb + '-' + it.pcNo),
+      const entry = {
+        pcNo: String(it.pcNo || ''),
+        pn: it.pn || (parentPb + '-' + (it.pcNo || '')),
         desc: it.desc || '',
         qty: parseFloat(it.qty) || 1,
         material: it.material || ''
       };
+      if (it.price != null && it.price !== '' && !isNaN(parseFloat(it.price))) {
+        entry.price = parseFloat(it.price);
+        entry.currency = it.currency || 'ILS';
+      }
+      if (it.link) entry.link = it.link;
+      if (it.image) entry.image = it.image;
+      return entry;
     });
   }
   buyBuilt = false;
@@ -4090,12 +4097,19 @@ function _viAddRow() {
 function _viCollectRows() {
   const rows = [];
   document.querySelectorAll('#viTableBody tr').forEach(function(tr) {
-    const get = function(f) { const inp = tr.querySelector('[data-f="'+f+'"]'); return inp ? inp.value.trim() : ''; };
+    const get = function(f) {
+      const inp = tr.querySelector('[data-f="'+f+'"]');
+      if (!inp) return '';
+      // Use placeholder as fallback for pn field (auto-built PN shown as placeholder)
+      return inp.value.trim() || (f === 'pn' ? (inp.placeholder || '') : '');
+    };
     const sel = function(f) { const s = tr.querySelector('select[data-f="'+f+'"]'); return s ? s.value : 'ILS'; };
     const imgCell = tr.querySelector('[data-f="image"]');
     const price = parseFloat(get('price'));
+    const pcNo = get('pcNo');
+    const pn = get('pn');
     rows.push({
-      pcNo: get('pcNo'), pn: get('pn'), desc: get('desc'),
+      pcNo, pn, desc: get('desc'),
       qty: parseFloat(get('qty'))||1, material: get('material'),
       price: isNaN(price) ? null : price,
       currency: sel('currency'),
@@ -4103,7 +4117,8 @@ function _viCollectRows() {
       image: imgCell ? (imgCell.dataset.src || '') : ''
     });
   });
-  return rows.filter(function(r){ return r.desc || r.pn; });
+  // Keep rows that have any identifying data (pcNo, pn, or desc)
+  return rows.filter(function(r){ return r.pcNo || r.pn || r.desc; });
 }
 
 function _viSave() {
