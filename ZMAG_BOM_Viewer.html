@@ -1263,8 +1263,11 @@ function saveRawTypeOverrides() {
 let eltBuyOverrides = {}; // pb → true (ELTDesign item treated as Buy/COTS) — persisted in procData JSON
 function saveEltBuyOverrides() { saveProcToFile(); }
 // vendorItemsData: ELTDESIGN drawings that contain a sub-BOM (VENDOR ITEM CONTROL DRAWING)
-// Structure: { [eltDesignPb]: [{pcNo, pn, desc, qty, material}] }
+// Structure: { [eltDesignPb]: [{pcNo, pn, desc, qty, material, price, currency, link, image}] }
 let vendorItemsData = {};
+// _cloudVendorItemsSnapshot: last state loaded from cloud — merged into every save to prevent
+// one user's save from overwriting another user's vendor items (last-write-wins guard)
+let _cloudVendorItemsSnapshot = {};
 let anomalies = [];
 let dismissedAnomalies = {};
 const ANOMALY_DISMISS_KEY = 'zmag_anom_dismissed';
@@ -7348,7 +7351,7 @@ async function _spWriteFile() {
     paintRatePerM2: PAINT_RATE_PER_M2,
     paintLitersPerM2: PAINT_LITERS_PER_M2,
     surfaceAreas: SURFACE_AREAS,
-    vendorItems: vendorItemsData
+    vendorItems: Object.assign({}, _cloudVendorItemsSnapshot, vendorItemsData)
   }, null, 2);
   const r = await fetch(_spUploadUrl(), {
     method: 'POST',
@@ -7496,7 +7499,7 @@ function _restoreFromBackup(obj) {
   if (obj.paintRatePerM2 > 0) { PAINT_RATE_PER_M2 = obj.paintRatePerM2; savePaintSettings(); }
   if (obj.paintLitersPerM2 > 0) { PAINT_LITERS_PER_M2 = obj.paintLitersPerM2; savePaintSettings(); }
   if (obj.surfaceAreas && typeof obj.surfaceAreas==='object') { SURFACE_AREAS = obj.surfaceAreas; savePaintSettings(); }
-  if (obj.vendorItems && typeof obj.vendorItems === 'object') { Object.assign(vendorItemsData, obj.vendorItems); }
+  if (obj.vendorItems && typeof obj.vendorItems === 'object') { Object.assign(_cloudVendorItemsSnapshot, obj.vendorItems); Object.assign(vendorItemsData, obj.vendorItems); }
   if (obj.subcontractors) subData = obj.subcontractors;
   if (Array.isArray(obj.flaggedRows)) {
     flaggedRows = new Set(obj.flaggedRows.map(Number));
@@ -7556,7 +7559,7 @@ function _mergeLoadedProc(obj) {
   if (obj.paintRatePerM2 > 0) { PAINT_RATE_PER_M2 = obj.paintRatePerM2; savePaintSettings(); }
   if (obj.paintLitersPerM2 > 0) { PAINT_LITERS_PER_M2 = obj.paintLitersPerM2; savePaintSettings(); }
   if (obj.surfaceAreas && typeof obj.surfaceAreas==='object') { SURFACE_AREAS = obj.surfaceAreas; savePaintSettings(); }
-  if (obj.vendorItems && typeof obj.vendorItems === 'object') { Object.assign(vendorItemsData, obj.vendorItems); }
+  if (obj.vendorItems && typeof obj.vendorItems === 'object') { Object.assign(_cloudVendorItemsSnapshot, obj.vendorItems); Object.assign(vendorItemsData, obj.vendorItems); }
   if (obj.subcontractors) subData = obj.subcontractors;
   if (Array.isArray(obj.flaggedRows)) {
     const serverFlags = new Set(obj.flaggedRows.map(Number));
@@ -7629,7 +7632,7 @@ async function _graphWriteProcFile() {
     paintRatePerM2: PAINT_RATE_PER_M2,
     paintLitersPerM2: PAINT_LITERS_PER_M2,
     surfaceAreas: SURFACE_AREAS,
-    vendorItems: vendorItemsData
+    vendorItems: Object.assign({}, _cloudVendorItemsSnapshot, vendorItemsData)
   }, null, 2);
   const r = await fetch(url, {
     method: 'PUT',
@@ -7700,7 +7703,7 @@ async function loadProcFromGraph() {
       const savedBy = obj.savedBy ? ' (נשמר ע"י ' + obj.savedBy + ')' : '';
       setFileSyncStatus('✅ נטען מ-SharePoint' + savedBy, 'ok');
     }
-    if (obj.vendorItems && typeof obj.vendorItems === 'object') { Object.assign(vendorItemsData, obj.vendorItems); }
+    if (obj.vendorItems && typeof obj.vendorItems === 'object') { Object.assign(_cloudVendorItemsSnapshot, obj.vendorItems); Object.assign(vendorItemsData, obj.vendorItems); }
   if (obj.subcontractors) subData = obj.subcontractors;
     if (obj.buyNotes) {
       buyNotes = obj.buyNotes;
@@ -7788,7 +7791,7 @@ async function _writeProcFile() {
     paintRatePerM2: PAINT_RATE_PER_M2,
     paintLitersPerM2: PAINT_LITERS_PER_M2,
     surfaceAreas: SURFACE_AREAS,
-    vendorItems: vendorItemsData
+    vendorItems: Object.assign({}, _cloudVendorItemsSnapshot, vendorItemsData)
   }, null, 2);
   const w = await _procFileHandle.createWritable();
   await w.write(payload); await w.close();
