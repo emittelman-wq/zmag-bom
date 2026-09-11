@@ -1488,7 +1488,7 @@ function getItemUnitCost(item, bomIdx) {
   if (item.type === 'ELTDesign') {
     const pb = item.pb || item.pn;
     const procs = procData[pb] || [];
-    return procs.reduce(function(sum, p) {
+    let cost = procs.reduce(function(sum, p) {
       if (!p.type || !p.qty) return sum;
       const t = PROC_TYPES.find(function(x){ return x.id === p.type; });
       if (!t || !t.cost) return sum;
@@ -1496,6 +1496,18 @@ function getItemUnitCost(item, bomIdx) {
       const qty = normProcQty(p.qty, p.unit, t.costUnit);
       return sum + qty * t.cost;
     }, 0);
+    // Add vendor sub-items purchase cost (per unit of this ELTDesign assembly)
+    const _vi = vendorItemsData[pb];
+    if (Array.isArray(_vi) && _vi.length > 0) {
+      _vi.forEach(function(vi) {
+        const vpn = vi.pn || (pb + '-' + vi.pcNo);
+        const _e = getPriceEntry(vpn);
+        const _p = _e ? toILS(_e.p, _e.currency || 'ILS')
+                 : (vi.price != null ? toILS(vi.price, vi.currency || 'ILS') : 0);
+        cost += _p * (parseFloat(vi.qty) || 1);
+      });
+    }
+    return cost;
   }
   // ── Raw material items (S, T, SA, D, TR, TQ …) ────────────────────────────
   {
@@ -7499,7 +7511,7 @@ function _restoreFromBackup(obj) {
   if (obj.paintRatePerM2 > 0) { PAINT_RATE_PER_M2 = obj.paintRatePerM2; savePaintSettings(); }
   if (obj.paintLitersPerM2 > 0) { PAINT_LITERS_PER_M2 = obj.paintLitersPerM2; savePaintSettings(); }
   if (obj.surfaceAreas && typeof obj.surfaceAreas==='object') { SURFACE_AREAS = obj.surfaceAreas; savePaintSettings(); }
-  if (obj.vendorItems && typeof obj.vendorItems === 'object') { Object.assign(_cloudVendorItemsSnapshot, obj.vendorItems); Object.assign(vendorItemsData, obj.vendorItems); }
+  if (obj.vendorItems && typeof obj.vendorItems === 'object') { Object.assign(_cloudVendorItemsSnapshot, obj.vendorItems); Object.assign(vendorItemsData, obj.vendorItems); if (Object.keys(obj.vendorItems).length > 0) buyBuilt = false; }
   if (obj.subcontractors) subData = obj.subcontractors;
   if (Array.isArray(obj.flaggedRows)) {
     flaggedRows = new Set(obj.flaggedRows.map(Number));
@@ -7559,7 +7571,7 @@ function _mergeLoadedProc(obj) {
   if (obj.paintRatePerM2 > 0) { PAINT_RATE_PER_M2 = obj.paintRatePerM2; savePaintSettings(); }
   if (obj.paintLitersPerM2 > 0) { PAINT_LITERS_PER_M2 = obj.paintLitersPerM2; savePaintSettings(); }
   if (obj.surfaceAreas && typeof obj.surfaceAreas==='object') { SURFACE_AREAS = obj.surfaceAreas; savePaintSettings(); }
-  if (obj.vendorItems && typeof obj.vendorItems === 'object') { Object.assign(_cloudVendorItemsSnapshot, obj.vendorItems); Object.assign(vendorItemsData, obj.vendorItems); }
+  if (obj.vendorItems && typeof obj.vendorItems === 'object') { Object.assign(_cloudVendorItemsSnapshot, obj.vendorItems); Object.assign(vendorItemsData, obj.vendorItems); if (Object.keys(obj.vendorItems).length > 0) buyBuilt = false; }
   if (obj.subcontractors) subData = obj.subcontractors;
   if (Array.isArray(obj.flaggedRows)) {
     const serverFlags = new Set(obj.flaggedRows.map(Number));
@@ -7703,7 +7715,7 @@ async function loadProcFromGraph() {
       const savedBy = obj.savedBy ? ' (נשמר ע"י ' + obj.savedBy + ')' : '';
       setFileSyncStatus('✅ נטען מ-SharePoint' + savedBy, 'ok');
     }
-    if (obj.vendorItems && typeof obj.vendorItems === 'object') { Object.assign(_cloudVendorItemsSnapshot, obj.vendorItems); Object.assign(vendorItemsData, obj.vendorItems); }
+    if (obj.vendorItems && typeof obj.vendorItems === 'object') { Object.assign(_cloudVendorItemsSnapshot, obj.vendorItems); Object.assign(vendorItemsData, obj.vendorItems); if (Object.keys(obj.vendorItems).length > 0) buyBuilt = false; }
   if (obj.subcontractors) subData = obj.subcontractors;
     if (obj.buyNotes) {
       buyNotes = obj.buyNotes;
