@@ -1601,6 +1601,22 @@ function _isBuyRawMat(item) {
   return !!(rawMatData[item.pb || item.pn]);
 }
 
+// Returns the vendor sub-items purchase cost per unit of an ELTDesign assembly.
+// Used by computeTreeCosts to bucket vendor cost into COTS rather than mfg.
+function _vendorItemsCostPerUnit(pb) {
+  const _vi = vendorItemsData[pb];
+  if (!Array.isArray(_vi) || _vi.length === 0) return 0;
+  let cost = 0;
+  _vi.forEach(function(vi) {
+    const vpn = vi.pn || (pb + '-' + vi.pcNo);
+    const _e = getPriceEntry(vpn);
+    const _p = _e ? toILS(_e.p, _e.currency || 'ILS')
+             : (vi.price != null ? toILS(vi.price, vi.currency || 'ILS') : 0);
+    cost += _p * (parseFloat(vi.qty) || 1);
+  });
+  return cost;
+}
+
 function computeTreeCosts() {
   const n = BOM.length;
   unitCosts      = new Array(n).fill(0);
@@ -1628,8 +1644,13 @@ function computeTreeCosts() {
 
     // Own item contribution
     const ownExt = (unitCosts[i] || 0) * (BOM[i].tq || 0);
-    if (BOM[i].type === 'ELTDesign' && !eltBuyOverrides[BOM[i].pb||BOM[i].pn])      mfg  += ownExt;
-    else if (_isBuyRawMat(BOM[i]))        rawm += ownExt;
+    if (BOM[i].type === 'ELTDesign' && !eltBuyOverrides[BOM[i].pb||BOM[i].pn]) {
+      // Split: process cost → mfg, vendor sub-items purchase cost → cots
+      const _vCostPU = _vendorItemsCostPerUnit(BOM[i].pb || BOM[i].pn);
+      const _vExt = _vCostPU * (BOM[i].tq || 0);
+      mfg  += Math.max(0, ownExt - _vExt);
+      cots += _vExt;
+    } else if (_isBuyRawMat(BOM[i]))      rawm += ownExt;
     else                                   cots += ownExt;
 
     for (let j = i + 1; j < n; j++) {
@@ -1637,8 +1658,12 @@ function computeTreeCosts() {
       const ext = (unitCosts[j] || 0) * (BOM[j].tq || 0);
       tsum += ext;
       ssum += itemSetupCost[j];
-      if (BOM[j].type === 'ELTDesign' && !eltBuyOverrides[BOM[j].pb||BOM[j].pn])     mfg  += ext;
-      else if (_isBuyRawMat(BOM[j]))       rawm += ext;
+      if (BOM[j].type === 'ELTDesign' && !eltBuyOverrides[BOM[j].pb||BOM[j].pn]) {
+        const _vCPU = _vendorItemsCostPerUnit(BOM[j].pb || BOM[j].pn);
+        const _vE = _vCPU * (BOM[j].tq || 0);
+        mfg  += Math.max(0, ext - _vE);
+        cots += _vE;
+      } else if (_isBuyRawMat(BOM[j]))     rawm += ext;
       else                                  cots += ext;
     }
     treeCosts[i]     = tsum;
@@ -5580,8 +5605,8 @@ function _populateBuyTab(force){
         const srcText = r._vendorParent
           ? ('ספק עבור '+r._vendorParent+(r._material?' | '+r._material.substring(0,40):''))
           : ((pentry&&pentry.src) ? escHtml(pentry.src) : '');
-        const linkUrl = (buyNotes[r.pb]&&buyNotes[r.pb].link) ? buyNotes[r.pb].link : '';
-        const imgSrc = (buyNotes[r.pb]&&buyNotes[r.pb].image) ? buyNotes[r.pb].image : '';
+        const linkUrl = r._link || (buyNotes[r.pb]&&buyNotes[r.pb].link) || '';
+        const imgSrc = r._image || (buyNotes[r.pb]&&buyNotes[r.pb].image) || '';
         const imgHtml = imgSrc
           ? '<img src="'+escHtml(imgSrc)+'" style="width:32px;height:24px;object-fit:cover;border-radius:3px;cursor:pointer;vertical-align:middle;margin-right:4px" onclick="_viZoomImg(this.src)" title="לחץ להגדלה">'
           : '';
@@ -6433,6 +6458,8 @@ function buildBuyData() {
       const existing = map.get(vpb);
       if (existing) {
         existing.totalQty += vi.qty * parentTq;
+        if (!existing._link && vi.link) existing._link = vi.link;
+        if (!existing._image && vi.image) existing._image = vi.image;
       } else {
         buyData.push({
           pb: vpb, pn: vpb,
@@ -6442,8 +6469,11 @@ function buildBuyData() {
           totalQty: vi.qty * parentTq,
           _vendorParent: eltPb,
           _material: vi.material || '',
-          _pcNo: vi.pcNo
+          _pcNo: vi.pcNo,
+          _link: vi.link || '',
+          _image: vi.image || ''
         });
+        map.set(vpb, buyData[buyData.length - 1]);
       }
     });
   });
