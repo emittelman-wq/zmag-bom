@@ -1646,7 +1646,9 @@ function computeTreeCosts() {
     const ownExt = (unitCosts[i] || 0) * (BOM[i].tq || 0);
     if (BOM[i].type === 'ELTDesign' && !eltBuyOverrides[BOM[i].pb||BOM[i].pn]) {
       // Split: process cost → mfg, vendor sub-items purchase cost → cots
-      const _vCostPU = _vendorItemsCostPerUnit(BOM[i].pb || BOM[i].pn);
+      // isRowExcluded check: if item is filtered out its unitCosts[i]=0 but
+      // _vendorItemsCostPerUnit has no visibility into exclusion — guard here.
+      const _vCostPU = isRowExcluded(i) ? 0 : _vendorItemsCostPerUnit(BOM[i].pb || BOM[i].pn);
       const _vExt = _vCostPU * (BOM[i].tq || 0);
       mfg  += Math.max(0, ownExt - _vExt);
       cots += _vExt;
@@ -1659,7 +1661,7 @@ function computeTreeCosts() {
       tsum += ext;
       ssum += itemSetupCost[j];
       if (BOM[j].type === 'ELTDesign' && !eltBuyOverrides[BOM[j].pb||BOM[j].pn]) {
-        const _vCPU = _vendorItemsCostPerUnit(BOM[j].pb || BOM[j].pn);
+        const _vCPU = isRowExcluded(j) ? 0 : _vendorItemsCostPerUnit(BOM[j].pb || BOM[j].pn);
         const _vE = _vCPU * (BOM[j].tq || 0);
         mfg  += Math.max(0, ext - _vE);
         cots += _vE;
