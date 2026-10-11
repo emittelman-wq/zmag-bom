@@ -8395,8 +8395,13 @@ function saveTypesManager() {
   // Flush any he/label sync before saving
   PROC_TYPES.forEach(function(pt){ if (!pt.he && pt.label) pt.he = pt.label; });
   try { localStorage.setItem(TYPES_STORAGE_KEY, JSON.stringify(PROC_TYPES)); } catch(e) {}
+  // Save to cloud/SharePoint so ALL users get the updated process costs
+  saveProcToFile();
+  // Recompute all costs with the new rates and refresh the UI
+  computeTreeCosts();
+  refreshCostCells();
   const warn = document.getElementById('tmWarn');
-  if (warn) { warn.textContent = '✓ נשמר'; setTimeout(()=>{ warn.textContent=''; }, 1500); }
+  if (warn) { warn.textContent = '✓ נשמר ומחושב מחדש'; setTimeout(function(){ warn.textContent=''; }, 2000); }
   closeTypesManager();
 }
 
