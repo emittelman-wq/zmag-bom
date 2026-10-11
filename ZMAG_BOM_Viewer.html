@@ -8878,7 +8878,8 @@ async function exportBomExcel() {
       ucost:  Math.round(rawm * 100) / 100,
       tcost:     Math.round(setup* 100) / 100,
       paintCost: Math.round((treePaintCost[idx]||0) * pQty * 100) / 100,
-      pcost:     Math.round((mfg + cots + rawm + setup + (treePaintCost[idx]||0)*pQty) * 100) / 100,
+      // Project ₪ = mfg + cots + rawm + paint (NRE/setup excluded — shown separately)
+      pcost:     Math.round((mfg + cots + rawm + (treePaintCost[idx]||0)*pQty) * 100) / 100,
     };
   }
 
@@ -8975,7 +8976,8 @@ async function exportBomExcel() {
 
   // ── Sheet 0: סיכום מנהלים (Executive Summary) ─────────────────────────────
   const _sumHours = Math.round((cumHours[0] || 0) * pQty * 100) / 100;
-  const _sumTotalFinal = Math.round((_sumNREFinal + _sumREFinal + _sumCotsFinalUsed + _sumRawmFinalXls + _sumPaintFinalXls) * 100) / 100;
+  // Total excludes NRE (shown separately in summary); COTS includes vendor sub-items via treeCotsCost
+  const _sumTotalFinal = Math.round((_sumREFinal + _sumCotsFinalUsed + _sumRawmFinalXls + _sumPaintFinalXls) * 100) / 100;
   // Cross-sheet formula link row trackers (set inside ws3/ws4/ws5 try blocks)
   let _ws3TotalRowNum, _ws4TotalRowNum, _ws5TotalRowNum;
 
@@ -9008,15 +9010,21 @@ async function exportBomExcel() {
   _w0Row('פריטים מוצגים', _xlsVisible.size);
   ws0.addRow([]);
   _w0Title('פירוט עלויות', 'FF2D4A8A');
-  _w0Row('🔧 RE - ייצור (עבודה חוזרת) ₪', _sumREFinal,  false, 'FFDBEAFE');
-  _w0Row('⚙ NRE - סטאפ / הגדרות ₪',     _sumNREFinal, false, 'FFFEF3C7');
-  _w0Row('🛒 רכש (Buy items) ₪',           _sumCotsFinal, false, 'FFDCFCE7');
-  _w0Row('🧱 חומרי גלם (ח"ג) ₪',          _sumRawmFinalXls, false, 'FFEDE9FE');
-  if (_sumPaintFinalXls > 0) _w0Row('🎨 עלות צבע (חומר) ₪',       _sumPaintFinalXls, false, 'FFF3E8FF');
-  _w0Row('💰 סה"כ עלות פרויקט ₪',   _sumTotalFinal, true, 'FF1E3A5F');
+  _w0Row('🔧 RE - ייצור (עבודה חוזרת) ₪',    _sumREFinal,       false, 'FFDBEAFE');
+  _w0Row('🛒 רכש — COTS + ספק ₪',             _sumCotsFinalUsed, false, 'FFDCFCE7');
+  _w0Row('🧱 חומרי גלם (ח"ג) ₪',              _sumRawmFinalXls,  false, 'FFEDE9FE');
+  if (_sumPaintFinalXls > 0) _w0Row('🎨 עלות צבע (חומר) ₪', _sumPaintFinalXls, false, 'FFF3E8FF');
+  _w0Row('💰 סה"כ עלות (ללא NRE) ₪',          _sumTotalFinal,    true,  'FF1E3A5F');
   { const _gtRow = ws0.getRow(ws0.rowCount);
     _gtRow.eachCell(function(c){ c.font={bold:true,color:{argb:'FFFFFFFF'}}; c.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FF1E3A5F'}}; }); }
-  if (pQty > 1) _w0Row('מחיר לערכה בודדת ₪', Math.round(_sumTotalFinal / pQty * 100) / 100, false, 'FFEFF6FF');
+  if (pQty > 1) _w0Row('מחיר לערכה בודדת (ללא NRE) ₪', Math.round(_sumTotalFinal / pQty * 100) / 100, false, 'FFEFF6FF');
+  // NRE shown separately — one-time cost, NOT included in recurring unit cost
+  ws0.addRow([]);
+  _w0Title('⚙ עלות NRE חד-פעמית', 'FF92400E');
+  _w0Row('⚙ NRE - סטאפ / הגדרות ₪ (חד-פעמי, אינו כלול בסה"כ)', _sumNREFinal, false, 'FFFEF3C7');
+  { const _nreRow = ws0.getRow(ws0.rowCount);
+    _nreRow.getCell(1).font = {italic:true};
+    _nreRow.getCell(2).font = {italic:true}; }
   ws0.addRow([]);
   _w0Title('שעות עבודה', 'FF374151');
   _w0Row('שעות כוללות (שע"א)', _sumHours);
@@ -9039,8 +9047,8 @@ async function exportBomExcel() {
     if (!_xlsVisible.has(idx)) return;
     const d = getRowData(item, idx);
     const r = ws1.addRow(d);
-    // pcost (col 18 = R): lcost(M)+bcost(N)+ucost(O)+paintCost(P)+tcost(Q) — all tree-accumulated, no double-counting
-    r.getCell(18).value = {formula:'=M'+_ws1DataRow+'+N'+_ws1DataRow+'+O'+_ws1DataRow+'+P'+_ws1DataRow+'+Q'+_ws1DataRow, result:d.pcost};
+    // pcost (col 18 = R): lcost(M)+bcost(N)+ucost(O)+paintCost(P) — NRE/setup (col Q) excluded from Project total
+    r.getCell(18).value = {formula:'=M'+_ws1DataRow+'+N'+_ws1DataRow+'+O'+_ws1DataRow+'+P'+_ws1DataRow, result:d.pcost};
     _ws1DataRow++;
     // Zebra + type colour
     const bgArgb = idx % 2 === 0
@@ -9117,8 +9125,8 @@ async function exportBomExcel() {
       paintCost: d.paintCost,
       pcost:     d.pcost,
     });
-    // pcost (col 17 = Q): lcost(L)+bcost(M)+ucost(N)+paintCost(O)+tcost(P) — all tree-accumulated
-    r.getCell(17).value = {formula:'=L'+_ws2DataRow+'+M'+_ws2DataRow+'+N'+_ws2DataRow+'+O'+_ws2DataRow+'+P'+_ws2DataRow, result:d.pcost};
+    // pcost (col 17 = Q): lcost(L)+bcost(M)+ucost(N)+paintCost(O) — NRE/setup (col P) excluded from Project total
+    r.getCell(17).value = {formula:'=L'+_ws2DataRow+'+M'+_ws2DataRow+'+N'+_ws2DataRow+'+O'+_ws2DataRow, result:d.pcost};
     _ws2RowMap[idx]   = _ws2DataRow;
     _ws2RowStore[idx] = r;
     _ws2DataRow++;
@@ -9406,6 +9414,61 @@ async function exportBomExcel() {
         r4.getCell(c).alignment = {horizontal:'right'};
         r4.getCell(c).numFmt = '#,##0.00';
       }
+    });
+    // ── Add vendor sub-items (from ELTDesign vendorItemsData) ─────────────────
+    // Aggregate parentTQ per ELTDesign pb across all visible BOM rows
+    const _viParentMap = new Map(); // pb → {tq, pn}
+    _xlsVisible.forEach(function(idx) {
+      const item = BOM[idx];
+      if (item.type !== 'ELTDesign') return;
+      const pb = item.pb || item.pn;
+      if (eltBuyOverrides[pb]) return; // already treated as COTS above
+      if (!vendorItemsData[pb] || !vendorItemsData[pb].length) return;
+      if (!_viParentMap.has(pb)) _viParentMap.set(pb, {tq: 0, pn: item.pn || pb});
+      _viParentMap.get(pb).tq += (item.tq || 0);
+    });
+    _viParentMap.forEach(function(parent, pb) {
+      const vis = vendorItemsData[pb];
+      if (!Array.isArray(vis)) return;
+      vis.forEach(function(vi, viIdx) {
+        const runNum = String(viIdx + 1).padStart(2, '0');
+        const viPN   = parent.pn + '-' + runNum;
+        const vpn    = vi.pn || (pb + '-' + vi.pcNo);
+        const ent    = getPriceEntry(vpn);
+        const unitPriceILS = ent ? toILS(ent.p, ent.currency || 'ILS')
+                           : (vi.price != null ? toILS(vi.price, vi.currency || 'ILS') : 0);
+        const viQty  = Math.round((vi.qty || 1) * parent.tq * pQty * 100) / 100;
+        const viTotal= Math.round(unitPriceILS * viQty * 100) / 100;
+        buy4TotalCost += viTotal;
+        const viLink = vi.link || '';
+        const rVI = ws4.addRow({
+          pb:        pb,
+          pn:        viPN,
+          desc:      vi.desc || '',
+          cat:       'ספק',
+          mf:        '',
+          uom:       'EA',
+          qty:       viQty,
+          unitPrice: Math.round(unitPriceILS * 100) / 100,
+          currency:  vi.currency || (ent ? (ent.currency||'ILS') : 'ILS'),
+          totalCost: viTotal,
+          notes:     'עבור ' + parent.pn,
+          link:      viLink,
+        });
+        rVI.getCell(10).value = {formula:'=G'+buy4DataRow+'*H'+buy4DataRow, result:viTotal};
+        if (viLink) {
+          rVI.getCell(12).value = {text: viLink, hyperlink: viLink};
+          rVI.getCell(12).font  = {color:{argb:'FF2563EB'}, underline:true};
+        }
+        buy4DataRow++;
+        // Pink zebra for vendor rows to visually distinguish from regular COTS
+        const bgVI = buy4DataRow % 2 === 0 ? 'FFFCE7F3' : 'FFFDF2F8';
+        rVI.eachCell(function(cell){ cell.fill={type:'pattern',pattern:'solid',fgColor:{argb:bgVI}}; });
+        for (let c = 7; c <= 10; c++) {
+          rVI.getCell(c).alignment = {horizontal:'right'};
+          rVI.getCell(c).numFmt = '#,##0.00';
+        }
+      });
     });
     // Total row with SUM formula for totalCost (col 10 = J)
     const buyTotal4 = ws4.addRow({pb:'סה"כ'});
